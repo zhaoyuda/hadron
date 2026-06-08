@@ -208,10 +208,6 @@ scripts/
 - **Dark theme** — GitHub-dark palette (`#0d1117` background).
 - **Skills over UI** — complex config (kernels, onboarding) is handled by Claude Code skills, keeping the UI simple.
 
-## Acknowledgements
-
-Hadron began from [claude-squad](https://github.com/smtg-ai/claude-squad) (MIT) and was rebuilt as a web app. Thanks to that project and its contributors for the original inspiration.
-
 ## License
 
 [MIT](LICENSE) © Yuda Zhao

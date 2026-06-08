@@ -69,8 +69,7 @@ Goal: a friend can `git clone` → `claude` → be productive, with no tribal kn
 
 ### P0 — blockers (can't ship without)
 - [x] Ship skills inside the repo — redesigned CLI-driven skill set (`hadron-setup`, `hadron-whoami`, `hadron-spawn`, `hadron-artifacts`, `hadron-notebook-kernel`) now in `hadron/.claude/skills/`.
-- [x] Delete Claude-Squad legacy tree (commit 2ae1d69).
-- [x] Resolve license — MIT (LICENSE.md + README); deleted stale claude-squad CONTRIBUTING/CLA + Go CI workflows.
+- [x] Resolve license — MIT (LICENSE + README).
 - [x] Fix vim/TUI state false-positive — `#{alternate_on}` now fetched and threaded into `detectState`; alt-screen short-circuits blocked/done heuristics (except Claude's own prompt editor). `blocked` has ≥2-poll hysteresis; stale `blocked` is cleared when a non-agent process takes the pane. Covered by `altscreen-*` fixtures + `test-state-machine.js`.
 - [x] Fix transient `done` false-positive + sluggish working detection — `working → done` now requires ≥2 consecutive shell-foreground reads (rides out tool-spawn blips). Working indicators are split strong (tool/agents/shells → trusted immediately, fixing slow idle→working) vs stale (thinking/streaming/compacting → still gated on content-change). Transition logic extracted into a pure `nextState` reducer with unit tests.
 - [x] Preflight checks — `scripts/setup-check.js` + `npm run setup:check` verify node>=18, tmux>=3, deps, free port, Claude Code.

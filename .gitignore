@@ -1,8 +1,6 @@
 .idea
 .aider*
-claude-squad
 .DS_Store
-cs
 .env
 .env.*
 node_modules/
