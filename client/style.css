@@ -747,6 +747,18 @@ html, body {
   align-items: center;
   gap: 4px;
 }
+.wh-tab-i {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+.wh-tab-i svg { display: block; }
+.wh-tab-label {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .wh-tab-x {
   font-size: 12px;
   opacity: 0;

@@ -98,6 +98,7 @@ Daily-workflow wins; lay groundwork for the moat.
 - [ ] **Incremental `app.js` split** (3803-line monolith) — start with the `ui-sync` module, then terminal / artifacts / deck / menus. Each extraction green on e2e before the next.
 - [ ] **URL artifact type** (Sheets / Notion / Slack links) — cheap, frequently useful.
 - [ ] **Group state roll-up** — a collapsed group reflects its most-urgent child state (glow "blocked" if any member is). Cheap triage win, on-thesis.
+- [ ] **UI polish** — (a) HTML *file* artifacts join the mtime auto-reload (iframe artifacts are currently excluded; live marimo/jupyter keep their own `--watch`); (b) tab labels truncate (max-width + ellipsis + hover title) and gain a file-type icon; (c) redesign file-type icons — distinct inline-SVG glyphs for md / sql / marimo / jupyter / csv / py / html / json, letter fallback for the long tail; (d) `hadron-artifacts` skill advises short labels.
 - [ ] **Harden fragile state-detector regexes** (English-keyword/glyph-dependent, version-fragile spinner). Carried from v0.6 P2.
 
 ## v0.8 — The moat: artifact as a review surface

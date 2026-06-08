@@ -25,6 +25,8 @@ hadron artifacts add report.md analysis/summary.csv
 
 Paths are workspace-relative (or absolute). Duplicates are ignored automatically.
 
+Keep artifact **labels concise** — a few words at most. The file type is already shown by an icon in the tab, and long labels get truncated in the tab bar, so a short, scannable name reads best.
+
 ## See what's attached
 
 ```bash

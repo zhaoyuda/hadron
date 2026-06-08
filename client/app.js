@@ -553,7 +553,14 @@ function renderWorkHeader() {
     tabsHtml += `<div class="wh-tab${termActive}" data-tab="terminal">Primary</div>`;
     openTabs.forEach((tab) => {
       const isActive = !noHighlight && activeTab === tab.id ? " active" : "";
-      tabsHtml += `<div class="wh-tab wh-tab-art${isActive}" data-tab="${tab.id}"><span>${esc(tab.label)}</span><span class="wh-tab-x" data-close-tab="${tab.id}">×</span></div>`;
+      let iconHtml = "";
+      if (tab.type === "url") {
+        iconHtml = `<span class="wh-tab-i">${URL_TAB_ICON}</span>`;
+      } else if (tab.value) {
+        const fname = tab.value.split("/").pop();
+        if (fname) iconHtml = `<span class="wh-tab-i">${fileIcon(fname, 14)}</span>`;
+      }
+      tabsHtml += `<div class="wh-tab wh-tab-art${isActive}" data-tab="${tab.id}" title="${esc(tab.label)}">${iconHtml}<span class="wh-tab-label">${esc(tab.label)}</span><span class="wh-tab-x" data-close-tab="${tab.id}">×</span></div>`;
     });
   }
 
@@ -881,11 +888,11 @@ async function showArtifactInContainer(container, session, tabId) {
     if (oldEntry?.el?.parentNode) oldEntry.el.parentNode.removeChild(oldEntry.el);
     artifactCache.delete(oldest);
   }
-  artifactCache.set(key, { el: artEl, mtime: null, hasIframe: false });
+  artifactCache.set(key, { el: artEl, mtime: null, hasIframe: false, htmlFile: false });
 
-  renderArtifactView(artEl, art, (mtime, hasIframe) => {
+  renderArtifactView(artEl, art, (mtime, hasIframe, htmlFile = false) => {
     const entry = artifactCache.get(key);
-    if (entry) { entry.mtime = mtime; entry.hasIframe = hasIframe; }
+    if (entry) { entry.mtime = mtime; entry.hasIframe = hasIframe; entry.htmlFile = htmlFile; }
   });
 }
 
@@ -934,6 +941,23 @@ function reloadCurrentArtifact() {
   const key = `${session.id}:${activeTab}`;
   const cached = artifactCache.get(key);
   if (cached?.hasIframe) return;
+  // Static HTML file: reload the iframe in-place with a fresh cache-buster
+  // (keep the cache entry; just refetch the new mtime and re-point src).
+  if (cached?.htmlFile) {
+    const idx = parseInt(activeTab.split(":")[1]);
+    const art = session.artifacts?.[idx];
+    if (art && cached.el) {
+      fetch(`/api/file?path=${encodeURIComponent(art.value)}`, { method: "HEAD" })
+        .then((r) => r.ok ? r.headers.get("X-File-Mtime") : null)
+        .catch(() => null)
+        .then((mtime) => {
+          if (reloadHTMLIframe(cached.el, art.value, mtime)) {
+            cached.mtime = mtime;
+          }
+        });
+      return;
+    }
+  }
   // Close vim if open on the cached element
   if (cached?.el) closeVimEditor(cached.el);
   if (cached?.el?.parentNode) cached.el.parentNode.removeChild(cached.el);
@@ -1005,6 +1029,7 @@ function renderPaneContent(pane, tabId, session) {
           .then((r) => r.ok ? r.text() : Promise.reject("not found"))
           .then((text) => {
             if (isMarimoNotebook(text, art.label || art.value)) {
+              if (noteMarimoNotebook(art.value)) renderWorkHeader();
               renderMarimoNotebook(pane, text, art.value);
             } else if (isCSVFile(art.value)) {
               renderCSVTable(pane, text, art.value);
@@ -1117,13 +1142,27 @@ function renderMarkdownArtifact(container, text, filePath) {
   container.innerHTML = `<div class="md-toggle" onclick="toggleEditMode(this.parentElement)">Preview <span class="md-toggle-key">${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+Shift+V</span></div><div class="md-preview">${html}</div>`;
 }
 
-function renderHTMLArtifact(container, filePath) {
+function renderHTMLArtifact(container, filePath, mtime) {
   container.style.cssText = "position:relative;width:100%;height:100%;overflow:hidden;";
+  container.dataset.htmlPath = filePath;
   const iframe = document.createElement("iframe");
-  iframe.src = `/api/file?path=${encodeURIComponent(filePath)}`;
+  const bust = mtime ? `&_=${encodeURIComponent(mtime)}` : "";
+  iframe.src = `/api/file?path=${encodeURIComponent(filePath)}${bust}`;
   iframe.style.cssText = "position:absolute;top:0;left:0;width:100%;height:100%;border:none;background:#fff;border-radius:4px;";
   iframe.sandbox = "allow-scripts allow-same-origin";
+  iframe.dataset.htmlIframe = "1";
   container.appendChild(iframe);
+}
+
+// Re-set the HTML artifact iframe src with a fresh cache-buster (in-place
+// reload — no DOM teardown, no flash of the cache entry being evicted).
+function reloadHTMLIframe(el, filePath, mtime) {
+  if (!el) return false;
+  const iframe = el.querySelector('iframe[data-html-iframe="1"]');
+  if (!iframe) return false;
+  const bust = mtime ? `&_=${encodeURIComponent(mtime)}` : "";
+  iframe.src = `/api/file?path=${encodeURIComponent(filePath)}${bust}`;
+  return true;
 }
 
 // Track active vim editor instances: container -> { term, fitAddon, ws, shellName, resizeObserver }
@@ -1436,8 +1475,18 @@ function renderArtifactView(container, artifact, onMeta) {
     if (onMeta) onMeta(null, true);
   } else if (isHTMLFile(artifact.value)) {
     container.dataset.artValue = "";
-    renderHTMLArtifact(container, artifact.value);
-    if (onMeta) onMeta(null, true);
+    // Static HTML file: render as iframe but fetch mtime so the poller can
+    // cache-bust-reload it on disk change (live marimo/jupyter iframes are
+    // proxy URLs and handle their own refresh — not this path).
+    fetch(`/api/file?path=${encodeURIComponent(artifact.value)}`, { method: "HEAD" })
+      .then((r) => r.ok ? r.headers.get("X-File-Mtime") : null)
+      .catch(() => null)
+      .then((mtime) => {
+        renderHTMLArtifact(container, artifact.value, mtime);
+        // hasIframe=false so the poller tracks it; htmlFile=true so reload
+        // re-sets the iframe src instead of destroying the cache entry.
+        if (onMeta) onMeta(mtime, false, true);
+      });
   } else {
     container.dataset.artValue = "";
     container.innerHTML = `<div class="artifact-file-loading">Loading...</div>`;
@@ -1450,6 +1499,7 @@ function renderArtifactView(container, artifact, onMeta) {
       .then(({ text, mtime }) => {
         const isIframe = isMarimoNotebook(text, artifact.label || artifact.value) || isJupyterNotebook(artifact.value);
         if (isMarimoNotebook(text, artifact.label || artifact.value)) {
+          if (noteMarimoNotebook(artifact.value)) renderWorkHeader();
           renderMarimoNotebook(container, text, artifact.value);
         } else if (isCSVFile(artifact.value)) {
           renderCSVTable(container, text, artifact.value);
@@ -1515,7 +1565,7 @@ function getOpenTabs(session) {
     const tabId = `artifact:${i}`;
     if (open.has(tabId) || activeTab === tabId) {
       const label = a.label || (a.type === "url" ? new URL(a.value).hostname : a.value.split("/").pop());
-      tabs.push({ id: tabId, label });
+      tabs.push({ id: tabId, label, type: a.type, value: a.value });
     }
   });
 
@@ -2597,6 +2647,7 @@ const FILE_ICON_DEFS = {
   md:       { color: "#519aba", letter: "M" },
   markdown: { color: "#519aba", letter: "M" },
   py:       { color: "#3572A5", letter: "py" },
+  marimo:   { color: "#2ecc71", letter: "py" },
   ipynb:    { color: "#e37933", letter: "J" },
   csv:      { color: "#89e051", letter: "," },
   sql:      { color: "#e6c07b", letter: "S" },
@@ -2636,9 +2687,53 @@ const FILE_ICON_DEFS = {
   xls:      { color: "#207245", letter: "X" },
 };
 
+const URL_TAB_ICON = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M6.6 9.4l2.8-2.8M6.9 4.6l.9-.9a2.4 2.4 0 013.4 3.4l-1.1 1.1M9.1 11.4l-.9.9a2.4 2.4 0 01-3.4-3.4l1.1-1.1" stroke="#58a6ff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+// Marimo notebooks are plain `.py` and only detectable by content. Once an
+// artifact has been classified at render time (via isMarimoNotebook), we remember
+// its basename so the file-type icon upgrades from generic Python to marimo.
+const marimoNameCache = new Set();
+function noteMarimoNotebook(pathOrName) {
+  const base = (pathOrName || "").toLowerCase().split("/").pop();
+  if (!base || marimoNameCache.has(base)) return false;
+  marimoNameCache.add(base);
+  return true;
+}
+
+// Hand-drawn distinct glyphs for high-value file types. Each returns the inner
+// SVG markup (children of a 16x16 viewBox). The long tail falls back to a
+// colored letter-in-document below.
+const FILE_ICON_GLYPHS = {
+  // Markdown — official Markdown mark (markdown-mark, CC0), scaled from 24→16
+  md: (c) => `<g transform="scale(.6667)"><path fill="${c}" d="M22.27 19.385H1.73A1.73 1.73 0 010 17.655V6.345a1.73 1.73 0 011.73-1.73h20.54A1.73 1.73 0 0124 6.345v11.308a1.73 1.73 0 01-1.73 1.731zM5.769 15.923v-4.5l2.308 2.885 2.307-2.885v4.5h2.308V8.078h-2.308l-2.307 2.885-2.308-2.885H3.46v7.847zM21.232 12h-2.309V8.077h-2.307V12h-2.308l3.461 4.039z"/></g>`,
+  // SQL — database cylinder (stacked ellipses)
+  sql: (c) => `<path d="M3 4v8c0 1 2.2 1.8 5 1.8s5-.8 5-1.8V4" fill="${c}" opacity="0.15" stroke="${c}" stroke-width="1" stroke-linecap="round"/><ellipse cx="8" cy="4" rx="5" ry="1.9" fill="${c}" opacity="0.2" stroke="${c}" stroke-width="1"/><path d="M3 7.7c0 1 2.2 1.8 5 1.8s5-.8 5-1.8" fill="none" stroke="${c}" stroke-width="1"/>`,
+  // Python — two-tone interlocking blocks
+  py: () => `<path d="M8 1.5c-2 0-3.4.5-3.4 2.2v1.6h3.6v.5H3.3C1.7 5.8 1.2 7 1.2 8.8s.6 3 2.1 3h1.2V9.9c0-1.5 1.2-2.6 2.6-2.6h3.2c1.3 0 2.3-1 2.3-2.3V3.7C12.6 2.2 11.4 1.5 8 1.5zM6 2.9a.7.7 0 110 1.4.7.7 0 010-1.4z" fill="#3572A5"/><path d="M8 14.5c2 0 3.4-.5 3.4-2.2v-1.6H7.8v-.5h4.9c1.6 0 2.1-1.2 2.1-3s-.6-3-2.1-3h-1.2v1.9c0 1.5-1.2 2.6-2.6 2.6H5.7c-1.3 0-2.3 1-2.3 2.3v1.3c0 1.5 1.2 2.2 4.6 2.2zm2-1.4a.7.7 0 110-1.4.7.7 0 010 1.4z" fill="#FFD43B"/>`,
+  // Marimo — reactive cells (green): a node graph of connected cells
+  marimo: () => `<rect x="1" y="3" width="14" height="10" rx="2" fill="#1f6f3f" opacity="0.18" stroke="#2ecc71" stroke-width="1"/><circle cx="5" cy="6" r="1.4" fill="#2ecc71"/><circle cx="11" cy="6" r="1.4" fill="#2ecc71"/><circle cx="8" cy="10.5" r="1.4" fill="#2ecc71"/><path d="M5 7.2l2.4 2.5M11 7.2L8.6 9.7M5.4 6h5.2" stroke="#2ecc71" stroke-width="0.9" fill="none" stroke-linecap="round"/>`,
+  // Jupyter — official Jupyter logo (Simple Icons, CC0), scaled from 24→16
+  ipynb: () => `<g transform="scale(.6667)" fill="#f37726"><path d="M7.157 22.201A1.784 1.799 0 0 1 5.374 24a1.784 1.799 0 0 1-1.784-1.799 1.784 1.799 0 0 1 1.784-1.799 1.784 1.799 0 0 1 1.783 1.799zM20.582 1.427a1.415 1.427 0 0 1-1.415 1.428 1.415 1.427 0 0 1-1.416-1.428A1.415 1.427 0 0 1 19.167 0a1.415 1.427 0 0 1 1.415 1.427zM4.992 3.336A1.047 1.056 0 0 1 3.946 4.39a1.047 1.056 0 0 1-1.047-1.055A1.047 1.056 0 0 1 3.946 2.28a1.047 1.056 0 0 1 1.046 1.056zm7.336 1.517c3.769 0 7.06 1.38 8.768 3.424a9.363 9.363 0 0 0-3.393-4.547 9.238 9.238 0 0 0-5.377-1.728A9.238 9.238 0 0 0 6.95 3.73a9.363 9.363 0 0 0-3.394 4.547c1.713-2.04 5.004-3.424 8.772-3.424zm.001 13.295c-3.768 0-7.06-1.381-8.768-3.425a9.363 9.363 0 0 0 3.394 4.547A9.238 9.238 0 0 0 12.33 21a9.238 9.238 0 0 0 5.377-1.729 9.363 9.363 0 0 0 3.393-4.547c-1.712 2.044-5.003 3.425-8.772 3.425Z"/></g>`,
+  // CSV — small table/grid
+  csv: (c) => `<rect x="2" y="3" width="12" height="10" rx="1.5" fill="${c}" opacity="0.15" stroke="${c}" stroke-width="1"/><path d="M2 6.3h12M2 9.6h12M6 3v10M10 3v10" stroke="${c}" stroke-width="0.9"/>`,
+  // HTML — browser window (reads as "a rendered web page")
+  html: (c) => `<rect x="1.5" y="2.5" width="13" height="11" rx="1.6" fill="${c}" opacity="0.12" stroke="${c}" stroke-width="1"/><path d="M1.5 5.6h13" stroke="${c}" stroke-width="1"/><circle cx="3.5" cy="4" r=".55" fill="${c}"/><circle cx="5.3" cy="4" r=".55" fill="${c}"/><circle cx="7.1" cy="4" r=".55" fill="${c}"/><path d="M6.6 10.4L5.2 9l1.4-1.4M9.4 7.6L10.8 9l-1.4 1.4" stroke="${c}" stroke-width="1" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`,
+  // JSON — braces
+  json: (c) => `<rect x="2" y="2.5" width="12" height="11" rx="2" fill="${c}" opacity="0.12" stroke="${c}" stroke-width="0.8"/><path d="M6.2 3.5c-1.2 0-1.6.6-1.6 1.6 0 1.4 0 1.5-1 1.9 1 .4 1 .5 1 1.9 0 1 .4 1.6 1.6 1.6" stroke="${c}" stroke-width="1.1" fill="none" stroke-linecap="round" stroke-linejoin="round" transform="translate(0 1.5)"/><path d="M9.8 3.5c1.2 0 1.6.6 1.6 1.6 0 1.4 0 1.5 1 1.9-1 .4-1 .5-1 1.9 0 1-.4 1.6-1.6 1.6" stroke="${c}" stroke-width="1.1" fill="none" stroke-linecap="round" stroke-linejoin="round" transform="translate(0 1.5)"/>`,
+};
+
 function fileIcon(name, size = 16) {
-  const ext = (name || "").split(".").pop().toLowerCase();
+  const lower = (name || "").toLowerCase();
+  const base = lower.split("/").pop();
+  let ext = base.split(".").pop();
+  // marimo notebooks are plain `.py`: use the `.marimo.py` naming convention, or
+  // a content classification cached at render time (see marimoNameCache).
+  if (lower.endsWith(".marimo.py") || (base.endsWith(".py") && marimoNameCache.has(base))) ext = "marimo";
   const def = FILE_ICON_DEFS[ext] || { color: "#8b949e", letter: "" };
+  const glyph = FILE_ICON_GLYPHS[ext];
+  if (glyph) {
+    return `<svg width="${size}" height="${size}" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">${glyph(def.color)}</svg>`;
+  }
   const { color, letter } = def;
   const fontSize = letter.length > 2 ? 5 : letter.length > 1 ? 6 : 7;
   return `<svg width="${size}" height="${size}" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3 1h6.5L13 4.5V14a1 1 0 01-1 1H4a1 1 0 01-1-1V2a1 1 0 011-1z" fill="${color}" opacity="0.15" stroke="${color}" stroke-width="1"/><path d="M9.5 1v2.5a1 1 0 001 1H13" stroke="${color}" stroke-width="1"/>${letter ? `<text x="8" y="11.5" text-anchor="middle" fill="${color}" font-family="monospace" font-size="${fontSize}" font-weight="bold">${letter}</text>` : ""}</svg>`;
