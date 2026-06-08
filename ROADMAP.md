@@ -59,13 +59,9 @@
 - [x] Kernel menu in menubar (shows current env, hints `/hadron-notebook-kernel`)
 - [x] `/hadron-notebook-kernel` Claude Code skill (detect/create/configure Python envs)
 
-## v0.5 — Connectors & Execution
-- [ ] SQL connector config (menu item, connection presets)
-- [ ] Ctrl+Enter to execute SQL with configured connector
-- [ ] CSV editing support
-- [ ] URL artifact type (Google Sheets, Slack links, Notion)
-- [ ] Excel (.xlsx) artifact rendering
-- [ ] `/onboarding` skill (git clone → claude → /onboarding, zero manual setup)
+## v0.5 — Connectors & Execution (dissolved)
+
+Grouped before the supervision-cockpit thesis (below) was sharpened. Items redistributed — URL artifact → v0.7, CSV/dataframe → data-aware preview in v0.8 — or dropped: SQL execute & git-status (off-thesis), `/onboarding` (redundant with `/hadron-setup`), xlsx (backlog). See Deprioritized / Anti-roadmap.
 
 ## v0.6 — Release Readiness (share with 3-5 friends)
 
@@ -87,9 +83,35 @@ Goal: a friend can `git clone` → `claude` → be productive, with no tribal kn
 - [x] Auto-discover artifacts — `/api/files/suggest?agentId=` scoring + `hadron artifacts add --auto` (one-shot add all `score>0`).
 - [x] `/hadron-artifacts` skill — agent attaches its own output files via the CLI.
 
-### P2 — can defer past release
-- [ ] Light split of `client/app.js` (3803-line monolith; navigable, not a crisis)
-- [ ] Harden remaining fragile state-detector patterns (English-keyword/glyph-dependent regexes, version-fragile spinner detection)
+## Product Thesis
+
+Hadron is a **supervision cockpit for data/ML agent work** — not an orchestrator, not an autopilot. Many concurrent Claude Code agents produce notebooks, dataframes, charts, and analyses, where errors are *silent and compound*; the human stays in the loop to review and steer.
+
+**Yardstick for every feature:** does it help the human *stay and steer / verify live DS work*? If it helps them *delegate and walk away*, that's a competitor's paradigm — skip it.
+
+**Moat to invest in:** live data-aware artifacts + agent-as-context-unit (switch agent ⇒ terminal + artifacts + notes switch together) + web/any-device access + durable tmux sessions.
+
+## v0.7 — Multi-screen & maintainability
+
+Daily-workflow wins; lay groundwork for the moat.
+- [ ] **Multi-tab decouple** — active agent becomes per-tab (no forced follow); keep per-agent layout/tab sync. Enables dual-monitor "a different agent per screen."
+- [ ] **Incremental `app.js` split** (3803-line monolith) — start with the `ui-sync` module, then terminal / artifacts / deck / menus. Each extraction green on e2e before the next.
+- [ ] **URL artifact type** (Sheets / Notion / Slack links) — cheap, frequently useful.
+- [ ] **Group state roll-up** — a collapsed group reflects its most-urgent child state (glow "blocked" if any member is). Cheap triage win, on-thesis.
+- [ ] **Harden fragile state-detector regexes** (English-keyword/glyph-dependent, version-fragile spinner). Carried from v0.6 P2.
+
+## v0.8 — The moat: artifact as a review surface
+
+The differentiator. Spec each item when started; gather usage feedback first.
+- [ ] **Data-aware preview** — CSV/dataframe: shape, null counts, dtypes, quick stats up top. Notebooks: surface errored/changed cells. Turns "render" into "catch silent errors fast." (Foundation the annotation loop anchors onto.)
+- [ ] **Inline review → dispatch → resolve loop** — annotate an artifact (whole-doc or anchored region/cell/element), batch comments, flush them as one structured instruction into the agent's Claude session, mark resolved after it revises. Build the *review loop*, **not** a WYSIWYG editor.
+
+## v0.9 — Durability & reach
+
+- [ ] **Native agent session restore** — after a server restart/crash, resume the actual Claude session (`claude --resume=<id>`), not just the tmux shell. High self-use value for remote OCI long-runs.
+- [ ] **Persistence hardening** — clean reconnect/restore so sessions + the artifact panel survive server restart and client detach/reattach.
+- [ ] **Mobile read-only triage view** — phone-friendly "which agent needs me." The web architecture makes this nearly free (a mac app can't). Read/triage only, not a mobile IDE.
+- [ ] **Notify on state-change (human-facing)** — fire a notification when an agent enters `blocked`/`done`. Human-facing only; NOT agent-self-orchestration via the API.
 
 ## Backlog
 
@@ -105,21 +127,30 @@ Goal: a friend can `git clone` → `claude` → be productive, with no tribal kn
 - Server manages multiple agent sets in memory, keyed by project
 - Requires: route layer refactor, per-project state isolation in frontend, multi-config loading in agent-store
 
-**When to build:** After v0.5 core features. The multi-port approach works fine for 2-3 projects.
+**When to build:** Multi-port works fine for 2-3 projects. Single-server switcher is a later convenience, not a thesis item.
 
-### Other backlog items
-- [x] Workspace root config (~/work as root, not per-project)
-- [x] Tmux session namespacing by workspace (prevents multi-instance collisions)
-- [ ] Upgrade sprites to PNG/AI-generated (大航海時代4 style)
-- [ ] Agent templates (pre-configured agents with artifacts/groups)
+### Other backlog items (pull when justified)
+- [ ] **Notebook / data diff** — compare two agents' outputs, or one artifact before/after a rerun (schema drift, distribution shift, changed/errored cells). Strong moat fit but heavy; needs design.
+- [ ] **RELATED → handoff view** + one-click "promote artifact to another agent's context." Human is the bus; no auto agent-to-agent. Confirm real planner→worker handoff frequency before building.
 - [ ] Search across agent terminals
 - [ ] Agent activity timeline / history view
-- [ ] Mobile-responsive layout
+- [ ] Agent templates (pre-configured agents with artifacts/groups)
 - [ ] Keyboard-driven agent switching (fuzzy finder)
 - [ ] Plugin system for custom artifact renderers
-- [ ] Git integration (branch/commit status per agent)
-- [ ] Collaborative features (share workspace state)
-- [ ] Structured state detection via Claude Code stream-json or Remote Control API (replace regex scraping)
-- [ ] `/add-artifacts` AI skill (agent scans context and suggests relevant files)
-- [ ] `/onboarding` skill (git clone → claude → /onboarding, zero manual setup)
-- [ ] Primitive-surface consolidation (post-v0.6 refactor) — UI already calls the same REST API as the CLI will, so the layering (primitives → CLI → skills) is mostly there. Remaining cleanup: sink client-only orchestration (reorder, terminal split/layout, drag-drop) into composable server primitives; regularize state read path (poll vs WS push); ensure UI/CLI/skills share one documented API surface. Do this when building standup/capture (reviewer reads peer panes) — the missing primitives surface naturally then. NOT a release blocker; don't touch working create/close/state flows before sharing.
+- [ ] `.xlsx` artifact rendering (low priority, not moat)
+- [ ] Upgrade sprites to PNG/AI-generated (大航海時代4 style) — cosmetic, low priority
+- [ ] Structured state detection via Claude Code stream-json / Remote Control API (replace regex scraping) — strategic but large; revisit when regex-detector pain justifies it
+- [ ] Primitive-surface consolidation (post-v0.6 refactor) — sink client-only orchestration (reorder, terminal split/layout, drag-drop) into composable server primitives; regularize the state read path (poll vs WS push); one documented API surface for UI/CLI/skills. Surfaces naturally when building the review→dispatch loop. NOT a blocker; don't touch working create/close/state flows.
+
+## Deprioritized / off-thesis (kept visible so we don't re-add by reflex)
+- **SQL connector + Ctrl+Enter execute** — building a SQL IDE / human does the execution; off the "supervise agents" thesis.
+- **CSV editing** — superseded by data-aware *preview* (we review, the agent edits).
+- **Git integration (branch/commit per agent)** — cmux's code-diff/SWE turf; don't chase.
+
+## Anti-roadmap (do NOT build)
+- Multi-CLI (Codex/Gemini/Amp) — stay Claude-Code-native.
+- Code diff / PR review / cloud sandboxes / auto-merge / ticket system — delegate-and-review paradigm.
+- Full WYSIWYG / visual-manipulation editor — crowded turf, huge effort, makes the human do the work (we want annotate→agent-revises).
+- Auto agent-to-agent messaging bus / agent self-orchestration via API — platform's job; removes the human.
+- Terminal-native / TUI rewrite — opposite of our artifact-rendering bet.
+- Chasing notification-polish parity with cmux — "good enough" is fine.
