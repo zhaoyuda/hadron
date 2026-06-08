@@ -1,0 +1,8 @@
+  Here's the analysis of the codebase:
+
+  1. The server module handles routing and middleware
+  2. The client module manages state and rendering
+  3. The shared utilities provide common helpers
+
+  Looking at the specific issue you mentioned, I can see that the
+  problem originates in the event handler chain. When a WebSocket

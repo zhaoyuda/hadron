@@ -1,0 +1,3 @@
+● Bash(npm run build 2>&1)
+  ⎿  Running… (35s · timeout 2m)
+     (ctrl+b ctrl+b (twice) to run in background)

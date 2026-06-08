@@ -1,0 +1,16 @@
+● Bash(docker compose build web 2>&1 | tail -2 && docker compose up -d web 2>&1)
+  ⎿  web  Built
+     Container api-web  Stopping
+
+● Tags are showing on the review. Try refreshing the page.
+
+✻ Cogitated for 2m 14s
+
+● How is Claude doing this session? (optional)
+  1: Bad    2: Fine   3: Good   0: Dismiss
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 4.6  |  ctx [████████░░] 81% (200k)  |  $2.4503
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

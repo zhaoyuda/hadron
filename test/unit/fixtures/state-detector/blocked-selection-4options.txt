@@ -1,0 +1,6 @@
+  I've identified two approaches. Which would you prefer?
+
+❯ 1. Refactor the module into smaller components
+  2. Add a compatibility layer on top
+  3. Rewrite from scratch with new API
+  4. Keep current approach, fix the specific bug

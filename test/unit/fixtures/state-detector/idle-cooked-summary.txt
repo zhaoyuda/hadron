@@ -1,0 +1,14 @@
+  3. Verified: Opus 4.8 responds correctly
+
+  To fall back to 4.6 in any session, just use /model and type claude-opus-4-6.
+
+✻ Cooked for 1m 59s
+
+※ recap: Upgraded Claude Code to 2.1.156 and set Opus 4.8 as the default model. New sessions will use 4.8
+  automatically. (disable recaps in /config)
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 4.6  |  ctx [██░░░░░░░░] 20% (200k)  |  $0.6277
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

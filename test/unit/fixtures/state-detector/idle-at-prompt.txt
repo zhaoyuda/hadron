@@ -1,0 +1,9 @@
+I've updated the configuration file with the new settings. The changes include:
+
+- Added the new API endpoint
+- Updated the timeout values
+- Removed the deprecated flag
+
+Let me know if you'd like any adjustments.
+
+❯

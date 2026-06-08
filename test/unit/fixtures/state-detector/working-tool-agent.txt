@@ -1,0 +1,4 @@
+  Let me delegate this to a subagent for independent investigation.
+
+● Agent(investigating the deployment pipeline)
+  ⎿  Waiting…

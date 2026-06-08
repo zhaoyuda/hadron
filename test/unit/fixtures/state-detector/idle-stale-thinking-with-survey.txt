@@ -1,0 +1,14 @@
+● This is very revealing. The biggest pattern by far is "Girl Stable" with just a space — Ary galaxy, Hana Galaxy,
+  Anya Lovestation, Sassy 7heaven, Coco 7heaven, etc. Also "FR for X (Y)" with parens, and "X frm Y". Let me count
+  more:
+
+✶ Sprouting… (3m 9s · ↓ 5.9k tokens)
+
+● How is Claude doing this session? (optional)
+  1: Bad    2: Fine   3: Good   0: Dismiss
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 4.6  |  ctx [███░░░░░░░] 34% (200k)  |  $1.0099
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

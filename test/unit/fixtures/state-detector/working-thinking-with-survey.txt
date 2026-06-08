@@ -1,0 +1,8 @@
+● Let me look at why this fails — the text starts with a quote block, and extract_target only looks at the first 5
+  lines of the header. After quote stripping, the actual review content should be visible. But we're not stripping
+  quotes before extraction.
+
+* Doodling… (6s · ↓ 104 tokens)
+
+● How is Claude doing this session? (optional)
+  1: Bad    2: Fine   3: Good   0: Dismiss

@@ -1,0 +1,5 @@
+● Bash(rm -rf /tmp/old-build)
+
+  Do you want to proceed?
+
+  Allow once    Allow always    Deny

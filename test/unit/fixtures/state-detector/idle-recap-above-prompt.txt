@@ -1,0 +1,13 @@
+  - Responding: HTTP 200, page <title>Hadron</title> confirmed
+
+✻ Churned for 18s
+
+※ recap: You asked me to verify Hadron's status: it's running on homelab-sg:3000 (node PID 1613980, HTTP 200, title
+  confirmed). Reach it via Tailscale at http://10.0.0.1:3000, since port 3000 isn't public. No action pending.
+  (disable recaps in /config)
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 4.8  |  ctx [██████████] 100% (200k)  |  $3.5542
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

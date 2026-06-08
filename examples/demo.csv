@@ -1,0 +1,8 @@
+agent,group,state,tasks_completed,avg_duration_min,blocked_count,last_active
+web,Command,working,12,4.2,2,2026-05-27T10:30:00
+api,Workers,idle,8,6.1,5,2026-05-27T09:15:00
+Ghostfolio,Backup,done,15,3.8,1,2026-05-27T11:00:00
+analytics,Backup,blocked,3,12.5,8,2026-05-26T22:00:00
+Homelab,Workers,working,7,5.0,3,2026-05-27T10:45:00
+Hadron,Workers,working,20,3.2,0,2026-05-27T11:30:00
+Planner,Command,idle,45,2.1,1,2026-05-27T11:25:00

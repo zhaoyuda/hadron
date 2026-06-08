@@ -1,0 +1,16 @@
+.idea
+.aider*
+claude-squad
+.DS_Store
+cs
+.env
+.env.*
+node_modules/
+agents/
+.hadron/
+.venv/
+.ipynb_checkpoints/
+client/assets/characters/
+test/e2e/screenshots/
+examples/__marimo__/
+server.log

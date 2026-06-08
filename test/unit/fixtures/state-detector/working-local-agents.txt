@@ -1,0 +1,9 @@
+  I've started the review agents. They'll analyze the codebase independently.
+
+  2 local agents still running
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 4.8  |  ctx [███░░░░░░░] 35% (200k)
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

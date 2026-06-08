@@ -1,0 +1,8 @@
+  Let me investigate the issue by reading the configuration files.
+
+● Read(server/config.js)
+  ⎿  (content of file)
+
+  The config looks correct. Let me check the actual deployment:
+
+✢ Thinking… (12s · 856 tokens)

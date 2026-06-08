@@ -1,0 +1,9 @@
+● Bash(rm -rf /tmp/test-output && mkdir -p /tmp/test-output)
+
+  Claude wants to execute this command. Allow or deny?
+
+  Allow once  Allow always  Deny
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 4.6  |  ctx [███░░░░░░░] 30% (200k)
+  bypass permissions (shift+tab to cycle)

@@ -1,0 +1,13 @@
+  1 function approve(req, res) {
+  2   // Do you want to proceed with this action?
+  3   const options = [
+  4     "1. Allow once",
+  5     "2. Allow always",
+  6     "3. Deny",
+  7   ];
+  8   return res.json({ options });
+  9 }
+~
+~
+~
+"src/approve.js" 9L, 184B

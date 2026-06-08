@@ -1,0 +1,8 @@
+  1 Refactor the auth middleware to extract token validation into its own
+  2 module, then add unit tests for the happy path and the 401 case.
+  3
+~
+~
+~
+~
+"/tmp/claude-prompt-9f3a1c2e-4b5d-6e7f-8a9b-0c1d2e3f4a5b.md" 3L, 142B

@@ -1,0 +1,4 @@
+Let me check the running processes.
+
+● Bash(ps aux | grep node)
+  ⎿  Waiting…

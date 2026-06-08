@@ -1,0 +1,10 @@
+  Let me continue implementing the feature.
+
+  Error: no healthy deployments available for this model
+
+  The service appears to be experiencing issues. Please try again later.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 4.6  |  ctx [████░░░░░░] 42% (200k)

@@ -1,0 +1,6 @@
+I've dispatched the research tasks to background agents.
+
+Waiting for 3 background agents to finish
+
+───────────────────────────────────────────
+bypass permissions  ctx [default]  · 3 local agents  ⏵⏵

@@ -1,0 +1,10 @@
+  I was working on the implementation when an error occurred:
+
+  API Error: 500 Internal Server Error
+
+  This is likely a temporary issue. Try again in a few moments.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 4.6  |  ctx [██░░░░░░░░] 15% (200k)

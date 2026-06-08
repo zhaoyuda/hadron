@@ -1,0 +1,10 @@
+  This will modify 15 files across 3 directories. The changes include:
+  - Renaming all instances of `oldApi` to `newApi`
+  - Updating import paths
+  - Adding deprecation notices
+
+  Do you want to proceed?
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 4.6  |  ctx [████░░░░░░] 45% (200k)
+  bypass permissions on (shift+tab to cycle)

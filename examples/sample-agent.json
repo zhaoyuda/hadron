@@ -1,0 +1,17 @@
+{
+  "id": "hadron",
+  "name": "hadron",
+  "group": "Workers",
+  "state": "idle",
+  "artifacts": [
+    { "type": "file", "value": "hadron/examples/demo.md" },
+    { "type": "file", "value": "hadron/examples/demo.py" },
+    { "type": "file", "value": "hadron/examples/demo.csv" },
+    { "type": "file", "value": "hadron/examples/demo.sql" },
+    { "type": "file", "value": "hadron/examples/demo.html" },
+    { "type": "file", "value": "hadron/examples/demo.ipynb" },
+    { "type": "file", "value": "hadron/examples/demo_notebook.py" }
+  ],
+  "notes": "Sample agent demonstrating all 7 artifact types. Safe to archive or delete once you've looked around.",
+  "deletable": true
+}

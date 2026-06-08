@@ -1,0 +1,9 @@
+  I've launched two background agents to handle the research tasks in parallel.
+
+  Waiting for 2 background agents to finish
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 4.6  |  ctx [██████░░░░] 65% (200k)
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

@@ -1,0 +1,4 @@
+Let me read the configuration file.
+
+● Read("/home/user/project/config.json")
+  ⎿  Waiting…

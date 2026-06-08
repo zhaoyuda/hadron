@@ -1,0 +1,5 @@
+  confirmed). Reach it via Tailscale at http://10.0.0.1:3000. No action pending.
+  (disable recaps in /config)
+
+* Compacting conversation…
+  ████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ 10%

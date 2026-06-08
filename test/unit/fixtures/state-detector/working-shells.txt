@@ -1,0 +1,6 @@
+Running the build in a background shell.
+
+1 shell still running
+
+───────────────────────────────────────────
+bypass permissions  ctx [default]  · 1 shell  ⏵⏵

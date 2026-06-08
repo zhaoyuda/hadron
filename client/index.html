@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hadron</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/xterm/css/xterm.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+
+  <!-- Menu Bar -->
+  <div id="topbar">
+    <div class="menu-bar">
+      <div class="menu-item" id="menu-view">View<span class="menu-caret">▾</span></div>
+      <div class="menu-item" id="menu-agents">Agents<span class="menu-caret">▾</span></div>
+      <div class="menu-item" id="menu-kernel">Kernel<span class="menu-caret">▾</span></div>
+    </div>
+    <div class="topbar-spacer"></div>
+    <div class="menu-item proj-name-item" id="menu-workspace"><span class="proj-name"></span><span class="menu-caret">▾</span></div>
+  </div>
+
+  <!-- Agent Deck (Zone A) -->
+  <div id="agent-deck">
+    <div id="deck-groups"></div>
+  </div>
+
+  <!-- Lower Area: Work Panel + Context Panel -->
+  <div id="main">
+    <!-- Work Panel (Zone B) -->
+    <div id="left">
+      <div id="work-header"></div>
+      <div id="ws-content">
+        <div id="terminal-container" class="active"></div>
+        <div id="notes-container">
+          <textarea id="notes-textarea" class="notes-area" placeholder="Write notes here..." oninput="saveNotes()"></textarea>
+        </div>
+      </div>
+    </div>
+
+    <!-- Resize Handle -->
+    <div id="resize-handle"></div>
+
+    <!-- Context Panel (Zone C) -->
+    <div id="right"></div>
+  </div>
+
+  <!-- Bottom Hints -->
+  <div id="hints"></div>
+
+  <!-- Context Menu -->
+  <div id="ctx-menu"></div>
+
+  <!-- Center Notifications -->
+  <div id="notifications"></div>
+
+  <!-- Status -->
+  <div id="status"></div>
+
+  <script src="/xterm/lib/xterm.js"></script>
+  <script src="/xterm-addon-fit/lib/addon-fit.js"></script>
+  <script src="/xterm-addon-web-links/lib/addon-web-links.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

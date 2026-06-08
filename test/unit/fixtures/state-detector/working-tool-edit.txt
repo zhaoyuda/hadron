@@ -1,0 +1,4 @@
+  I'll fix the sorting logic now.
+
+● Edit(server/state-detector.js)
+  ⎿  Waiting…

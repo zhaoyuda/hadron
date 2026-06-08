@@ -1,0 +1,7 @@
+but I still don't understand why our earlier re-run don't have this issue (like why some other day works). Is it because when we re-run, airflow auto detect failed/success task and in this
+particular case, launch is flagged as 'success' internally but in fact it fails?
+how's the longer term solution to this rather than do deep investigation for every failure?
+
+* Landing ds 2026-05-26 scoring… (13s · thinking with high effort)
+  ⎿  ◼ Land ds 2026-05-26 in login_score_v05
+     ◻ Harden scoring DAG against concurrent-run collisions

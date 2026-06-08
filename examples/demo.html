@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hadron HTML Demo</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; padding: 40px; }
+  h1 { font-size: 2rem; margin-bottom: 8px; background: linear-gradient(135deg, #58a6ff, #bc8cff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .subtitle { color: #8b949e; margin-bottom: 32px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 32px; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; transition: transform 0.2s, border-color 0.2s; }
+  .card:hover { transform: translateY(-2px); border-color: #58a6ff; }
+  .card h3 { font-size: 0.9rem; color: #58a6ff; margin-bottom: 8px; }
+  .card p { font-size: 0.8rem; color: #8b949e; line-height: 1.5; }
+  .stat { font-size: 2rem; font-weight: 700; color: #c9d1d9; }
+  .chart { display: flex; align-items: flex-end; gap: 6px; height: 80px; margin-top: 20px; }
+  .bar { flex: 1; background: linear-gradient(to top, #238636, #3fb950); border-radius: 3px 3px 0 0; transition: height 0.5s; }
+  footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid #30363d; color: #484f58; font-size: 0.75rem; }
+</style>
+</head>
+<body>
+  <h1>Dashboard Demo</h1>
+  <p class="subtitle">This HTML file is rendered inline as a Hadron artifact.</p>
+  <div class="grid">
+    <div class="card"><h3>Agents</h3><div class="stat">6</div><p>Active agents running</p></div>
+    <div class="card"><h3>Tasks Done</h3><div class="stat">142</div><p>Completed this week</p></div>
+    <div class="card"><h3>Uptime</h3><div class="stat">99.7%</div><p>Last 30 days</p></div>
+    <div class="card"><h3>Tokens</h3><div class="stat">1.2M</div><p>Total consumed</p></div>
+  </div>
+  <h3 style="margin-bottom: 8px; color: #8b949e; font-size: 0.85rem;">Weekly Activity</h3>
+  <div class="chart">
+    <div class="bar" style="height:40%"></div>
+    <div class="bar" style="height:65%"></div>
+    <div class="bar" style="height:50%"></div>
+    <div class="bar" style="height:80%"></div>
+    <div class="bar" style="height:95%"></div>
+    <div class="bar" style="height:70%"></div>
+    <div class="bar" style="height:45%"></div>
+  </div>
+  <footer>Hadron HTML Artifact Demo &mdash; rendered in an iframe with sandbox</footer>
+</body>
+</html>

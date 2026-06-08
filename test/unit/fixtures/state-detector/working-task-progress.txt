@@ -1,0 +1,14 @@
+
+※ recap: 正在帮你研究国产手持小风扇（预算500、室外用、质量好、可给小朋友用）。深度研究已在后台运行，跑完会给出带数据
+  和出处的选购建议。下一步：等研究完成后整理报告。
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 4.8  |  ctx [█░░░░░░░░░] 14% (200k)  |  $0.4699  |  5h [░░░░░░░░░░] 5% (4h11m)  |  wk [░░░░░░░░░░] 2% (6d13…
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+                                              ✗ Auto-update failed: no write permission to npm prefix · Run /doctor
+                                                                                              Remote Control active
+
+                                                                                        ↑/↓ to select · Enter to view
+  ◯ deep-research  Deep research harness — fan-out web searches, fetch … 23/25 agents done · 7m 42s · ↓ 384.1k tokens
