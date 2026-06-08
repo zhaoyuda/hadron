@@ -62,6 +62,14 @@ try {
   r.ok(p1Layout !== "tabs", `p1 layout changed (got ${p1Layout})`);
   r.ok(p2Layout === p1Layout, `p2 mirrors p1 layout (${p2Layout} === ${p1Layout}, was ${before})`);
 
+  // 2b. Open-tab sync: a tab opened in p1 must surface in p2 (same agent).
+  // Regression for broadcasting activeTab without the open-set, which left the
+  // receiving tab unable to render a tab missing from its openTabsPerSession.
+  await p1.evaluate(() => { openTab("notes"); activeTab = "notes"; saveUIState(); });
+  await p2.waitForTimeout(400);
+  const p2HasNotes = await p2.evaluate(() => (openTabsPerSession["alpha"] || new Set()).has("notes"));
+  r.ok(p2HasNotes, "p2 sees tab opened in p1 (open-set synced)");
+
   // 3. Cross-agent isolation: p2 → bravo, change layout there, p1 (on alpha) unaffected.
   await p2.locator('.dk[data-sid="bravo"]').click();
   await p2.waitForTimeout(300);

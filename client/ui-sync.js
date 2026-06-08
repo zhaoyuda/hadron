@@ -19,11 +19,16 @@ let suppressBroadcast = false;
 function broadcastUIState() {
   if (!uiSync || suppressBroadcast) return;
   try {
-    // Describe the active agent's view (not a "switch to me" command).
+    // Describe the active agent's view (not a "switch to me" command). Include
+    // the open-tab set so another tab on the same agent can render a tab this
+    // one just opened — broadcasting activeTab alone left the receiver unable to
+    // show a tab missing from its own openTabsPerSession.
+    const openSet = openTabsPerSession[activeSessionId];
     uiSync.postMessage({
       sessionId: activeSessionId,
       activeTab,
       layoutMode,
+      openTabs: openSet ? [...openSet] : [],
     });
   } catch {}
 }
@@ -64,10 +69,17 @@ if (uiSync) {
       // Update the shared per-agent view model regardless of what this tab shows.
       if (msg.activeTab) perSessionTab[sid] = msg.activeTab;
       if (msg.layoutMode) perSessionLayout[sid] = msg.layoutMode;
+      let openTabsChanged = false;
+      if (Array.isArray(msg.openTabs)) {
+        const cur = openTabsPerSession[sid];
+        openTabsChanged = !cur || cur.size !== msg.openTabs.length
+          || !msg.openTabs.every((t) => cur.has(t));
+        openTabsPerSession[sid] = new Set(msg.openTabs);
+      }
       // Re-render only if this tab is currently viewing that same agent — no
       // forced session switch (the whole point of the decouple).
       if (sid === activeSessionId) {
-        let changed = false;
+        let changed = openTabsChanged;
         if (msg.activeTab && msg.activeTab !== activeTab) { activeTab = msg.activeTab; changed = true; }
         if (msg.layoutMode && msg.layoutMode !== layoutMode) { layoutMode = msg.layoutMode; changed = true; }
         if (changed) {

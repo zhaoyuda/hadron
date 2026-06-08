@@ -1,8 +1,8 @@
 // ═══ FILE ICONS (VS Code Seti-style) ═══ — extracted from app.js (classic <script>, loaded before app.js).
 // Self-contained: fileIcon/folderIcon/fileExtIcon + icon data + marimoNameCache. No external app.js globals.
 const FILE_ICON_DEFS = {
-  md:       { color: "#519aba", letter: "M" },
-  markdown: { color: "#519aba", letter: "M" },
+  md:       { color: "#5FB8D8", letter: "M" },
+  markdown: { color: "#5FB8D8", letter: "M" },
   py:       { color: "#3572A5", letter: "py" },
   marimo:   { color: "#2ecc71", letter: "py" },
   ipynb:    { color: "#e37933", letter: "J" },
@@ -21,8 +21,8 @@ const FILE_ICON_DEFS = {
   go:       { color: "#00ADD8", letter: "Go" },
   rs:       { color: "#dea584", letter: "rs" },
   rb:       { color: "#cc3e44", letter: "rb" },
-  html:     { color: "#e44d26", letter: "<>" },
-  htm:      { color: "#e44d26", letter: "<>" },
+  html:     { color: "#F06A2A", letter: "<>" },
+  htm:      { color: "#F06A2A", letter: "<>" },
   css:      { color: "#563d7c", letter: "#" },
   scss:     { color: "#c76494", letter: "#" },
   txt:      { color: "#8b949e", letter: "T" },
@@ -61,8 +61,9 @@ function noteMarimoNotebook(pathOrName) {
 // SVG markup (children of a 16x16 viewBox). The long tail falls back to a
 // colored letter-in-document below.
 const FILE_ICON_GLYPHS = {
-  // Markdown — official Markdown mark (markdown-mark, CC0), scaled from 24→16
-  md: (c) => `<g transform="scale(.6667)"><path fill="${c}" d="M22.27 19.385H1.73A1.73 1.73 0 010 17.655V6.345a1.73 1.73 0 011.73-1.73h20.54A1.73 1.73 0 0124 6.345v11.308a1.73 1.73 0 01-1.73 1.731zM5.769 15.923v-4.5l2.308 2.885 2.307-2.885v4.5h2.308V8.078h-2.308l-2.307 2.885-2.308-2.885H3.46v7.847zM21.232 12h-2.309V8.077h-2.307V12h-2.308l3.461 4.039z"/></g>`,
+  // Markdown — document badge with "MD" fold-corner (24→16), reads clearly as a file
+  md: () => `<g transform="scale(.6667)"><path d="M6 3.5h8.5L19 8v12.5H6V3.5z" fill="#24566A" stroke="#5FB8D8" stroke-width="1.3"/><path d="M14.5 3.5V8H19" stroke="#5FB8D8" stroke-width="1.3"/><text x="12" y="16" font-family="Inter, Arial, sans-serif" font-size="6.5" font-weight="700" fill="#D7E8EE" text-anchor="middle">MD</text></g>`,
+  markdown: () => FILE_ICON_GLYPHS.md(),
   // SQL — database cylinder (stacked ellipses)
   sql: (c) => `<path d="M3 4v8c0 1 2.2 1.8 5 1.8s5-.8 5-1.8V4" fill="${c}" opacity="0.15" stroke="${c}" stroke-width="1" stroke-linecap="round"/><ellipse cx="8" cy="4" rx="5" ry="1.9" fill="${c}" opacity="0.2" stroke="${c}" stroke-width="1"/><path d="M3 7.7c0 1 2.2 1.8 5 1.8s5-.8 5-1.8" fill="none" stroke="${c}" stroke-width="1"/>`,
   // Python — two-tone interlocking blocks
@@ -73,8 +74,9 @@ const FILE_ICON_GLYPHS = {
   ipynb: () => `<g transform="scale(.6667)" fill="#f37726"><path d="M7.157 22.201A1.784 1.799 0 0 1 5.374 24a1.784 1.799 0 0 1-1.784-1.799 1.784 1.799 0 0 1 1.784-1.799 1.784 1.799 0 0 1 1.783 1.799zM20.582 1.427a1.415 1.427 0 0 1-1.415 1.428 1.415 1.427 0 0 1-1.416-1.428A1.415 1.427 0 0 1 19.167 0a1.415 1.427 0 0 1 1.415 1.427zM4.992 3.336A1.047 1.056 0 0 1 3.946 4.39a1.047 1.056 0 0 1-1.047-1.055A1.047 1.056 0 0 1 3.946 2.28a1.047 1.056 0 0 1 1.046 1.056zm7.336 1.517c3.769 0 7.06 1.38 8.768 3.424a9.363 9.363 0 0 0-3.393-4.547 9.238 9.238 0 0 0-5.377-1.728A9.238 9.238 0 0 0 6.95 3.73a9.363 9.363 0 0 0-3.394 4.547c1.713-2.04 5.004-3.424 8.772-3.424zm.001 13.295c-3.768 0-7.06-1.381-8.768-3.425a9.363 9.363 0 0 0 3.394 4.547A9.238 9.238 0 0 0 12.33 21a9.238 9.238 0 0 0 5.377-1.729 9.363 9.363 0 0 0 3.393-4.547c-1.712 2.044-5.003 3.425-8.772 3.425Z"/></g>`,
   // CSV — small table/grid
   csv: (c) => `<rect x="2" y="3" width="12" height="10" rx="1.5" fill="${c}" opacity="0.15" stroke="${c}" stroke-width="1"/><path d="M2 6.3h12M2 9.6h12M6 3v10M10 3v10" stroke="${c}" stroke-width="0.9"/>`,
-  // HTML — browser window (reads as "a rendered web page")
-  html: (c) => `<rect x="1.5" y="2.5" width="13" height="11" rx="1.6" fill="${c}" opacity="0.12" stroke="${c}" stroke-width="1"/><path d="M1.5 5.6h13" stroke="${c}" stroke-width="1"/><circle cx="3.5" cy="4" r=".55" fill="${c}"/><circle cx="5.3" cy="4" r=".55" fill="${c}"/><circle cx="7.1" cy="4" r=".55" fill="${c}"/><path d="M6.6 10.4L5.2 9l1.4-1.4M9.4 7.6L10.8 9l-1.4 1.4" stroke="${c}" stroke-width="1" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`,
+  // HTML — HTML5 shield (24→16), the most recognizable HTML mark
+  html: () => `<g transform="scale(.6667)"><path d="M5 3.5h14l-1.25 15L12 21l-5.75-2.5L5 3.5z" fill="#6B2D18" stroke="#F06A2A" stroke-width="1.2"/><path d="M8.1 7.2h7.8l-.15 1.55H9.85l.13 1.55h5.62l-.45 5.15L12 16.8l-3.15-1.35-.2-2.25h1.55l.1 1.15 1.7.72 1.7-.72.18-2.05H8.5L8.1 7.2z" fill="#FFE5D8"/></g>`,
+  htm: () => FILE_ICON_GLYPHS.html(),
   // JSON — braces
   json: (c) => `<rect x="2" y="2.5" width="12" height="11" rx="2" fill="${c}" opacity="0.12" stroke="${c}" stroke-width="0.8"/><path d="M6.2 3.5c-1.2 0-1.6.6-1.6 1.6 0 1.4 0 1.5-1 1.9 1 .4 1 .5 1 1.9 0 1 .4 1.6 1.6 1.6" stroke="${c}" stroke-width="1.1" fill="none" stroke-linecap="round" stroke-linejoin="round" transform="translate(0 1.5)"/><path d="M9.8 3.5c1.2 0 1.6.6 1.6 1.6 0 1.4 0 1.5 1 1.9-1 .4-1 .5-1 1.9 0 1-.4 1.6-1.6 1.6" stroke="${c}" stroke-width="1.1" fill="none" stroke-linecap="round" stroke-linejoin="round" transform="translate(0 1.5)"/>`,
 };

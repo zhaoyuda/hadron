@@ -980,7 +980,6 @@ function setArtifactModePref(ext, mode) {
 }
 
 function renderCSVTable(container, text, filePath) {
-  container.style.position = "relative";
   let raw = text;
   let mode = artifactModePref("csv", "preview");
   const macKey = navigator.platform.includes('Mac') ? '⌘' : 'Ctrl';
@@ -999,6 +998,12 @@ function renderCSVTable(container, text, filePath) {
       btn.addEventListener('click', () => {
         const next = btn.dataset.mode;
         if (next === mode) return;
+        // Leaving edit mode: carry the textarea's current text into the working
+        // buffer so Preview reflects in-progress edits (Save persists to disk).
+        if (mode === "edit") {
+          const ta = container.querySelector('.csv-edit-area');
+          if (ta) raw = ta.value;
+        }
         mode = next;
         setArtifactModePref("csv", mode);
         render();
@@ -1007,13 +1012,14 @@ function renderCSVTable(container, text, filePath) {
   }
 
   function renderEdit() {
-    container.innerHTML = toggleBar("edit")
+    container.innerHTML = `<div class="csv-root">`
+      + toggleBar("edit")
       + `<div class="csv-edit-wrap">`
       + `<textarea class="csv-edit-area" spellcheck="false">${esc(raw)}</textarea>`
       + `<div class="csv-edit-bar">`
       + `<span class="csv-edit-status"></span>`
       + `<button class="csv-edit-save">Save <span class="md-toggle-key">${macKey}+S</span></button>`
-      + `</div></div>`;
+      + `</div></div></div>`;
     wireToggle();
     const ta = container.querySelector('.csv-edit-area');
     const status = container.querySelector('.csv-edit-status');
@@ -1054,7 +1060,7 @@ function renderCSVTable(container, text, filePath) {
   function renderPreview() {
     const { headers, rows } = parseCSV(raw);
     if (headers.length === 0) {
-      container.innerHTML = toggleBar("preview") + `<pre class="artifact-code">${esc(raw)}</pre>`;
+      container.innerHTML = `<div class="csv-root">` + toggleBar("preview") + `<pre class="artifact-code">${esc(raw)}</pre>` + `</div>`;
       wireToggle();
       return;
     }
@@ -1081,11 +1087,13 @@ function renderCSVTable(container, text, filePath) {
         tbody += '</tr>';
       }
 
-      container.innerHTML = toggleBar("preview")
+      container.innerHTML = `<div class="csv-root">`
+        + toggleBar("preview")
         + `<div class="csv-table-wrapper">`
         + `<table class="csv-table"><thead>${thead}</thead><tbody>${tbody}</tbody></table>`
         + `</div>`
-        + `<div class="csv-footer">${sortedRows.length} row${sortedRows.length !== 1 ? 's' : ''}</div>`;
+        + `<div class="csv-footer">${sortedRows.length} row${sortedRows.length !== 1 ? 's' : ''}</div>`
+        + `</div>`;
       wireToggle();
 
       container.querySelectorAll('.csv-table th').forEach(th => {
