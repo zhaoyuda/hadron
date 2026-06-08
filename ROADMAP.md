@@ -91,9 +91,13 @@ Hadron is a **supervision cockpit for data/ML agent work** — not an orchestrat
 
 **Moat to invest in:** live data-aware artifacts + agent-as-context-unit (switch agent ⇒ terminal + artifacts + notes switch together) + web/any-device access + durable tmux sessions.
 
-## v0.7 — Multi-screen & maintainability
+## v0.7 — Multi-screen & maintainability (released)
 
-Daily-workflow wins; lay groundwork for the moat.
+Daily-workflow wins; lay groundwork for the moat. Shipped in tag `v0.7`. The two
+unchecked items below are intentionally ongoing — the `app.js` split continues
+opportunistically, and state-detector hardening stays deferred until scraping
+issues accumulate (see `design-notes/state-detection-approaches.md`); neither
+gated the release.
 - [x] **Multi-tab decouple** — active agent is now per-tab (no forced follow); cross-tab sync is keyed by session id, so per-agent tab/layout still mirrors *only* when two tabs show the same agent (keeps its one shared tmux pane a single size). Per-tab `sessionStorage` so each screen restores its own agent on reload. Enables dual-monitor "a different agent per screen."
 - [~] **Incremental `app.js` split** (was a 3803-line monolith → 3552) — 4 cohesive modules extracted as ordered classic `<script>`s sharing global scope (no build step): `ui-sync.js` (cross-tab state sync), `theme.js` (sprite/avatar themes), `file-icons.js` (Seti-style icons), `markdown.js` (md/HTML preview + vim editor). Each green on e2e before the next. Remaining core blocks (render / deck / menus / terminal / websocket) are interdependent — extract opportunistically, not mechanically.
 - [x] **URL artifact type** (Sheets / Notion / Slack links) — render/tab/sidebar/add-popover all wired.
