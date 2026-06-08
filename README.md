@@ -36,7 +36,7 @@ Hadron solves this by giving each agent a card on a shared deck. At a glance you
 Hadron is AI-native: the only thing you install by hand is [Claude Code](https://claude.com/claude-code). It sets up the rest.
 
 ```bash
-git clone <repo-url> hadron && cd hadron
+git clone https://github.com/zhaoyuda/hadron.git && cd hadron
 claude            # then type:  /hadron-setup
 ```
 
