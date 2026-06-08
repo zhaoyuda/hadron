@@ -90,8 +90,6 @@ Goal: a friend can `git clone` → `claude` → be productive, with no tribal kn
 ### P2 — can defer past release
 - [ ] Light split of `client/app.js` (3803-line monolith; navigable, not a crisis)
 - [ ] Harden remaining fragile state-detector patterns (English-keyword/glyph-dependent regexes, version-fragile spinner detection)
-- [x] Scrub personal data from `server/test-fixtures/` (Tailscale IP, `/home/ubuntu/work` paths)
-- [x] Review stray root dev files for public repo — removed `preview-theme.html`, `task.md`, `DESIGN.md`; `clean.sh`/`clean_hard.sh` already absent.
 
 ## Backlog
 
