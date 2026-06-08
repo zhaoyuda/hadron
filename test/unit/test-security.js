@@ -172,6 +172,25 @@ async function main() {
     ok(r.status === 400, "nonexistent cwd rejected");
   }
 
+  console.log("\n[file write API]");
+  {
+    const csv = join(WS, "edit-me.csv");
+    writeFileSync(csv, "a,b\n1,2\n");
+    // No token → rejected before any write.
+    let r = await fetch(`${BASE}/api/file`, { method: "POST", headers: { "Content-Type": "application/json", Origin: ORIGIN }, body: JSON.stringify({ path: "edit-me.csv", content: "x" }) });
+    ok(r.status === 401, "file write without token rejected (401)");
+    ok(readFileSync(csv, "utf-8") === "a,b\n1,2\n", "unauthenticated write left file untouched");
+    // Authenticated edit of existing file round-trips.
+    r = await fetch(`${BASE}/api/file`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ path: "edit-me.csv", content: "a,b\n9,9\n" }) });
+    ok(r.ok && readFileSync(csv, "utf-8") === "a,b\n9,9\n", "authenticated edit writes to disk");
+    // Cannot create a new file (must already exist).
+    r = await fetch(`${BASE}/api/file`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ path: "brand-new.csv", content: "x" }) });
+    ok(r.status === 404 && !existsSync(join(WS, "brand-new.csv")), "write to nonexistent path rejected (404), no file created");
+    // Non-string content rejected.
+    r = await fetch(`${BASE}/api/file`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ path: "edit-me.csv", content: 42 }) });
+    ok(r.status === 400, "non-string content rejected (400)");
+  }
+
   console.log("\n[malicious task text]");
   {
     const pwned = join(WS, "pwned");

@@ -687,6 +687,27 @@ app.get("/api/file", (req, res) => {
   }
 });
 
+// Write API — edits an *existing* file in place. Restricted to regular files that
+// already exist (so it can't be used to create arbitrary new files anywhere the
+// server user can write); token + host + origin are already enforced by requireAuth.
+app.post("/api/file", (req, res) => {
+  const filePath = resolveFilePath(req.body && req.body.path);
+  if (!filePath) return res.status(400).json({ error: "path is required" });
+  const content = req.body && req.body.content;
+  if (typeof content !== "string") return res.status(400).json({ error: "content (string) is required" });
+  let stat;
+  try { stat = statSync(filePath); } catch { return res.status(404).json({ error: "file not found" }); }
+  if (!stat.isFile()) return res.status(400).json({ error: "not a regular file" });
+  try {
+    writeFileSync(filePath, content, "utf-8");
+    const newStat = statSync(filePath);
+    res.set("X-File-Mtime", String(newStat.mtimeMs));
+    res.json({ ok: true, mtime: newStat.mtimeMs });
+  } catch (e) {
+    res.status(500).json({ error: "write failed" });
+  }
+});
+
 app.get("/api/files/suggest", (req, res) => {
   const cwd = resolveFilePath(req.query.cwd) || WORKSPACE;
   const agentId = (req.query.agentId || "").toLowerCase();

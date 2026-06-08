@@ -41,6 +41,7 @@ let shellInstances = new Map();
 let workspaceGroups = null; // persisted group order from config, or null if not loaded
 let groupConfig = {}; // per-group attributes like { expandable: false }
 let deckSortMode = "state"; // "state", "manual", "name"
+let deckGroupBy = "group"; // "group" (semantic groups) or "status" (bucket by agent state)
 let currentTheme = "default"; // "default", "exploration"
 let notifyLevel = "all"; // "all" (sound+banner+flash), "banner" (banner+flash), "off"
 let titleFlashInterval = null;
@@ -48,9 +49,12 @@ let pendingAlerts = new Set();
 let wsName = "Hadron";
 
 // ═══ UI STATE PERSISTENCE ═══
-// Cross-tab mirroring: two browser tabs viewing the same workspace share one
-// tmux pane per agent and physically cannot render it at different sizes, so
-// we keep the tabs visually identical by broadcasting view changes between them.
+// Cross-tab model: each browser tab picks its OWN active agent (dual-monitor:
+// a different agent per screen — no forced follow). We still sync *per-agent*
+// view state (tab + layout) keyed by session id, so the same agent looks
+// identical wherever it's shown — which also keeps its one shared tmux pane from
+// being rendered at two different sizes. Tabs showing different agents are
+// independent (separate tmux sessions, no interference).
 const uiSync = (() => {
   try { return new BroadcastChannel("hadron-ui-sync"); } catch { return null; }
 })();
@@ -59,8 +63,9 @@ let suppressBroadcast = false;
 function broadcastUIState() {
   if (!uiSync || suppressBroadcast) return;
   try {
+    // Describe the active agent's view (not a "switch to me" command).
     uiSync.postMessage({
-      activeSessionId,
+      sessionId: activeSessionId,
       activeTab,
       layoutMode,
     });
@@ -81,10 +86,14 @@ function saveUIState() {
     perSessionLayout,
     openTabs,
     deckSortMode,
+    deckGroupBy,
     currentTheme,
     notifyLevel,
   };
   localStorage.setItem("hadron-ui-state", JSON.stringify(state));
+  // Per-tab: each browser tab restores the agent IT was showing after a reload,
+  // rather than snapping to whichever tab wrote localStorage last.
+  try { if (activeSessionId) sessionStorage.setItem("hadron-active-session", activeSessionId); } catch {}
   broadcastUIState();
 }
 
@@ -94,25 +103,22 @@ if (uiSync) {
     if (!msg) return;
     suppressBroadcast = true;
     try {
-      if (msg.activeSessionId && msg.activeSessionId !== activeSessionId) {
-        // Session changed in the other tab — follow it.
-        switchSession(msg.activeSessionId);
-      }
-      let changed = false;
-      if (msg.activeTab && msg.activeTab !== activeTab) {
-        activeTab = msg.activeTab;
-        perSessionTab[activeSessionId] = activeTab;
-        changed = true;
-      }
-      if (msg.layoutMode && msg.layoutMode !== layoutMode) {
-        layoutMode = msg.layoutMode;
-        perSessionLayout[activeSessionId] = layoutMode;
-        changed = true;
-      }
-      if (changed) {
-        renderWorkHeader();
-        renderWorkContent();
-        deferredFit();
+      const sid = msg.sessionId;
+      if (!sid) return;
+      // Update the shared per-agent view model regardless of what this tab shows.
+      if (msg.activeTab) perSessionTab[sid] = msg.activeTab;
+      if (msg.layoutMode) perSessionLayout[sid] = msg.layoutMode;
+      // Re-render only if this tab is currently viewing that same agent — no
+      // forced session switch (the whole point of the decouple).
+      if (sid === activeSessionId) {
+        let changed = false;
+        if (msg.activeTab && msg.activeTab !== activeTab) { activeTab = msg.activeTab; changed = true; }
+        if (msg.layoutMode && msg.layoutMode !== layoutMode) { layoutMode = msg.layoutMode; changed = true; }
+        if (changed) {
+          renderWorkHeader();
+          renderWorkContent();
+          deferredFit();
+        }
       }
     } catch {}
     suppressBroadcast = false;
@@ -125,6 +131,11 @@ function restoreUIState() {
     if (!raw) return;
     const state = JSON.parse(raw);
     if (state.activeSessionId) activeSessionId = state.activeSessionId;
+    // A per-tab override wins if this tab had previously chosen an agent.
+    try {
+      const perTab = sessionStorage.getItem("hadron-active-session");
+      if (perTab) activeSessionId = perTab;
+    } catch {}
     if (state.perSessionTab) perSessionTab = state.perSessionTab;
     if (state.perSessionLayout) perSessionLayout = state.perSessionLayout;
     if (state.openTabs) {
@@ -133,6 +144,7 @@ function restoreUIState() {
       }
     }
     if (state.deckSortMode) deckSortMode = state.deckSortMode;
+    if (state.deckGroupBy) deckGroupBy = state.deckGroupBy;
     if (state.currentTheme) currentTheme = state.currentTheme;
     if (state.notifyLevel) notifyLevel = state.notifyLevel;
     activeTab = perSessionTab[activeSessionId] || "terminal";
@@ -501,8 +513,35 @@ function getSessionGroups() {
   return result;
 }
 
+// Bucket every agent by its state, ignoring semantic groups. Order surfaces the
+// agents that need a human first: blocked → needs-review (done) → working → idle.
+function getStatusBuckets() {
+  const BUCKETS = [
+    { key: "blocked", label: "Blocked" },
+    { key: "done", label: "Needs Review" },
+    { key: "working", label: "Working" },
+    { key: "idle", label: "Idle" },
+  ];
+  const map = { blocked: [], done: [], working: [], idle: [] };
+  sessions.forEach((s) => {
+    const st = s.state || "idle";
+    (map[st] || map.idle).push(s);
+  });
+  for (const k of Object.keys(map)) {
+    map[k].sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
+  }
+  return BUCKETS.filter((b) => map[b.key].length > 0)
+    .map((b) => ({ label: b.label, items: map[b.key], status: b.key }));
+}
+
+// Rendering/nav layer: either semantic groups or status buckets. Persistence and
+// group-list bookkeeping keep using getSessionGroups() (always the group axis).
+function getDeckSections() {
+  return deckGroupBy === "status" ? getStatusBuckets() : getSessionGroups();
+}
+
 function getDisplayOrder() {
-  return getSessionGroups().flatMap((g) => g.items);
+  return getDeckSections().flatMap((g) => g.items);
 }
 
 function syncGroupList() {
@@ -936,6 +975,9 @@ function stashArtifacts() {
 
 function reloadCurrentArtifact() {
   if (!activeTab?.startsWith("artifact:")) return;
+  // Don't yank the rug out from under someone mid-edit in the CSV textarea.
+  const ae = document.activeElement;
+  if (ae && ae.classList && ae.classList.contains("csv-edit-area")) return;
   const session = sessions.find(s => s.id === activeSessionId);
   if (!session) return;
   const key = `${session.id}:${activeTab}`;
@@ -1343,76 +1385,157 @@ function parseCSV(text) {
   return { headers: rows[0], rows: rows.slice(1) };
 }
 
+// Remember preview-vs-edit preference per file extension (e.g. CSV defaults to
+// the table, but if a user flips to edit we restore that next time).
+function artifactModePref(ext, fallback) {
+  try { return localStorage.getItem(`hadron-artmode-${ext}`) || fallback; }
+  catch { return fallback; }
+}
+function setArtifactModePref(ext, mode) {
+  try { localStorage.setItem(`hadron-artmode-${ext}`, mode); } catch {}
+}
+
 function renderCSVTable(container, text, filePath) {
   container.style.position = "relative";
+  let raw = text;
+  let mode = artifactModePref("csv", "preview");
+  const macKey = navigator.platform.includes('Mac') ? '⌘' : 'Ctrl';
 
-  const { headers, rows } = parseCSV(text);
-  if (headers.length === 0) {
-    container.innerHTML = `<pre class="artifact-code">${esc(text)}</pre>`;
-    return;
+  function toggleBar(active) {
+    const previewSel = active === "preview" ? " active" : "";
+    const editSel = active === "edit" ? " active" : "";
+    return `<div class="csv-toggle">`
+      + `<button class="csv-toggle-btn${previewSel}" data-mode="preview">Preview</button>`
+      + `<button class="csv-toggle-btn${editSel}" data-mode="edit">Edit</button>`
+      + `</div>`;
   }
 
-  // Sort state
-  let sortCol = -1;
-  let sortAsc = true;
-  let sortedRows = rows.slice();
-
-  function renderTable() {
-    let thead = '<tr>';
-    for (let i = 0; i < headers.length; i++) {
-      let arrow = '';
-      if (sortCol === i) arrow = sortAsc ? ' ▲' : ' ▼';
-      thead += `<th data-col="${i}">${esc(headers[i])}${arrow}</th>`;
-    }
-    thead += '</tr>';
-
-    let tbody = '';
-    for (const row of sortedRows) {
-      tbody += '<tr>';
-      for (let i = 0; i < headers.length; i++) {
-        tbody += `<td>${esc(row[i] || '')}</td>`;
-      }
-      tbody += '</tr>';
-    }
-
-    const tableHtml = `
-      <div class="csv-table-wrapper">
-        <table class="csv-table">
-          <thead>${thead}</thead>
-          <tbody>${tbody}</tbody>
-        </table>
-      </div>
-      <div class="csv-footer">${sortedRows.length} row${sortedRows.length !== 1 ? 's' : ''}</div>
-    `;
-
-    container.innerHTML = tableHtml;
-
-    // Attach sort handlers
-    container.querySelectorAll('.csv-table th').forEach(th => {
-      th.addEventListener('click', () => {
-        const col = parseInt(th.dataset.col);
-        if (sortCol === col) {
-          sortAsc = !sortAsc;
-        } else {
-          sortCol = col;
-          sortAsc = true;
-        }
-        sortedRows.sort((a, b) => {
-          const va = a[col] || '';
-          const vb = b[col] || '';
-          // Try numeric comparison
-          const na = Number(va), nb = Number(vb);
-          if (!isNaN(na) && !isNaN(nb) && va !== '' && vb !== '') {
-            return sortAsc ? na - nb : nb - na;
-          }
-          return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
-        });
-        renderTable();
+  function wireToggle() {
+    container.querySelectorAll('.csv-toggle-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const next = btn.dataset.mode;
+        if (next === mode) return;
+        mode = next;
+        setArtifactModePref("csv", mode);
+        render();
       });
     });
   }
 
-  renderTable();
+  function renderEdit() {
+    container.innerHTML = toggleBar("edit")
+      + `<div class="csv-edit-wrap">`
+      + `<textarea class="csv-edit-area" spellcheck="false">${esc(raw)}</textarea>`
+      + `<div class="csv-edit-bar">`
+      + `<span class="csv-edit-status"></span>`
+      + `<button class="csv-edit-save">Save <span class="md-toggle-key">${macKey}+S</span></button>`
+      + `</div></div>`;
+    wireToggle();
+    const ta = container.querySelector('.csv-edit-area');
+    const status = container.querySelector('.csv-edit-status');
+    const saveBtn = container.querySelector('.csv-edit-save');
+
+    function save() {
+      const content = ta.value;
+      status.textContent = "Saving…";
+      saveBtn.disabled = true;
+      fetch(`/api/file`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: filePath, content }),
+      })
+        .then((r) => r.ok ? r : Promise.reject())
+        .then((r) => {
+          raw = content;
+          status.textContent = "Saved";
+          // Pre-set the poller's baseline to our own mtime so it doesn't fire a
+          // reload that would rebuild the textarea out from under the user.
+          const newMtime = r.headers.get("X-File-Mtime");
+          if (newMtime) artifactLastMtime = newMtime;
+          setTimeout(() => { status.textContent = ""; }, 1500);
+        })
+        .catch(() => { status.textContent = "Save failed"; })
+        .finally(() => { saveBtn.disabled = false; });
+    }
+
+    saveBtn.addEventListener('click', save);
+    ta.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        save();
+      }
+    });
+  }
+
+  function renderPreview() {
+    const { headers, rows } = parseCSV(raw);
+    if (headers.length === 0) {
+      container.innerHTML = toggleBar("preview") + `<pre class="artifact-code">${esc(raw)}</pre>`;
+      wireToggle();
+      return;
+    }
+
+    let sortCol = -1;
+    let sortAsc = true;
+    let sortedRows = rows.slice();
+
+    function renderTable() {
+      let thead = '<tr>';
+      for (let i = 0; i < headers.length; i++) {
+        let arrow = '';
+        if (sortCol === i) arrow = sortAsc ? ' ▲' : ' ▼';
+        thead += `<th data-col="${i}">${esc(headers[i])}${arrow}</th>`;
+      }
+      thead += '</tr>';
+
+      let tbody = '';
+      for (const row of sortedRows) {
+        tbody += '<tr>';
+        for (let i = 0; i < headers.length; i++) {
+          tbody += `<td>${esc(row[i] || '')}</td>`;
+        }
+        tbody += '</tr>';
+      }
+
+      container.innerHTML = toggleBar("preview")
+        + `<div class="csv-table-wrapper">`
+        + `<table class="csv-table"><thead>${thead}</thead><tbody>${tbody}</tbody></table>`
+        + `</div>`
+        + `<div class="csv-footer">${sortedRows.length} row${sortedRows.length !== 1 ? 's' : ''}</div>`;
+      wireToggle();
+
+      container.querySelectorAll('.csv-table th').forEach(th => {
+        th.addEventListener('click', () => {
+          const col = parseInt(th.dataset.col);
+          if (sortCol === col) {
+            sortAsc = !sortAsc;
+          } else {
+            sortCol = col;
+            sortAsc = true;
+          }
+          sortedRows.sort((a, b) => {
+            const va = a[col] || '';
+            const vb = b[col] || '';
+            const na = Number(va), nb = Number(vb);
+            if (!isNaN(na) && !isNaN(nb) && va !== '' && vb !== '') {
+              return sortAsc ? na - nb : nb - na;
+            }
+            return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+          });
+          renderTable();
+        });
+      });
+    }
+
+    renderTable();
+  }
+
+  function render() {
+    if (mode === "edit") renderEdit();
+    else renderPreview();
+  }
+
+  render();
 }
 
 // ═══ CODE SYNTAX HIGHLIGHTING ═══
@@ -1683,7 +1806,8 @@ function getAgentIcon(s) {
 
 function renderDeck() {
   const el = document.getElementById("deck-groups");
-  const groups = getSessionGroups();
+  const statusMode = deckGroupBy === "status";
+  const groups = getDeckSections();
   let html = "";
   let idx = 0;
 
@@ -1691,29 +1815,38 @@ function renderDeck() {
     if (gi > 0 && html) html += '<div class="deck-sep"></div>';
 
     const groupKey = g.label.toLowerCase();
-    html += `<div class="deck-group" data-group="${esc(groupKey)}">`;
-    html += `<div class="deck-group-label" data-group-name="${esc(g.label)}">${esc(g.label)}</div>`;
+    // In status mode the header is a state label (not editable / not a drop target);
+    // omit data-group-name so the rename/contextmenu handlers don't bind to it.
+    const labelAttrs = statusMode
+      ? ` data-status="${esc(g.status)}"`
+      : ` data-group-name="${esc(g.label)}"`;
+    html += `<div class="deck-group${statusMode ? " deck-group-status" : ""}" data-group="${esc(groupKey)}">`;
+    html += `<div class="deck-group-label"${labelAttrs}>${esc(g.label)}</div>`;
     html += `<div class="deck-cards">`;
 
     g.items.forEach((s) => {
       idx++;
-      html += mkDeckCard(s, idx);
+      html += mkDeckCard(s, idx, !statusMode);
     });
 
-    const gc = groupConfig[g.label] || {};
-    if (gc.expandable !== false) {
-      html += `<div class="dk-add dk-add-sm" title="Add agent to ${esc(g.label)}" data-add-group="${esc(g.label)}">+</div>`;
-    }
-    // Empty, non-protected group → offer a visible delete button (no right-click needed)
-    if (g.items.length === 0 && gc.expandable !== false) {
-      html += `<div class="dk-del dk-add-sm" title="Delete empty group "${esc(g.label)}"" data-del-group="${esc(g.label)}">×</div>`;
+    if (!statusMode) {
+      const gc = groupConfig[g.label] || {};
+      if (gc.expandable !== false) {
+        html += `<div class="dk-add dk-add-sm" title="Add agent to ${esc(g.label)}" data-add-group="${esc(g.label)}">+</div>`;
+      }
+      // Empty, non-protected group → offer a visible delete button (no right-click needed)
+      if (g.items.length === 0 && gc.expandable !== false) {
+        html += `<div class="dk-del dk-add-sm" title="Delete empty group "${esc(g.label)}"" data-del-group="${esc(g.label)}">×</div>`;
+      }
     }
     html += `</div></div>`;
   });
 
-  // Global "+" button to create new group
-  if (html) html += '<div class="deck-sep"></div>';
-  html += `<div class="dk-add dk-add-sm dk-add-global" title="New group">+</div>`;
+  if (!statusMode) {
+    // Global "+" button to create new group
+    if (html) html += '<div class="deck-sep"></div>';
+    html += `<div class="dk-add dk-add-sm dk-add-global" title="New group">+</div>`;
+  }
 
   el.innerHTML = html;
 
@@ -1721,8 +1854,8 @@ function renderDeck() {
     card.addEventListener("click", () => switchSession(card.dataset.sid));
   });
 
-  // ── Drag and drop ──
-  initDeckDragAndDrop(el);
+  // ── Drag and drop (group axis only; status buckets aren't reorderable) ──
+  if (!statusMode) initDeckDragAndDrop(el);
 
   el.querySelectorAll(".dk-add[data-add-group]").forEach((btn) => {
     btn.addEventListener("click", (e) => showAddPopover(e, btn.dataset.addGroup));
@@ -1798,7 +1931,7 @@ function renderDeck() {
   });
 }
 
-function mkDeckCard(s, idx) {
+function mkDeckCard(s, idx, allowDrag = true) {
   const state = s.state || "idle";
   const isActive = s.id === activeSessionId;
   const name = (s.name || s.id).toUpperCase();
@@ -1829,7 +1962,7 @@ function mkDeckCard(s, idx) {
   else if (state === "working") { sub = formatWorkingSubstatus(s); subClass = "dk-sub-working"; }
   else { sub = "idle"; subClass = "dk-sub-idle"; }
 
-  const draggable = ` draggable="true"`;
+  const draggable = allowDrag ? ` draggable="true"` : "";
   return `<div class="dk${stateClass}${activeClass}" data-sid="${s.id}"${draggable} oncontextmenu="showCtxMenu(event,'${s.id}')">${avatar}<div class="dk-info"><div class="dk-name">${esc(name)}</div><div class="dk-sub ${subClass}">${sub}</div></div></div>`;
 }
 
@@ -3754,6 +3887,10 @@ async function showMenu(menuId, anchorEl) {
     const sortSub = SORT_MODES.map(m =>
       menuItem(m.label, "sort", { checked: m.id === deckSortMode, data: `data-sort="${m.id}"` })
     ).join("");
+    const groupBySub = [
+      menuItem("Group", "set-groupby", { checked: deckGroupBy === "group", data: 'data-groupby="group"' }),
+      menuItem("Status", "set-groupby", { checked: deckGroupBy === "status", data: 'data-groupby="status"' }),
+    ].join("");
     const themeSub = [
       menuItem("Default", "set-theme", { checked: currentTheme === "default", data: 'data-theme="default"' }),
       menuItem("大航海時代 Classic", "set-theme", { checked: currentTheme === "exploration", data: 'data-theme="exploration"' }),
@@ -3765,6 +3902,7 @@ async function showMenu(menuId, anchorEl) {
       menuItem("Off", "set-notify", { checked: notifyLevel === "off", data: 'data-level="off"' }),
     ].join("");
     menu.innerHTML = [
+      menuItem("Deck Layout", "", { submenu: groupBySub }),
       menuItem("Agent Sorting", "", { submenu: sortSub }),
       menuItem("Theme", "", { submenu: themeSub }),
       menuItem("Notifications", "", { submenu: notifySub }),
@@ -3829,6 +3967,10 @@ function hideMenu() {
 async function handleMenuAction(action, item) {
   if (action === "sort") {
     deckSortMode = item.dataset.sort;
+    renderDeck();
+    saveUIState();
+  } else if (action === "set-groupby") {
+    deckGroupBy = item.dataset.groupby || "group";
     renderDeck();
     saveUIState();
   } else if (action === "set-theme") {

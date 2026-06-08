@@ -94,11 +94,12 @@ Hadron is a **supervision cockpit for data/ML agent work** — not an orchestrat
 ## v0.7 — Multi-screen & maintainability
 
 Daily-workflow wins; lay groundwork for the moat.
-- [ ] **Multi-tab decouple** — active agent becomes per-tab (no forced follow); keep per-agent layout/tab sync. Enables dual-monitor "a different agent per screen."
+- [x] **Multi-tab decouple** — active agent is now per-tab (no forced follow); cross-tab sync is keyed by session id, so per-agent tab/layout still mirrors *only* when two tabs show the same agent (keeps its one shared tmux pane a single size). Per-tab `sessionStorage` so each screen restores its own agent on reload. Enables dual-monitor "a different agent per screen."
 - [ ] **Incremental `app.js` split** (3803-line monolith) — start with the `ui-sync` module, then terminal / artifacts / deck / menus. Each extraction green on e2e before the next.
-- [ ] **URL artifact type** (Sheets / Notion / Slack links) — cheap, frequently useful.
-- [ ] **Group state roll-up** — a collapsed group reflects its most-urgent child state (glow "blocked" if any member is). Cheap triage win, on-thesis.
-- [ ] **UI polish** — (a) HTML *file* artifacts join the mtime auto-reload (iframe artifacts are currently excluded; live marimo/jupyter keep their own `--watch`); (b) tab labels truncate (max-width + ellipsis + hover title) and gain a file-type icon; (c) redesign file-type icons — distinct inline-SVG glyphs for md / sql / marimo / jupyter / csv / py / html / json, letter fallback for the long tail; (d) `hadron-artifacts` skill advises short labels.
+- [x] **URL artifact type** (Sheets / Notion / Slack links) — render/tab/sidebar/add-popover all wired.
+- [x] **Status deck layout** — View ▸ Deck Layout ▸ Status re-buckets every agent by state (Blocked → Needs Review → Working → Idle), ignoring semantic groups, so whoever needs a human floats to the top. Supersedes the earlier "group state roll-up" idea (a status view answers "who needs me?" better than a collapsed-group glow).
+- [x] **CSV raw-text editing** — Preview⇄Edit toggle (notepad textarea, delete/edit rows, save via `POST /api/file`); per-extension mode memory. (Not originally scoped here; see Deprioritized note.)
+- [x] **UI polish** — (a) HTML *file* artifacts join the mtime auto-reload (iframe artifacts are currently excluded; live marimo/jupyter keep their own `--watch`); (b) tab labels truncate (max-width + ellipsis + hover title) and gain a file-type icon; (c) redesign file-type icons — distinct inline-SVG glyphs for md / sql / marimo / jupyter / csv / py / html / json, letter fallback for the long tail; (d) `hadron-artifacts` skill advises short labels.
 - [ ] **Harden fragile state-detector regexes** (English-keyword/glyph-dependent, version-fragile spinner). Carried from v0.6 P2.
 
 ## v0.8 — The moat: artifact as a review surface
@@ -145,7 +146,7 @@ The differentiator. Spec each item when started; gather usage feedback first.
 
 ## Deprioritized / off-thesis (kept visible so we don't re-add by reflex)
 - **SQL connector + Ctrl+Enter execute** — building a SQL IDE / human does the execution; off the "supervise agents" thesis.
-- **CSV editing** — superseded by data-aware *preview* (we review, the agent edits).
+- **CSV editing** — *raw-text quick-edit shipped* (Preview⇄Edit toggle: notepad-style textarea, delete/edit rows, save to disk via `POST /api/file`). The heavy spreadsheet-*grid* editor stays off-thesis — superseded by data-aware *preview* (we review, the agent edits).
 - **Git integration (branch/commit per agent)** — cmux's code-diff/SWE turf; don't chase.
 
 ## Anti-roadmap (do NOT build)
