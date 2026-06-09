@@ -35,6 +35,16 @@ Then project deps (always needed on a fresh clone):
 npm install
 ```
 
+Now put the `hadron` CLI on PATH and make its operation skills usable by agents in **any** repo:
+
+```bash
+npm link               # exposes `hadron` globally (alt: npm i -g .)
+which hadron           # verify it resolved
+hadron skills install  # symlink /hadron-whoami, -spawn, -artifacts, -notebook-kernel into ~/.claude/skills/
+```
+
+Why this is needed (don't skip): agents run in their *own* git repos, but Claude Code only discovers skills up to each repo's root — so the operation skills, and the CLI they shell out to, must be installed user-globally once per machine. Without this, `hadron spawn` below fails and agents can't drive each other. The skills are symlinked (not copied), so they track repo updates.
+
 ## 3. Scaffold a workspace
 
 Ask the user which directory should be the workspace root (where `.hadron/` config lives and where agents work) and how they want to group agents. Then let the deterministic scaffolder write the config:

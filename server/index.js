@@ -246,12 +246,31 @@ function autostartAgent(id, launchCommand, task) {
   })();
 }
 
+// Stamp Hadron's own port + token onto a freshly created tmux session so the
+// bundled `hadron` CLI (bin/hadron.js) running inside it targets THIS server,
+// regardless of the agent's cwd or which workspace/port it belongs to. Without
+// this an agent on a non-3000 server falls back to :3000 with the wrong token.
+//
+// tmux does NOT import arbitrary client env into a session when its server is
+// already running (the common multi-agent case), so passing `env` to new-session
+// is unreliable. We set it explicitly with set-environment, then respawn the
+// initial shell so it inherits the values. set-environment (not the global
+// update-environment option) keeps it per-session and immune to later browser
+// attaches clobbering it. respawn-pane is portable to our tmux >= 3.0 floor
+// (the cleaner `new-session -e` is 3.2+).
+function applyAgentEnv(tmuxName, cwd) {
+  tmux(["set-environment", "-t", tmuxName, "HADRON_PORT", String(PORT)]);
+  tmux(["set-environment", "-t", tmuxName, "HADRON_TOKEN", AUTH_TOKEN || ""]);
+  tmuxSafe(["respawn-pane", "-k", "-t", tmuxName, "-c", cwd || WORKSPACE]);
+}
+
 function ensureTmuxSession(sessionId, cwd) {
   const tmuxName = tmuxSessionName(sessionId);
   try {
     tmux(["has-session", "-t", tmuxName]);
   } catch {
     tmux(["new-session", "-d", "-s", tmuxName, "-x", "80", "-y", "24", "-c", cwd || WORKSPACE]);
+    applyAgentEnv(tmuxName, cwd || WORKSPACE);
   }
 }
 
@@ -1126,6 +1145,7 @@ wss.on("connection", (ws) => {
       tmux(["has-session", "-t", effectiveTmuxName]);
     } catch {
       tmux(["new-session", "-d", "-s", effectiveTmuxName, "-x", "80", "-y", "24", "-c", cwd]);
+      applyAgentEnv(effectiveTmuxName, cwd);
     }
   } else {
     ensureTmuxSession(sessionId, resolveAgentCwd(sessions.get(sessionId)));

@@ -7,11 +7,14 @@
  * by asking the SERVER to resolve its tmux session — it never reverse-engineers ids.
  */
 import { execFileSync } from "child_process";
-import { readFileSync, existsSync } from "fs";
-import { join, dirname } from "path";
+import { readFileSync, existsSync, mkdirSync, symlinkSync, lstatSync, readlinkSync, unlinkSync, realpathSync } from "fs";
+import { join, dirname, resolve } from "path";
+import { fileURLToPath } from "url";
+import { homedir } from "os";
 
 const PORT = process.env.HADRON_PORT || 3000;
 const BASE = `http://127.0.0.1:${PORT}`;
+const REPO = dirname(dirname(fileURLToPath(import.meta.url)));
 
 function die(msg, code = 1) {
   console.error(msg);
@@ -70,6 +73,78 @@ async function whoami() {
   const sess = currentTmuxSession();
   if (!sess) die("Not inside a tmux pane — can't determine which agent you are.");
   return api("GET", `/api/whoami?tmuxSession=${encodeURIComponent(sess)}`);
+}
+
+// ── skills install ──
+// Claude Code only discovers skills under .claude/skills/ up to the git-repo root,
+// so the operation skills (which live in THIS repo) are invisible to agents running
+// in other repos. The one place every agent sees regardless of cwd is the user-level
+// ~/.claude/skills/. We symlink (not copy) so they track repo updates. hadron-setup
+// is intentionally excluded — it's run by whoever sets Hadron up, from this repo.
+const OPERATION_SKILLS = ["hadron-whoami", "hadron-artifacts", "hadron-spawn", "hadron-notebook-kernel"];
+
+function userSkillsDir() {
+  return join(homedir(), ".claude", "skills");
+}
+
+// Resolve a symlink target without throwing on a dangling link.
+function linkTarget(p) {
+  try { return resolve(dirname(p), readlinkSync(p)); } catch { return null; }
+}
+
+function skillsInstall() {
+  const destDir = userSkillsDir();
+  mkdirSync(destDir, { recursive: true });
+  let linked = 0, already = 0, skipped = 0;
+  for (const name of OPERATION_SKILLS) {
+    const src = join(REPO, ".claude", "skills", name);
+    const dest = join(destDir, name);
+    if (!existsSync(src)) { console.error(`  skip ${name} — not found in repo`); skipped++; continue; }
+    let st = null;
+    try { st = lstatSync(dest); } catch {}
+    if (st) {
+      if (st.isSymbolicLink() && linkTarget(dest) === src) { console.log(`  ok   ${name} — already linked`); already++; continue; }
+      console.error(`  skip ${name} — ${dest} already exists (${st.isSymbolicLink() ? "points elsewhere" : "not a symlink"}); leaving it untouched`);
+      skipped++;
+      continue;
+    }
+    symlinkSync(src, dest);
+    console.log(`  link ${name} → ${dest}`);
+    linked++;
+  }
+  console.log(`\nskills install: ${linked} linked, ${already} already, ${skipped} skipped`);
+  if (linked || already) console.log(`Agents in any repo can now use /${OPERATION_SKILLS.join(", /")}.`);
+}
+
+function skillsUninstall() {
+  const destDir = userSkillsDir();
+  let removed = 0;
+  for (const name of OPERATION_SKILLS) {
+    const dest = join(destDir, name);
+    let st = null;
+    try { st = lstatSync(dest); } catch { continue; }
+    if (st.isSymbolicLink() && linkTarget(dest) === join(REPO, ".claude", "skills", name)) {
+      unlinkSync(dest);
+      console.log(`  unlink ${name}`);
+      removed++;
+    } else {
+      console.error(`  skip ${name} — not a link we created`);
+    }
+  }
+  console.log(`\nskills uninstall: ${removed} removed`);
+}
+
+function skillsStatus() {
+  const destDir = userSkillsDir();
+  for (const name of OPERATION_SKILLS) {
+    const dest = join(destDir, name);
+    const src = join(REPO, ".claude", "skills", name);
+    let st = null;
+    try { st = lstatSync(dest); } catch {}
+    if (!st) console.log(`  ${name}: not installed`);
+    else if (st.isSymbolicLink() && linkTarget(dest) === src) console.log(`  ${name}: linked`);
+    else console.log(`  ${name}: conflict (${dest} exists, not our link)`);
+  }
 }
 
 // ── flag parsing ──
@@ -138,6 +213,14 @@ async function main() {
       console.log(`spawned ${created.name} (${created.id})${flags.start ? " — launching" : ""}`);
       break;
     }
+    case "skills": {
+      const sub = positional[0] || "status";
+      if (sub === "install") { skillsInstall(); break; }
+      if (sub === "uninstall") { skillsUninstall(); break; }
+      if (sub === "status") { skillsStatus(); break; }
+      die("usage: hadron skills <install|uninstall|status>");
+      break;
+    }
     case "send": {
       const id = positional[0];
       const keys = positional[1];
@@ -199,6 +282,8 @@ Commands:
   hadron artifacts add [--auto | <path...>]  attach files to the current agent
   hadron artifacts ls                      list the current agent's artifacts
   hadron notes [show|set "..."|append "..."]
+  hadron skills install                    symlink operation skills into ~/.claude/skills/ (cross-repo discovery)
+  hadron skills [status|uninstall]
   hadron send <id> "keys"                  low-level: type keys into a pane
 
 Env: HADRON_PORT (default 3000), HADRON_TOKEN (else read from .hadron/token)`);
