@@ -6,7 +6,7 @@ import { spawn } from "node-pty";
 import { fileURLToPath } from "url";
 import { dirname, join, basename } from "path";
 import { execSync, execFileSync, spawn as cpSpawn } from "child_process";
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, watch as fsWatch, chmodSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, watch as fsWatch, chmodSync, unlinkSync } from "fs";
 import { connect as netConnect } from "net";
 import { networkInterfaces, hostname } from "os";
 import { URL } from "url";
@@ -131,6 +131,23 @@ function loadOrCreateToken() {
   writeFileSync(tokenPath, token, { mode: 0o600 });
   try { chmodSync(tokenPath, 0o600); } catch {}
   return token;
+}
+
+// Record which port THIS workspace's server is on, so the `hadron` CLI can discover
+// it the same way it discovers the token — by walking up from an agent's cwd to the
+// nearest `.hadron/`. This makes the CLI correct for pre-existing tmux sessions and
+// across restarts, where the per-session env stamp (applyAgentEnv) can't reach. The
+// pid lets the CLI tell a stale file (dead server) from a live one.
+function runtimeFilePath() {
+  return join(getWorkspaceDir(), ".hadron", "runtime.json");
+}
+function writeRuntimeFile() {
+  try {
+    writeFileSync(runtimeFilePath(), JSON.stringify({ port: PORT, pid: process.pid, startedAt: Date.now() }), { mode: 0o600 });
+  } catch {}
+}
+function removeRuntimeFile() {
+  try { unlinkSync(runtimeFilePath()); } catch {}
 }
 
 // When bound to all interfaces, the browser reaches us via a concrete IP (LAN/Tailscale),
@@ -1275,6 +1292,7 @@ function resolveAgentCwd(session) {
 server.listen(PORT, HADRON_HOST, () => {
   const config = initWorkspace(WORKSPACE);
   AUTH_TOKEN = loadOrCreateToken();
+  writeRuntimeFile();
   console.log(`Workspace: ${WORKSPACE} (${config.name})`);
   if (HADRON_HOST !== "127.0.0.1") {
     console.log(`⚠ Binding ${HADRON_HOST} — API is reachable beyond localhost. Token + Origin guard active.`);
@@ -1331,6 +1349,7 @@ function cleanupSubprocesses() {
     try { entry.process.kill(); } catch {}
   }
   jupyterProcesses.clear();
+  removeRuntimeFile();
 }
 process.on("exit", cleanupSubprocesses);
 process.on("SIGINT", () => { cleanupSubprocesses(); process.exit(0); });

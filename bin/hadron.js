@@ -12,8 +12,6 @@ import { join, dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 import { homedir } from "os";
 
-const PORT = process.env.HADRON_PORT || 3000;
-const BASE = `http://127.0.0.1:${PORT}`;
 const REPO = dirname(dirname(fileURLToPath(import.meta.url)));
 
 function die(msg, code = 1) {
@@ -21,21 +19,46 @@ function die(msg, code = 1) {
   process.exit(code);
 }
 
-function findToken() {
-  if (process.env.HADRON_TOKEN) return process.env.HADRON_TOKEN;
+// Find the nearest `.hadron/` dir walking up from cwd. Token AND port are both read
+// from THIS dir so they're always a matched pair (right server → right token), which
+// matters in multi-workspace setups where each workspace runs its own server/port.
+function findHadronDir() {
   let dir = process.cwd();
   while (true) {
-    const t = join(dir, ".hadron", "token");
-    if (existsSync(t)) {
-      try { return readFileSync(t, "utf-8").trim(); } catch {}
-    }
+    const h = join(dir, ".hadron");
+    if (existsSync(join(h, "token"))) return h;
     const parent = dirname(dir);
-    if (parent === dir) break;
+    if (parent === dir) return null;
     dir = parent;
+  }
+}
+const HADRON_DIR = findHadronDir();
+
+function findToken() {
+  if (process.env.HADRON_TOKEN) return process.env.HADRON_TOKEN;
+  if (HADRON_DIR) {
+    try { return readFileSync(join(HADRON_DIR, "token"), "utf-8").trim(); } catch {}
   }
   return null;
 }
+
+// Port resolution mirrors token discovery: explicit env override → the server's
+// own record in the same `.hadron/` (handles pre-existing sessions + restarts the
+// per-session env stamp can't) → :3000 default.
+function findPort() {
+  if (process.env.HADRON_PORT) return process.env.HADRON_PORT;
+  if (HADRON_DIR) {
+    try {
+      const rt = JSON.parse(readFileSync(join(HADRON_DIR, "runtime.json"), "utf-8"));
+      if (rt && rt.port) return rt.port;
+    } catch {}
+  }
+  return 3000;
+}
+
 const TOKEN = findToken();
+const PORT = findPort();
+const BASE = `http://127.0.0.1:${PORT}`;
 
 async function api(method, path, body) {
   const headers = {};
@@ -286,7 +309,8 @@ Commands:
   hadron skills [status|uninstall]
   hadron send <id> "keys"                  low-level: type keys into a pane
 
-Env: HADRON_PORT (default 3000), HADRON_TOKEN (else read from .hadron/token)`);
+Env: HADRON_PORT / HADRON_TOKEN override; otherwise both are read from the
+nearest .hadron/ (runtime.json + token) walking up from cwd; port defaults to 3000.`);
   }
 }
 
