@@ -49,7 +49,7 @@ scripts/
   setup-workspace.js  # Interactive workspace initializer
 test/
   unit/               # detectState/nextState fixtures + security HTTP suite (npm test)
-  e2e/                # Playwright browser modules M1-M4 (npm run test:e2e)
+  e2e/                # Playwright browser modules M1-M5 (npm run test:e2e)
 ```
 
 ## Conventions
@@ -106,6 +106,7 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #   + test/e2e/m2-lifecycle.js   (create agent → terminal connects + round-trips)
 #   + test/e2e/m3-agent-mgmt.js  (CLI spawn → group + artifacts + mutual related link)
 #   + test/e2e/m4-artifacts.js   (editor WS close → vim tmux reaped; shells preserved)
+#   + test/e2e/m5-data-preview.js (CSV stats strip + notebook error/changed cells)
 ```
 
 Kept out of `npm test` so the core suite stays fast and dependency-free

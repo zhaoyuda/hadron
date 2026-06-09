@@ -9,8 +9,8 @@
 // This is a classic <script> loaded BEFORE app.js; top-level globals it reads
 // (activeSessionId, activeTab, layoutMode, perSessionTab, perSessionLayout,
 // deckSortMode, deckGroupBy, currentTheme, notifyLevel, openTabsPerSession) and
-// render fns (renderWorkHeader/renderWorkContent/deferredFit) are declared in
-// app.js but only dereferenced at call time, so there's no load-order TDZ.
+// render fns (renderWorkHeader/renderWorkContent in app.js, deferredFit in
+// terminal.js) are only dereferenced at call time, so there's no load-order TDZ.
 const uiSync = (() => {
   try { return new BroadcastChannel("hadron-ui-sync"); } catch { return null; }
 })();

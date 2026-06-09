@@ -108,7 +108,7 @@ gated the release.
 ## v0.8 — The moat: artifact as a review surface
 
 The differentiator. Spec each item when started; gather usage feedback first.
-- [ ] **Data-aware preview** — CSV/dataframe: shape, null counts, dtypes, quick stats up top. Notebooks: surface errored/changed cells. Turns "render" into "catch silent errors fast." (Foundation the annotation loop anchors onto.)
+- [x] **Data-aware preview** — CSV/dataframe: shape, null counts, dtypes, quick stats up top. Notebooks: surface errored/changed cells. Turns "render" into "catch silent errors fast." (Foundation the annotation loop anchors onto.) *Shipped:* `data-preview.js` classic-script module — CSV stats strip above the table (per-column dtype / null count / min·μ·max, nulls highlighted, stats pass capped at 5k rows); notebook error banner + red-marked cells (banner also shown above live-jupyter iframes); "changed" badges on cells whose source moved since the previous render (in-memory hash diff, fed by the existing mtime auto-reload — static notebooks now join that polling). E2E module M5 covers the full click-through.
 - [ ] **Inline review → dispatch → resolve loop** — annotate an artifact (whole-doc or anchored region/cell/element), batch comments, flush them as one structured instruction into the agent's Claude session, mark resolved after it revises. Build the *review loop*, **not** a WYSIWYG editor.
 
 ## v0.9 — Durability & reach

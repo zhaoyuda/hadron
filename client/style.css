@@ -1135,8 +1135,38 @@ html, body {
   color: var(--text3);
 }
 
+/* Data-aware preview: error banner + cell markers (data-preview.js) */
+.jupyter-error-banner {
+  margin-bottom: 14px;
+  padding: 6px 12px;
+  border: 1px solid rgba(248,81,73,.45);
+  border-radius: 6px;
+  background: rgba(248,81,73,.1);
+  color: var(--red);
+  font-size: 12px;
+}
+.jupyter-live-wrap { display: flex; flex-direction: column; width: 100%; height: 100%; }
+.jupyter-live-wrap .jupyter-error-banner { margin: 8px 12px 8px; flex: 0 0 auto; }
+.jupyter-cell-errored { border-left: 3px solid var(--red) !important; }
+.jupyter-cell-badge {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  z-index: 1;
+  padding: 0 6px;
+  border: 1px solid rgba(210,153,34,.55);
+  border-radius: 8px;
+  background: rgba(210,153,34,.12);
+  color: var(--yellow);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: .5px;
+  user-select: none;
+}
+
 /* Jupyter cells */
 .jupyter-cell {
+  position: relative;
   margin-bottom: 12px;
   border-radius: 8px;
   overflow: hidden;
@@ -1420,6 +1450,37 @@ html, body {
   width: 100%;
   height: 100%;
 }
+/* Data-aware stats strip above the CSV table (data-preview.js) */
+.csv-stats {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  font-size: 11px;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+}
+.csv-stats-shape { color: var(--text); font-weight: 600; white-space: nowrap; }
+.csv-stats-cap { color: var(--text3); font-style: italic; white-space: nowrap; }
+.csv-stats-cols { display: flex; flex-wrap: wrap; gap: 4px 6px; }
+.csv-stat-col {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text3);
+  white-space: nowrap;
+}
+.csv-stat-col.has-nulls { border-color: rgba(210,153,34,.55); }
+.csv-stat-name { color: var(--text2); font-weight: 600; }
+.csv-stat-dtype { color: var(--text3); }
+.csv-stat-null { color: var(--yellow); font-weight: 600; }
+.csv-stat-range { color: var(--text3); }
+
 .csv-toggle {
   align-self: flex-end;
   margin: 6px 12px 4px;

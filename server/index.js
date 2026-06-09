@@ -1010,6 +1010,9 @@ app.post("/api/jupyter/start", (req, res) => {
     let attempts = 0;
     const fileName = filePath.substring(filePath.lastIndexOf("/") + 1);
     const checkReady = () => {
+      // Spawn failed or exited (e.g. jupyter not installed): say so now, so the
+      // client falls back to the static preview instead of iframing a dead proxy.
+      if (!jupyterProcesses.has(filePath)) return res.json({ error: "jupyter unavailable" });
       attempts++;
       const checkReq = http.get(`http://127.0.0.1:${port}${baseUrl}api/status`, (r) => {
         r.resume();
