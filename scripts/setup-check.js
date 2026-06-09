@@ -9,7 +9,7 @@
  *   node scripts/setup-check.js [workspace-path] [--port 3000]
  *
  * Exit code 0 if all REQUIRED checks pass, 1 otherwise. Optional checks
- * (Claude Code, workspace config) only warn.
+ * (Claude Code, hadron CLI, skill links, workspace config) only warn.
  */
 import { execFileSync } from "child_process";
 import { existsSync } from "fs";
@@ -101,6 +101,23 @@ async function main() {
   const claudeV = cmdVersion("claude", ["--version"]) || cmdVersion("claude", ["-v"]);
   if (claudeV) pass(`Claude Code present (${claudeV.split("\n")[0]})`);
   else warn("Claude Code not found on PATH — recommended as the agent runtime + for /hadron-setup");
+
+  // hadron CLI on PATH (optional) — no args prints usage and exits 0, so this
+  // doubles as an "it actually runs" probe, not just a which(1) lookup.
+  if (cmdVersion("hadron", []) !== null) pass("hadron CLI on PATH");
+  else warn("hadron CLI not on PATH — run `npm link` so skills and agents in other repos can use it");
+
+  // operation skills linked into ~/.claude/skills (optional) — the server also
+  // self-heals these on startup, so missing links are a normal fresh-clone state.
+  const { skillsStatus } = await import("../server/skills.js");
+  const skills = skillsStatus(repoRoot);
+  if (skills.length > 0) {
+    const linked = skills.filter((s) => s.state === "linked").length;
+    const conflicts = skills.filter((s) => s.state === "conflict").map((s) => s.name);
+    if (conflicts.length > 0) warn(`skill name conflict: ${conflicts.join(", ")} — an existing non-Hadron entry in ~/.claude/skills occupies that name`);
+    if (linked === skills.length) pass(`operation skills linked into ~/.claude/skills (${linked}/${skills.length})`);
+    else if (conflicts.length < skills.length - linked) warn(`${skills.length - linked - conflicts.length} operation skill(s) not linked — run \`hadron skills sync\` (or the server links them on startup)`);
+  }
 
   // workspace config (optional — informational)
   if (workspace) {

@@ -50,6 +50,8 @@ The `/hadron-setup` skill checks your prerequisites, installs anything missing f
 # macOS:        brew install node tmux
 # Debian/Ubuntu: sudo apt-get install -y nodejs npm tmux
 npm install
+npm link                                 # put the `hadron` CLI on PATH
+hadron skills sync                       # symlink operation skills into ~/.claude/skills/ so agents in any repo can use them
 npm run setup:check                      # verify node>=18, tmux>=3, port free
 node scripts/setup-workspace.js ~/work   # scaffold workspace config + sample agent
 node server/index.js ~/work              # start server, then open http://localhost:3000
@@ -156,6 +158,15 @@ Hadron includes Claude Code skills that agents can invoke:
 | `/hadron-spawn` | Turn intent into a briefed, auto-started agent |
 | `/hadron-artifacts` | Attach output files to this agent so they show in the dashboard |
 | `/hadron-notebook-kernel` | Configure Python environment for marimo/Jupyter (detect, create, switch envs) |
+
+Skills live in this repo, but Claude Code only discovers skills user-globally or up to the current repo's root — so agents in *other* repos can't see them until they're linked into `~/.claude/skills/`. `hadron skills sync` does that (the server also self-heals on startup, additively linking any missing skills — it never touches your own skills). Links are **symlinks, not copies**, so skill updates flow through automatically on `git pull`. `/hadron-setup` is the exception: it's the bootstrap, run from the repo and never linked. If you have multiple Hadron checkouts, the first one to create a link wins; others leave it alone and `hadron skills status` reports it as a conflict.
+
+```bash
+hadron skills install     # symlink operation skills into ~/.claude/skills/ (additive)
+hadron skills sync        # like install, but also prune our own dead links
+hadron skills status      # show link state per skill (linked / not installed / conflict)
+hadron skills uninstall   # remove our links
+```
 
 ## Deploying Remotely
 

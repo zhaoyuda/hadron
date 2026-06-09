@@ -44,13 +44,19 @@ function findToken() {
 
 // Port resolution mirrors token discovery: explicit env override → the server's
 // own record in the same `.hadron/` (handles pre-existing sessions + restarts the
-// per-session env stamp can't) → :3000 default.
+// per-session env stamp can't) → :3000 default. runtime.json is only trusted if
+// the pid it names is still alive — the server deletes it on clean exit, but a
+// crash/SIGKILL skips cleanup, and a stale port would misdirect the CLI (or, if
+// the port got reused, send the token to the wrong server).
 function findPort() {
   if (process.env.HADRON_PORT) return process.env.HADRON_PORT;
   if (HADRON_DIR) {
     try {
       const rt = JSON.parse(readFileSync(join(HADRON_DIR, "runtime.json"), "utf-8"));
-      if (rt && rt.port) return rt.port;
+      if (rt && rt.port && rt.pid) {
+        process.kill(rt.pid, 0); // throws if the process is gone
+        return rt.port;
+      }
     } catch {}
   }
   return 3000;
