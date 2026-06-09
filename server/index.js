@@ -15,6 +15,7 @@ import { StateDetector } from "./state-detector.js";
 import { loadAgents, loadAgent, saveAgent, archiveAgent, deleteAgent, initWorkspace, getWorkspaceDir, appendAgentField, isSelfWrite } from "./agent-store.js";
 import { resolve } from "path";
 import { tmux, tmuxSafe, isValidId } from "./tmux.js";
+import { syncSkills } from "./skills.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -1293,6 +1294,13 @@ server.listen(PORT, HADRON_HOST, () => {
   const config = initWorkspace(WORKSPACE);
   AUTH_TOKEN = loadOrCreateToken();
   writeRuntimeFile();
+  // Additive self-heal: link any not-yet-linked operation skills into ~/.claude/skills/
+  // so a new skill appears after `git pull` + restart. Additive only (never prune or
+  // re-point) → safe with multiple servers / checkouts. Full reconcile is `hadron skills sync`.
+  try {
+    const s = syncSkills(dirname(__dirname));
+    if (s.linked) console.log(`Skills: linked ${s.linked} new skill(s) into ~/.claude/skills/`);
+  } catch {}
   console.log(`Workspace: ${WORKSPACE} (${config.name})`);
   if (HADRON_HOST !== "127.0.0.1") {
     console.log(`⚠ Binding ${HADRON_HOST} — API is reachable beyond localhost. Token + Origin guard active.`);

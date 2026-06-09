@@ -38,12 +38,12 @@ npm install
 Now put the `hadron` CLI on PATH and make its operation skills usable by agents in **any** repo:
 
 ```bash
-npm link               # exposes `hadron` globally (alt: npm i -g .)
-which hadron           # verify it resolved
-hadron skills install  # symlink /hadron-whoami, -spawn, -artifacts, -notebook-kernel into ~/.claude/skills/
+npm link            # exposes `hadron` globally (alt: npm i -g .)
+which hadron        # verify it resolved
+hadron skills sync  # symlink the operation skills into ~/.claude/skills/
 ```
 
-Why this is needed (don't skip): agents run in their *own* git repos, but Claude Code only discovers skills up to each repo's root — so the operation skills, and the CLI they shell out to, must be installed user-globally once per machine. Without this, `hadron spawn` below fails and agents can't drive each other. The skills are symlinked (not copied), so they track repo updates.
+Why this is needed (don't skip): agents run in their *own* git repos, but Claude Code only discovers skills up to each repo's root — so the operation skills, and the CLI they shell out to, must be installed user-globally once per machine. Without this, `hadron spawn` below fails and agents can't drive each other. The skills are **symlinked, not copied**, so edits to a skill flow through on `git pull` with no re-install. The set is scanned from the repo, so this is one command no matter how many skills exist.
 
 ## 3. Scaffold a workspace
 
@@ -80,3 +80,22 @@ hadron spawn "Hello Hadron" --launch shell --start
 ## 6. Hand off
 
 Tell the user: agents are created from the **Agents** menu (or `hadron spawn`); each agent has its own terminal, artifacts, and notes; inside any agent, `/hadron-whoami` loads that agent's context. Optional: configure a notebook kernel with **hadron-notebook-kernel**.
+
+## Upgrading (NOT a re-run of this skill)
+
+This skill is a **one-time bootstrap** — don't re-run it to upgrade. To pull a new
+version:
+
+```bash
+git pull          # skill content updates flow through the symlinks automatically
+# restart the server
+```
+
+On restart the server **self-heals**: it links any newly-added operation skills into
+`~/.claude/skills/` (additive — it never touches the user's own skills). If you'd rather
+not restart, or want to also prune links for skills that were removed upstream, run:
+
+```bash
+hadron skills sync   # add new links + prune our own dead ones
+hadron skills status # show what's linked
+```

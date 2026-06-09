@@ -7,10 +7,10 @@
  * by asking the SERVER to resolve its tmux session — it never reverse-engineers ids.
  */
 import { execFileSync } from "child_process";
-import { readFileSync, existsSync, mkdirSync, symlinkSync, lstatSync, readlinkSync, unlinkSync, realpathSync } from "fs";
-import { join, dirname, resolve } from "path";
+import { readFileSync, existsSync } from "fs";
+import { join, dirname } from "path";
 import { fileURLToPath } from "url";
-import { homedir } from "os";
+import { syncSkills, removeSkills, skillsStatus, userSkillsDir } from "../server/skills.js";
 
 const REPO = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -98,75 +98,36 @@ async function whoami() {
   return api("GET", `/api/whoami?tmuxSession=${encodeURIComponent(sess)}`);
 }
 
-// ── skills install ──
-// Claude Code only discovers skills under .claude/skills/ up to the git-repo root,
-// so the operation skills (which live in THIS repo) are invisible to agents running
-// in other repos. The one place every agent sees regardless of cwd is the user-level
-// ~/.claude/skills/. We symlink (not copy) so they track repo updates. hadron-setup
-// is intentionally excluded — it's run by whoever sets Hadron up, from this repo.
-const OPERATION_SKILLS = ["hadron-whoami", "hadron-artifacts", "hadron-spawn", "hadron-notebook-kernel"];
-
-function userSkillsDir() {
-  return join(homedir(), ".claude", "skills");
+// ── skills linking (shared logic in ../server/skills.js) ──
+// The skill SET is scanned from the repo, so adding a new skill needs no code change.
+// `install` is additive (create missing); `sync` also prunes our own dead links.
+function reportEvent(kind, name, dest) {
+  if (kind === "link") console.log(`  link   ${name} → ${dest}`);
+  else if (kind === "prune") console.log(`  prune  ${name} (target gone)`);
+  else if (kind === "unlink") console.log(`  unlink ${name}`);
+  else if (kind === "skip") console.error(`  skip   ${name} — ${dest} exists and isn't our link; leaving it untouched`);
 }
 
-// Resolve a symlink target without throwing on a dangling link.
-function linkTarget(p) {
-  try { return resolve(dirname(p), readlinkSync(p)); } catch { return null; }
-}
-
-function skillsInstall() {
-  const destDir = userSkillsDir();
-  mkdirSync(destDir, { recursive: true });
-  let linked = 0, already = 0, skipped = 0;
-  for (const name of OPERATION_SKILLS) {
-    const src = join(REPO, ".claude", "skills", name);
-    const dest = join(destDir, name);
-    if (!existsSync(src)) { console.error(`  skip ${name} — not found in repo`); skipped++; continue; }
-    let st = null;
-    try { st = lstatSync(dest); } catch {}
-    if (st) {
-      if (st.isSymbolicLink() && linkTarget(dest) === src) { console.log(`  ok   ${name} — already linked`); already++; continue; }
-      console.error(`  skip ${name} — ${dest} already exists (${st.isSymbolicLink() ? "points elsewhere" : "not a symlink"}); leaving it untouched`);
-      skipped++;
-      continue;
-    }
-    symlinkSync(src, dest);
-    console.log(`  link ${name} → ${dest}`);
-    linked++;
+function skillsSync({ prune }) {
+  const res = syncSkills(REPO, { prune, onEvent: reportEvent });
+  const parts = [`${res.linked} linked`, `${res.already} already`, `${res.skipped} skipped`];
+  if (prune) parts.push(`${res.pruned} pruned`);
+  console.log(`\nskills ${prune ? "sync" : "install"}: ${parts.join(", ")}`);
+  if (res.linked || res.already) {
+    const linked = skillsStatus(REPO).filter((s) => s.state === "linked").map((s) => "/" + s.name);
+    if (linked.length) console.log(`Agents in any repo can use ${linked.join(", ")}.`);
   }
-  console.log(`\nskills install: ${linked} linked, ${already} already, ${skipped} skipped`);
-  if (linked || already) console.log(`Agents in any repo can now use /${OPERATION_SKILLS.join(", /")}.`);
 }
 
 function skillsUninstall() {
-  const destDir = userSkillsDir();
-  let removed = 0;
-  for (const name of OPERATION_SKILLS) {
-    const dest = join(destDir, name);
-    let st = null;
-    try { st = lstatSync(dest); } catch { continue; }
-    if (st.isSymbolicLink() && linkTarget(dest) === join(REPO, ".claude", "skills", name)) {
-      unlinkSync(dest);
-      console.log(`  unlink ${name}`);
-      removed++;
-    } else {
-      console.error(`  skip ${name} — not a link we created`);
-    }
-  }
+  const { removed } = removeSkills(REPO, { onEvent: reportEvent });
   console.log(`\nskills uninstall: ${removed} removed`);
 }
 
-function skillsStatus() {
-  const destDir = userSkillsDir();
-  for (const name of OPERATION_SKILLS) {
-    const dest = join(destDir, name);
-    const src = join(REPO, ".claude", "skills", name);
-    let st = null;
-    try { st = lstatSync(dest); } catch {}
-    if (!st) console.log(`  ${name}: not installed`);
-    else if (st.isSymbolicLink() && linkTarget(dest) === src) console.log(`  ${name}: linked`);
-    else console.log(`  ${name}: conflict (${dest} exists, not our link)`);
+function printSkillsStatus() {
+  for (const s of skillsStatus(REPO)) {
+    const dest = join(userSkillsDir(), s.name);
+    console.log(`  ${s.name}: ${s.state}${s.state === "conflict" ? ` (${dest} exists, not our link)` : ""}`);
   }
 }
 
@@ -238,10 +199,11 @@ async function main() {
     }
     case "skills": {
       const sub = positional[0] || "status";
-      if (sub === "install") { skillsInstall(); break; }
+      if (sub === "install") { skillsSync({ prune: false }); break; }
+      if (sub === "sync") { skillsSync({ prune: true }); break; }
       if (sub === "uninstall") { skillsUninstall(); break; }
-      if (sub === "status") { skillsStatus(); break; }
-      die("usage: hadron skills <install|uninstall|status>");
+      if (sub === "status") { printSkillsStatus(); break; }
+      die("usage: hadron skills <install|sync|uninstall|status>");
       break;
     }
     case "send": {
@@ -305,7 +267,8 @@ Commands:
   hadron artifacts add [--auto | <path...>]  attach files to the current agent
   hadron artifacts ls                      list the current agent's artifacts
   hadron notes [show|set "..."|append "..."]
-  hadron skills install                    symlink operation skills into ~/.claude/skills/ (cross-repo discovery)
+  hadron skills install                    symlink operation skills into ~/.claude/skills/ (additive)
+  hadron skills sync                       like install, but also prune our own dead links
   hadron skills [status|uninstall]
   hadron send <id> "keys"                  low-level: type keys into a pane
 
