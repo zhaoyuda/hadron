@@ -99,7 +99,7 @@ The repo includes sample files in `examples/` demonstrating supported artifact t
 Run separate Hadron instances on different ports:
 
 ```bash
-node server/index.js ~/work/ato &                # port 3000
+node server/index.js ~/work/demo &                # port 3000
 PORT=3001 node server/index.js ~/work &           # port 3001
 ```
 

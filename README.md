@@ -194,7 +194,7 @@ The auto-generated token (`.hadron/token`) still gates every mutating request, b
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for the full roadmap. Current version: **v0.6**.
+See [ROADMAP.md](ROADMAP.md) for the full roadmap. Current version: **v0.7**.
 
 ## Architecture
 

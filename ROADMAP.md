@@ -125,7 +125,7 @@ The differentiator. Spec each item when started; gather usage feedback first.
 **Current approach (v0.2):** Run separate server instances on different ports. Tmux sessions are namespaced by workspace (`hadron-<workspace>-<agent-id>`) so multiple instances don't collide.
 
 **Long-term vision:** Single server, single port, project switcher in the UI.
-- URL-based routing: `localhost:3000/ato`, `localhost:3000/work`
+- URL-based routing: `localhost:3000/demo`, `localhost:3000/work`
 - Left-side project switcher dropdown (where workspace name is now)
 - Each project has its own `.hadron/` config, agents, and groups
 - Tmux sessions stay alive when switching away — UI just reconnects when you switch back

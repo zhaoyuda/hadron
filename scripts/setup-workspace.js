@@ -4,7 +4,7 @@
  *
  * Usage:
  *   node scripts/setup-workspace.js ~/work
- *   node scripts/setup-workspace.js ~/work/ato --name ato --groups "Research,Workers"
+ *   node scripts/setup-workspace.js ~/work/demo --name demo --groups "Research,Workers"
  *
  * Creates .hadron/config.json and .hadron/agents/ if they don't exist.
  * Safe to re-run — won't overwrite existing config.
@@ -20,7 +20,7 @@ if (args.length === 0) {
   console.log("");
   console.log("Examples:");
   console.log("  node scripts/setup-workspace.js ~/work");
-  console.log("  node scripts/setup-workspace.js ~/work/ato --name ato --groups Research,Workers");
+  console.log("  node scripts/setup-workspace.js ~/work/demo --name demo --groups Research,Workers");
   process.exit(1);
 }
 

@@ -10,7 +10,7 @@ If the user just cloned this repo or pulled it onto a new machine, **invoke the 
 
 1. **Preflight**: Run `npm run setup:check` — deterministic verification of `node` (>=18), `tmux` (>=3.0), Claude Code on PATH, free port, and `.hadron/` config. It installs nothing; fix whatever it flags.
 2. **Install dependencies**: Run `npm install` if `node_modules/` doesn't exist. Install `node`/`tmux` via the OS package manager only after confirming with the user.
-3. **Ask for workspace root**: Ask the user which directory they want as their workspace root. This is where `.hadron/` config will live and where agents work. Examples: `~/work` (all projects), `~/work/ato` (single project). The user can run multiple Hadron instances for different workspaces on different ports.
+3. **Ask for workspace root**: Ask the user which directory they want as their workspace root. This is where `.hadron/` config will live and where agents work. Examples: `~/work` (all projects), `~/work/demo` (single project). The user can run multiple Hadron instances for different workspaces on different ports.
 4. **Create workspace config**: Run `node scripts/setup-workspace.js <path>` with the user's answers (it also installs a sample agent). Ask them:
    - Workspace name (defaults to directory basename)
    - Group names (defaults to "Workers" — suggest they think about how they want to organize agents)
@@ -27,11 +27,11 @@ If the user needs multiple workspaces (e.g., one per project):
 
 ```bash
 # Each workspace gets its own port and .hadron/ config
-node server/index.js ~/work/ato &           # port 3000
+node server/index.js ~/work/demo &           # port 3000
 PORT=3001 node server/index.js ~/work &     # port 3001
 ```
 
-Tmux sessions are namespaced by the workspace *directory basename* (e.g., `~/work/ato` → `hadron-ato-agent1`, `~/work` → `hadron-work-agent1`), so there are no conflicts.
+Tmux sessions are namespaced by the workspace *directory basename* (e.g., `~/work/demo` → `hadron-demo-agent1`, `~/work` → `hadron-work-agent1`), so there are no conflicts.
 
 ## Project structure
 
@@ -80,7 +80,7 @@ node server/index.js ~/work
 HADRON_WORKSPACE=~/work npm start
 
 # Multiple instances on different ports
-node server/index.js ~/work/ato &          # port 3000 (default)
+node server/index.js ~/work/demo &          # port 3000 (default)
 PORT=3001 node server/index.js ~/work &    # port 3001
 ```
 
