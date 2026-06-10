@@ -62,6 +62,14 @@ try {
   const nbPath = join(env.ws, "analysis.ipynb");
   writeFileSync(join(env.ws, "report.csv"), csv);
   writeFileSync(nbPath, JSON.stringify(nb, null, 1));
+  // md with a relative image (regression: resolved against the dashboard
+  // origin instead of the md file's directory, so logos never rendered)
+  const { mkdirSync } = await import("fs");
+  mkdirSync(join(env.ws, "docs", "img"), { recursive: true });
+  writeFileSync(join(env.ws, "docs", "img", "logo.svg"),
+    '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" fill="#58a6ff"/></svg>');
+  writeFileSync(join(env.ws, "docs", "summary.md"),
+    '# Summary\n\n<img src="img/logo.svg" alt="logo" />\n\n![same](./img/logo.svg)\n');
 
   const resp = await fetch(`${env.baseUrl}/api/sessions`, {
     method: "POST",
@@ -71,6 +79,7 @@ try {
       artifacts: [
         { type: "file", value: "report.csv" },
         { type: "file", value: "analysis.ipynb" },
+        { type: "file", value: "docs/summary.md" },
       ],
     }),
   });
@@ -121,6 +130,16 @@ try {
   r.ok((await page.locator('.jupyter-cell-errored').count()) === 1, "error marking survives the reload");
   await page.locator('#artifact-container').screenshot({ path: join(dir, "m5-nb-changed.png") });
   console.log(`  📸 ${join(dir, "m5-nb-changed.png")}`);
+
+  // Markdown relative images: both md-syntax and inline-HTML imgs get rewritten
+  // through /api/file and actually load (naturalWidth > 0 ⇒ HTTP 200 + image mime).
+  await page.locator('.af[data-art-idx]', { hasText: "summary.md" }).click();
+  await page.locator('.md-preview img').first().waitFor({ state: "visible", timeout: 10000 });
+  const imgs = await page.locator('.md-preview img').evaluateAll((els) =>
+    els.map((el) => ({ src: el.getAttribute("src"), loaded: el.complete && el.naturalWidth > 0 })));
+  r.ok(imgs.length === 2 && imgs.every((i) => i.src.startsWith("/api/file?path=")), "relative img srcs rewritten through /api/file (md syntax + inline HTML)");
+  r.ok(imgs.every((i) => i.src.includes(encodeURIComponent("docs/img/logo.svg"))), "rewritten srcs resolve against the md file's directory");
+  r.ok(imgs.every((i) => i.loaded), "both images actually load (server serves image mime + bytes)");
 } catch (e) {
   r.fail(`unexpected error: ${e.message}`);
 } finally {

@@ -35,6 +35,20 @@ function isEditableFile(filePath) {
   return getLanguageFromPath(filePath) !== null;
 }
 
+// Relative <img src> in a markdown file (md syntax or inline HTML) means
+// "relative to the .md file's directory", but in the preview it would resolve
+// against the dashboard origin. Rewrite those srcs to go through /api/file,
+// which serves images with their real mime.
+function rewriteRelativeImages(previewEl, filePath) {
+  const dir = filePath.includes("/") ? filePath.slice(0, filePath.lastIndexOf("/")) : "";
+  previewEl.querySelectorAll("img").forEach((img) => {
+    const src = img.getAttribute("src") || "";
+    if (!src || /^(https?:|data:|\/)/.test(src)) return;
+    const rel = src.replace(/^\.\//, "");
+    img.src = `/api/file?path=${encodeURIComponent(dir ? `${dir}/${rel}` : rel)}`;
+  });
+}
+
 function renderMarkdownArtifact(container, text, filePath) {
   container.style.position = "relative";
   container.dataset.mdRaw = text;
@@ -44,6 +58,7 @@ function renderMarkdownArtifact(container, text, filePath) {
 
   const html = typeof marked !== 'undefined' ? marked.parse(text) : esc(text);
   container.innerHTML = `<div class="md-toggle" onclick="toggleEditMode(this.parentElement)">Preview <span class="md-toggle-key">${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+Shift+V</span></div><div class="md-preview">${html}</div>`;
+  rewriteRelativeImages(container.querySelector(".md-preview"), filePath);
 }
 
 function renderHTMLArtifact(container, filePath, mtime) {
@@ -101,6 +116,7 @@ function toggleEditMode(container) {
         container.dataset.mdRaw = text;
         const html = typeof marked !== 'undefined' ? marked.parse(text) : esc(text);
         container.innerHTML = `<div class="md-toggle" onclick="toggleEditMode(this.parentElement)">Preview <span class="md-toggle-key">${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+Shift+V</span></div><div class="md-preview">${html}</div>`;
+        rewriteRelativeImages(container.querySelector(".md-preview"), filePath);
       });
   }
 }

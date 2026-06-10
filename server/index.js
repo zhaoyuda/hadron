@@ -623,6 +623,16 @@ app.post("/api/sessions/:id/artifacts", async (req, res) => {
   const { type = "file", value, label } = req.body;
   if (!value || typeof value !== "string") return res.status(400).json({ error: "value (string) required" });
   const item = { type, value };
+  // Relative paths are workspace-relative by convention, but people add files
+  // relative to the agent's cwd. If the path doesn't exist under the workspace
+  // root and does exist under the agent's cwd, normalize at add time — stored
+  // paths stay unambiguous forever after.
+  if (type === "file" && !/^(\/|~|https?:)/.test(value)) {
+    const agentCwd = sessions.get(id).cwd;
+    if (agentCwd && !existsSync(resolve(WORKSPACE, value)) && existsSync(resolve(agentCwd, value))) {
+      item.value = resolve(agentCwd, value);
+    }
+  }
   if (label) item.label = label;
   const updated = await appendAgentField(id, "artifacts", item);
   if (updated) sessions.get(id).artifacts = updated.artifacts;
@@ -708,16 +718,24 @@ app.head("/api/file", (req, res) => {
   } catch { res.status(404).end(); }
 });
 
+// Images need their real mime (and bytes, not utf-8) so markdown previews can
+// reference them through this endpoint (relative <img src> in .md files).
+const IMAGE_MIMES = { svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", ico: "image/x-icon" };
+
 app.get("/api/file", (req, res) => {
   const filePath = resolveFilePath(req.query.path);
   if (!filePath) return res.status(400).json({ error: "path is required" });
   try {
     const stat = statSync(filePath);
-    const content = readFileSync(filePath, "utf-8");
     const ext = filePath.split(".").pop().toLowerCase();
-    const mime = ext === "html" || ext === "htm" ? "text/html" : "text/plain";
     res.set("Last-Modified", stat.mtime.toUTCString());
     res.set("X-File-Mtime", String(stat.mtimeMs));
+    if (IMAGE_MIMES[ext]) {
+      res.type(IMAGE_MIMES[ext]).send(readFileSync(filePath));
+      return;
+    }
+    const content = readFileSync(filePath, "utf-8");
+    const mime = ext === "html" || ext === "htm" ? "text/html" : "text/plain";
     res.type(mime).send(content);
   } catch (e) {
     res.status(404).json({ error: "file not found" });

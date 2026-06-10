@@ -51,6 +51,30 @@ try {
   // The regression guard: the link is mutual, not one-way.
   r.ok((d1?.relatedAgents || []).includes("demo-2"), "demo-1 → related demo-2 (mutual link)");
 
+  // ── script: cwd-relative artifact paths normalize at add time ──
+  // Relative paths are workspace-relative by convention, but agents add files
+  // relative to their own cwd; the server rewrites those to absolute when the
+  // file only exists under the cwd (regression: "could not load file" for
+  // design-notes/x.md added from a repo nested inside the workspace).
+  const { mkdirSync, writeFileSync, readFileSync } = await import("fs");
+  mkdirSync(join(env.ws, "subrepo", "notes"), { recursive: true });
+  writeFileSync(join(env.ws, "subrepo", "notes", "deep.md"), "# deep\n");
+  writeFileSync(join(env.ws, "root.md"), "# root\n");
+  hadron(["spawn", "deep", "--launch", "shell", "--cwd", "subrepo"]);
+  const { authHeaders } = await import("./harness.js");
+  for (const value of ["notes/deep.md", "root.md"]) {
+    await fetch(`${env.baseUrl}/api/sessions/deep/artifacts`, {
+      method: "POST", headers: authHeaders(env.token),
+      body: JSON.stringify({ type: "file", value }),
+    });
+  }
+  // Assert the STORED values (the API resolves workspace-relative on the way out).
+  const stored = JSON.parse(readFileSync(join(env.ws, ".hadron", "agents", "deep.json"), "utf-8")).artifacts;
+  r.ok(stored[0]?.value === join(env.ws, "subrepo", "notes", "deep.md"),
+    "cwd-relative artifact path normalized to the agent's cwd at add time");
+  r.ok(stored[1]?.value === "root.md",
+    "workspace-relative path that exists at the root is stored untouched");
+
   // ── browser: group renders + RELATED panel shows the sibling ──
   browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
