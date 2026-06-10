@@ -499,37 +499,6 @@ function getLanguageFromPath(filePath) {
   return CODE_EXTENSIONS[ext] || null;
 }
 
-function isSQLFile(filePath) {
-  return /\.sql$/i.test(filePath || "");
-}
-
-function renderSQLArtifact(container, text, filePath) {
-  container.style.position = "relative";
-  const lines = text.split('\n');
-  let gutterHtml = '';
-  for (let i = 1; i <= lines.length; i++) gutterHtml += i + '\n';
-  container.innerHTML = `<div class="code-viewer"><pre class="code-gutter">${gutterHtml}</pre><pre class="code-block"><code class="language-sql">${esc(text)}</code></pre></div><div class="sql-hint">Ctrl+Enter to execute (no connector configured)</div>`;
-  const codeEl = container.querySelector('code');
-  if (codeEl && typeof hljs !== 'undefined') hljs.highlightElement(codeEl);
-}
-
-function renderCodeArtifact(container, text, filePath) {
-  container.style.position = "relative";
-  const lang = getLanguageFromPath(filePath);
-  if (!lang || typeof hljs === 'undefined') {
-    container.innerHTML = `<pre class="artifact-code">${esc(text)}</pre>`;
-  } else {
-    const lines = text.split('\n');
-    let gutterHtml = '';
-    for (let i = 1; i <= lines.length; i++) {
-      gutterHtml += i + '\n';
-    }
-    container.innerHTML = `<div class="code-viewer"><pre class="code-gutter">${gutterHtml}</pre><pre class="code-block"><code class="language-${lang}">${esc(text)}</code></pre></div>`;
-    const codeEl = container.querySelector('code');
-    if (codeEl) hljs.highlightElement(codeEl);
-  }
-}
-
 // ═══ ARTIFACT ACTIONS (Copy / Download) ═══
 
 /**

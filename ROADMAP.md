@@ -117,8 +117,6 @@ The differentiator. Spec each item when started; gather usage feedback first.
 
 - [ ] **Native agent session restore** — after a server restart/crash, resume the actual Claude session (`claude --resume=<id>`), not just the tmux shell. High self-use value for remote OCI long-runs.
 - [ ] **Persistence hardening** — clean reconnect/restore so sessions + the artifact panel survive server restart and client detach/reattach.
-- [ ] **Mobile read-only triage view** — phone-friendly "which agent needs me." The web architecture makes this nearly free (a mac app can't). Read/triage only, not a mobile IDE.
-- [ ] **Notify on state-change (human-facing)** — fire a notification when an agent enters `blocked`/`done`. Human-facing only; NOT agent-self-orchestration via the API.
 
 ## Backlog
 
@@ -153,6 +151,8 @@ The differentiator. Spec each item when started; gather usage feedback first.
 - **SQL connector + Ctrl+Enter execute** — building a SQL IDE / human does the execution; off the "supervise agents" thesis.
 - **CSV editing** — *raw-text quick-edit shipped* (Preview⇄Edit toggle: notepad-style textarea, delete/edit rows, save to disk via `POST /api/file`). The heavy spreadsheet-*grid* editor stays off-thesis — superseded by data-aware *preview* (we review, the agent edits).
 - **Git integration (branch/commit per agent)** — cmux's code-diff/SWE turf; don't chase.
+- **Mobile read-only triage view** — rejected 2026-06: Hadron is for heavy work at a real screen; light triage on the go is what the Claude Code app already covers.
+- **Notify on state-change** — already shipped (sound + banner on state transitions, View ▸ Notifications); was listed in v0.9 by mistake.
 
 ## Anti-roadmap (do NOT build)
 - Multi-CLI (Codex/Gemini/Amp) — stay Claude-Code-native.

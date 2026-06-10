@@ -298,13 +298,3 @@ function openTextEditor(container, filePath, showToggle = true) {
   saveBtn.addEventListener("click", saveTextEditor);
 }
 
-function addEditToggle(container, filePath) {
-  container.style.position = "relative";
-  container.dataset.editablePath = filePath;
-  container.dataset.mdMode = "view";
-  const toggle = document.createElement("div");
-  toggle.className = "md-toggle";
-  toggle.innerHTML = `View <span class="md-toggle-key">${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+Shift+V</span>`;
-  toggle.onclick = () => toggleEditMode(container);
-  container.appendChild(toggle);
-}

@@ -686,60 +686,6 @@ html, body {
   word-wrap: break-word;
 }
 
-/* ── Code viewer with line numbers ── */
-.code-viewer {
-  display: flex;
-  width: 100%;
-  height: 100%;
-  overflow: auto;
-  background: var(--bg);
-}
-
-.code-gutter {
-  margin: 0;
-  padding: 12px 0;
-  padding-right: 12px;
-  padding-left: 16px;
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--text3);
-  text-align: right;
-  user-select: none;
-  border-right: 1px solid var(--border);
-  flex-shrink: 0;
-  background: var(--bg);
-  position: sticky;
-  left: 0;
-  z-index: 1;
-}
-
-.code-block {
-  margin: 0;
-  padding: 12px 16px;
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  font-size: 13px;
-  line-height: 1.6;
-  flex: 1;
-  min-width: 0;
-  overflow-x: auto;
-  background: transparent !important;
-}
-
-.code-block code {
-  background: transparent !important;
-  padding: 0 !important;
-  font-family: inherit;
-  font-size: inherit;
-  line-height: inherit;
-}
-
-/* Override highlight.js background to match our theme */
-.code-block code.hljs {
-  background: transparent !important;
-  padding: 0 !important;
-}
-
 .artifact-file-loading, .artifact-file-error {
   padding: 24px;
   color: var(--text3);
@@ -1759,16 +1705,6 @@ html, body {
 .orphan-actions .orphan-kill { color: #f85149; border-color: #f8514966; }
 .orphan-actions .orphan-kill:hover { background: #f8514922; }
 
-/* SQL hint */
-.sql-hint {
-  position: absolute;
-  bottom: 8px;
-  right: 12px;
-  font-size: 11px;
-  color: var(--text3);
-  opacity: 0.5;
-  pointer-events: none;
-}
 
 /* ═══ THEME: Age of Exploration (大航海時代) ═══ */
 [data-theme="exploration"] {
