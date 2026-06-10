@@ -1,6 +1,7 @@
 // ═══ MARKDOWN / HTML RENDERING + IN-PLACE EDITOR ═══ — extracted from app.js (classic <script>, before app.js).
-// Holds markdown/HTML artifact preview + the vim editor lifecycle (openVimEditor/closeVimEditor/
-// toggleEditMode/addEditToggle/activeEditors). Reads app.js helpers (esc, getLanguageFromPath,
+// Holds markdown/HTML artifact preview + the Edit-mode editors: built-in textarea (default,
+// openTextEditor) and opt-in vim (openVimEditor/closeVimEditor/activeEditors), routed by the
+// "hadron-editor" localStorage pref (editorPref). Reads app.js helpers (esc, getLanguageFromPath,
 // activeSessionId, wsTokenParam) and CDN globals (marked, hljs, Terminal, FitAddon) at call time.
 // Configure marked with highlight.js integration
 if (typeof marked !== 'undefined') {
@@ -68,6 +69,16 @@ function reloadHTMLIframe(el, filePath, mtime) {
   return true;
 }
 
+// ── Editor preference (View ▸ Editor) ──
+// "text" (default): built-in plain textarea. "vim": terminal vim in a throwaway tmux session.
+function editorPref() {
+  try { return localStorage.getItem("hadron-editor") === "vim" ? "vim" : "text"; }
+  catch { return "text"; }
+}
+function setEditorPref(mode) {
+  try { localStorage.setItem("hadron-editor", mode); } catch {}
+}
+
 // Track active vim editor instances: container -> { term, fitAddon, ws, shellName, resizeObserver }
 let activeEditors = new Map();
 
@@ -79,7 +90,8 @@ function toggleEditMode(container) {
   const mode = container.dataset.mdMode || "preview";
   if (mode === "preview") {
     container.dataset.mdMode = "edit";
-    openVimEditor(container, filePath);
+    if (editorPref() === "vim") openVimEditor(container, filePath);
+    else openTextEditor(container, filePath);
   } else {
     container.dataset.mdMode = "preview";
     closeVimEditor(container);
@@ -183,6 +195,107 @@ function closeVimEditor(container) {
   // Kill tmux session
   fetch(`/api/sessions/${encodeURIComponent(activeSessionId)}/shells/${encodeURIComponent(editor.shellName)}`, { method: "DELETE" }).catch(() => {});
   activeEditors.delete(container);
+}
+
+// ── Built-in plain-textarea editor ── (default Edit mode; vim is opt-in via View ▸ Editor).
+// Fetches the file fresh at open time, saves via POST /api/file (auth header added by the
+// app.js fetch patch), and syncs the artifact mtime bookkeeping after a save so the
+// auto-reload poller doesn't treat our own write as an external change and clobber the pane.
+function openTextEditor(container, filePath, showToggle = true) {
+  const macKey = navigator.platform.includes('Mac') ? '⌘' : 'Ctrl';
+
+  if (showToggle) {
+    container.innerHTML = `<div class="md-toggle" onclick="toggleEditMode(this.parentElement)">Editing <span class="md-toggle-key">${macKey}+Shift+V</span></div>`;
+  } else {
+    container.innerHTML = "";
+  }
+
+  const bar = document.createElement("div");
+  bar.className = "text-editor-bar" + (showToggle ? "" : " no-toggle");
+  bar.innerHTML = `<span class="text-editor-status"></span><div class="text-editor-save" title="Save file">Save <span class="md-toggle-key">${macKey}+S</span></div>`;
+  container.appendChild(bar);
+
+  const wrap = document.createElement("div");
+  wrap.className = "text-editor-wrap";
+  const ta = document.createElement("textarea");
+  ta.className = "text-edit-area";
+  ta.spellcheck = false;
+  ta.setAttribute("autocomplete", "off");
+  ta.setAttribute("autocapitalize", "off");
+  ta.disabled = true;
+  wrap.appendChild(ta);
+  container.appendChild(wrap);
+
+  const status = bar.querySelector(".text-editor-status");
+  const saveBtn = bar.querySelector(".text-editor-save");
+  const saveBtnHtml = saveBtn.innerHTML;
+
+  // Always fetch fresh content at open time — the preview text may be stale.
+  fetch(`/api/file?path=${encodeURIComponent(filePath)}`)
+    .then((r) => r.ok ? r.text() : Promise.reject(new Error("could not load file")))
+    .then((text) => {
+      ta.value = text;
+      ta.disabled = false;
+      ta.dataset.dirty = "0";
+      ta.focus();
+    })
+    .catch(() => { status.textContent = "Could not load file"; });
+
+  ta.addEventListener("input", () => { ta.dataset.dirty = "1"; });
+
+  ta.addEventListener("keydown", (e) => {
+    if (e.key === "Tab") {
+      // Tab inserts two spaces instead of moving focus
+      e.preventDefault();
+      ta.setRangeText("  ", ta.selectionStart, ta.selectionEnd, "end");
+      ta.dataset.dirty = "1";
+    } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      saveTextEditor();
+    }
+  });
+
+  let savedTimer = null;
+  function saveTextEditor() {
+    if (ta.disabled) return;
+    const content = ta.value;
+    status.textContent = "";
+    fetch(`/api/file`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: filePath, content }),
+    })
+      .then((r) => r.ok ? r : r.json().catch(() => ({})).then((j) => Promise.reject(new Error(j.error || `save failed (${r.status})`))))
+      .then((r) => {
+        ta.dataset.dirty = "0";
+        if (container.dataset.mdRaw !== undefined) container.dataset.mdRaw = content;
+        // Sync mtime bookkeeping: pre-set the poller baseline + cache entry to our
+        // own write's mtime so neither treats it as an external change (same trick
+        // as the CSV editor's save).
+        const newMtime = r.headers.get("X-File-Mtime");
+        if (newMtime) {
+          try {
+            if (typeof artifactLastMtime !== "undefined") artifactLastMtime = newMtime;
+            const key = container.dataset.cacheKey;
+            const entry = key && typeof artifactCache !== "undefined" ? artifactCache.get(key) : null;
+            if (entry) entry.mtime = newMtime;
+          } catch {}
+        }
+        saveBtn.innerHTML = "Saved ✓";
+        saveBtn.classList.add("saved");
+        if (savedTimer) clearTimeout(savedTimer);
+        savedTimer = setTimeout(() => {
+          saveBtn.innerHTML = saveBtnHtml;
+          saveBtn.classList.remove("saved");
+        }, 1500);
+      })
+      .catch((e) => {
+        // Keep the textarea content — the user's edits are not lost.
+        status.textContent = e && e.message ? e.message : "Save failed";
+      });
+  }
+
+  saveBtn.addEventListener("click", saveTextEditor);
 }
 
 function addEditToggle(container, filePath) {

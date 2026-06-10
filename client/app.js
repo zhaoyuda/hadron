@@ -251,7 +251,7 @@ function renderWorkHeader() {
         const fname = tab.value.split("/").pop();
         if (fname) iconHtml = `<span class="wh-tab-i">${fileIcon(fname, 14)}</span>`;
       }
-      tabsHtml += `<div class="wh-tab wh-tab-art${isActive}" data-tab="${tab.id}" title="${esc(tab.label)}">${iconHtml}<span class="wh-tab-label">${esc(tab.label)}</span><span class="wh-tab-x" data-close-tab="${tab.id}">×</span></div>`;
+      tabsHtml += `<div class="wh-tab wh-tab-art${isActive}" data-tab="${tab.id}" data-art-type="${esc(tab.type || 'file')}" data-art-value="${esc(tab.value || '')}" title="${esc(tab.label)}">${iconHtml}<span class="wh-tab-label">${esc(tab.label)}</span><span class="wh-tab-x" data-close-tab="${tab.id}">×</span></div>`;
     });
   }
 
@@ -285,6 +285,17 @@ function renderWorkHeader() {
     x.addEventListener("click", (e) => {
       e.stopPropagation();
       closeTab(x.dataset.closeTab);
+    });
+  });
+
+  // Artifact tab right-click context menu
+  el.querySelectorAll(".wh-tab-art").forEach((tab) => {
+    tab.addEventListener("contextmenu", (e) => {
+      showArtifactTabContextMenu(e, {
+        type: tab.dataset.artType || "file",
+        value: tab.dataset.artValue || "",
+        label: tab.title || "",
+      });
     });
   });
 
@@ -630,10 +641,13 @@ function reloadCurrentArtifact() {
   // Don't yank the rug out from under someone mid-edit in the CSV textarea.
   const ae = document.activeElement;
   if (ae && ae.classList && ae.classList.contains("csv-edit-area")) return;
+  // Same for the built-in text editor: focused, or open with unsaved changes.
+  if (ae && ae.classList && ae.classList.contains("text-edit-area")) return;
   const session = sessions.find(s => s.id === activeSessionId);
   if (!session) return;
   const key = `${session.id}:${activeTab}`;
   const cached = artifactCache.get(key);
+  if (cached?.el?.querySelector?.('.text-edit-area[data-dirty="1"]')) return;
   if (cached?.hasIframe) return;
   // Static HTML file: reload the iframe in-place with a fresh cache-buster
   // (keep the cache entry; just refetch the new mtime and re-point src).
@@ -733,7 +747,8 @@ function renderPaneContent(pane, tabId, session) {
               renderMarkdownArtifact(pane, text, art.value);
             } else {
               pane.style.position = "relative";
-              openVimEditor(pane, art.value, false);
+              if (editorPref() === "vim") openVimEditor(pane, art.value, false);
+              else openTextEditor(pane, art.value, false);
             }
           })
           .catch(() => { pane.innerHTML = `<div class="artifact-file-error">Could not load file</div>`; });
@@ -1061,6 +1076,187 @@ function renderCodeArtifact(container, text, filePath) {
   }
 }
 
+// ═══ ARTIFACT ACTIONS (Copy / Download) ═══
+
+/**
+ * Copy text to clipboard. Uses navigator.clipboard when available (secure
+ * contexts: localhost, HTTPS). Falls back to the hidden-textarea +
+ * execCommand("copy") trick for plain-http Tailscale access.
+ */
+function copyTextToClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text);
+  }
+  // Fallback: textarea trick
+  return new Promise((resolve, reject) => {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.cssText = "position:fixed;top:-9999px;left:-9999px;opacity:0;";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try {
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      if (ok) resolve(); else reject(new Error("execCommand copy failed"));
+    } catch (e) {
+      document.body.removeChild(ta);
+      reject(e);
+    }
+  });
+}
+
+/**
+ * Inject Copy + Download action buttons into an artifact container.
+ * textFn: () => string  — returns the text to copy/download (called lazily).
+ * filename: string      — suggested download filename.
+ * Buttons live top-right, matching the .md-toggle chip style.
+ */
+function addArtifactActionButtons(container, textFn, filename) {
+  // Remove any previously injected buttons
+  const old = container.querySelector(".artifact-actions");
+  if (old) old.remove();
+
+  const actions = document.createElement("div");
+  actions.className = "artifact-actions";
+
+  const copyBtn = document.createElement("div");
+  copyBtn.className = "artifact-action-btn";
+  copyBtn.textContent = "Copy";
+  copyBtn.title = "Copy file contents to clipboard";
+  copyBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const text = textFn();
+    copyTextToClipboard(text).then(() => {
+      copyBtn.textContent = "Copied ✓";
+      copyBtn.classList.add("copied");
+      setTimeout(() => {
+        copyBtn.textContent = "Copy";
+        copyBtn.classList.remove("copied");
+      }, 1500);
+    }).catch(() => {
+      copyBtn.textContent = "Failed";
+      setTimeout(() => { copyBtn.textContent = "Copy"; }, 1500);
+    });
+  });
+
+  const dlBtn = document.createElement("div");
+  dlBtn.className = "artifact-action-btn";
+  dlBtn.textContent = "Download";
+  dlBtn.title = "Download file";
+  dlBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const text = textFn();
+    const blob = new Blob([text], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  });
+
+  actions.appendChild(copyBtn);
+  actions.appendChild(dlBtn);
+  container.style.position = "relative";
+  container.appendChild(actions);
+}
+
+// ═══ ARTIFACT TAB CONTEXT MENU ═══
+
+let _artCtxDismiss = null;
+
+function showArtifactTabContextMenu(e, tab) {
+  e.preventDefault();
+  e.stopPropagation();
+
+  // Close any open context menu
+  const menu = document.getElementById("artifact-tab-ctx-menu");
+  if (_artCtxDismiss) { _artCtxDismiss(); _artCtxDismiss = null; }
+
+  const isFile = tab.type !== "url";
+  const filePath = tab.value;
+  const filename = filePath ? filePath.split("/").pop() : "download";
+
+  let items = [];
+  if (isFile) {
+    items = [
+      { label: "Copy contents", action: "copy-contents" },
+      { label: "Copy path",     action: "copy-path" },
+      { label: "Download",      action: "download" },
+    ];
+  } else {
+    items = [
+      { label: "Copy URL", action: "copy-path" },
+    ];
+  }
+
+  menu.innerHTML = items.map((it) =>
+    `<div class="art-ctx-item" data-action="${it.action}">${it.label}</div>`
+  ).join("");
+
+  // Position near cursor
+  const x = Math.min(e.clientX, window.innerWidth - 180);
+  const y = Math.min(e.clientY, window.innerHeight - (items.length * 30 + 16));
+  menu.style.left = x + "px";
+  menu.style.top = y + "px";
+  menu.style.display = "block";
+
+  menu.querySelectorAll(".art-ctx-item").forEach((item) => {
+    item.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const action = item.dataset.action;
+      if (action === "copy-path") {
+        copyTextToClipboard(filePath).catch(() => {});
+      } else if (action === "copy-contents") {
+        fetch(`/api/file?path=${encodeURIComponent(filePath)}`)
+          .then((r) => r.ok ? r.text() : Promise.reject())
+          .then((text) => copyTextToClipboard(text))
+          .catch(() => {});
+      } else if (action === "download") {
+        fetch(`/api/file?path=${encodeURIComponent(filePath)}`)
+          .then((r) => r.ok ? r.text() : Promise.reject())
+          .then((text) => {
+            const blob = new Blob([text], { type: "text/plain" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+          })
+          .catch(() => {});
+      }
+      dismiss();
+    });
+  });
+
+  function dismiss() {
+    menu.style.display = "none";
+    document.removeEventListener("click", onOutside);
+    document.removeEventListener("keydown", onKey);
+    _artCtxDismiss = null;
+  }
+
+  function onOutside(ev) {
+    if (!menu.contains(ev.target)) dismiss();
+  }
+  function onKey(ev) {
+    if (ev.key === "Escape") dismiss();
+  }
+
+  _artCtxDismiss = dismiss;
+  // Defer so the current click event doesn't immediately close
+  setTimeout(() => {
+    document.addEventListener("click", onOutside);
+    document.addEventListener("keydown", onKey);
+  }, 0);
+}
+
 function renderArtifactView(container, artifact, onMeta) {
   if (artifact.type === "url") {
     if (container.dataset.artValue !== artifact.value) {
@@ -1098,6 +1294,9 @@ function renderArtifactView(container, artifact, onMeta) {
           renderMarimoNotebook(container, text, artifact.value);
         } else if (isCSVFile(artifact.value)) {
           renderCSVTable(container, text, artifact.value);
+          // CSV: inject actions; text captured in closure
+          const captured = text;
+          addArtifactActionButtons(container, () => captured, artifact.value.split("/").pop());
         } else if (isJupyterNotebook(artifact.value)) {
           // Static fallback (no live server): re-report as non-iframe and start
           // mtime polling so disk writes auto-reload it (that reload is what
@@ -1108,9 +1307,16 @@ function renderArtifactView(container, artifact, onMeta) {
           });
         } else if (isMarkdownFile(artifact.value)) {
           renderMarkdownArtifact(container, text, artifact.value);
+          // Markdown: inject actions; text may update on toggle, so re-read from dataset
+          addArtifactActionButtons(
+            container,
+            () => container.dataset.mdRaw !== undefined ? container.dataset.mdRaw : text,
+            artifact.value.split("/").pop()
+          );
         } else {
           container.style.position = "relative";
-          openVimEditor(container, artifact.value, false);
+          if (editorPref() === "vim") openVimEditor(container, artifact.value, false);
+          else openTextEditor(container, artifact.value, false);
         }
         if (onMeta) onMeta(mtime, isIframe);
       })
@@ -2992,10 +3198,15 @@ async function showMenu(menuId, anchorEl) {
       menuItem("Banner Only", "set-notify", { checked: notifyLevel === "banner", data: 'data-level="banner"' }),
       menuItem("Off", "set-notify", { checked: notifyLevel === "off", data: 'data-level="off"' }),
     ].join("");
+    const editorSub = [
+      menuItem("Text (built-in)", "set-editor", { checked: editorPref() === "text", data: 'data-editor="text"' }),
+      menuItem("Vim (terminal)", "set-editor", { checked: editorPref() === "vim", data: 'data-editor="vim"' }),
+    ].join("");
     menu.innerHTML = [
       menuItem("Deck Layout", "", { submenu: groupBySub }),
       menuItem("Agent Sorting", "", { submenu: sortSub }),
       menuItem("Theme", "", { submenu: themeSub }),
+      menuItem("Editor", "", { submenu: editorSub }),
       menuItem("Notifications", "", { submenu: notifySub }),
       '<div class="menu-dropdown-sep"></div>',
       menuItem("Toggle Preview", "toggle-preview", { shortcut: `${mod}+Shift+V` }),
@@ -3069,6 +3280,8 @@ async function handleMenuAction(action, item) {
   } else if (action === "set-notify") {
     notifyLevel = item.dataset.level || "all";
     saveUIState();
+  } else if (action === "set-editor") {
+    setEditorPref(item.dataset.editor === "vim" ? "vim" : "text");
   } else if (action === "toggle-preview") {
     const mdContainer = document.querySelector("[data-md-raw]");
     if (mdContainer) toggleEditMode(mdContainer);

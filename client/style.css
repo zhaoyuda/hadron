@@ -1443,6 +1443,60 @@ html, body {
 .md-toggle:hover { color: var(--text); border-color: var(--text3); }
 .md-toggle .md-toggle-key { font-size: 9px; color: var(--text3); margin-left: 4px; }
 
+/* ── Artifact action buttons (Copy / Download) ── */
+.artifact-actions {
+  position: absolute;
+  top: 6px;
+  right: 12px;
+  z-index: 10;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+/* Push right when a .md-toggle is also present */
+.artifact-persistent:has(.md-toggle) .artifact-actions {
+  right: 100px;
+}
+.artifact-action-btn {
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text3);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+  transition: color .15s, border-color .15s;
+  white-space: nowrap;
+}
+.artifact-action-btn:hover { color: var(--text); border-color: var(--text3); }
+.artifact-action-btn.copied { color: var(--green); border-color: var(--green); }
+
+/* ── Artifact tab context menu ── */
+#artifact-tab-ctx-menu {
+  display: none;
+  position: fixed;
+  z-index: 500;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 0;
+  min-width: 150px;
+  box-shadow: 0 4px 12px rgba(0,0,0,.4);
+}
+.art-ctx-item {
+  padding: 5px 14px;
+  font-size: 12px;
+  color: var(--text2);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.art-ctx-item:hover { background: var(--bg3); color: var(--text); }
+
 /* CSV preview/edit toggle */
 .csv-root {
   display: flex;
@@ -1603,6 +1657,56 @@ html, body {
 .vim-editor-container.no-toggle {
   height: 100%;
   margin-top: 0;
+}
+
+/* Built-in text editor (default Edit mode; vim is opt-in via View ▸ Editor) */
+.text-editor-bar {
+  position: absolute;
+  top: 6px;
+  right: 152px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.text-editor-bar.no-toggle { right: 12px; }
+.text-editor-status { font-size: 10px; color: var(--red); }
+.text-editor-save {
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text3);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  transition: color .15s, border-color .15s;
+}
+.text-editor-save:hover { color: var(--text); border-color: var(--text3); }
+.text-editor-save.saved { color: var(--green); border-color: var(--green); }
+.text-editor-save .md-toggle-key { font-size: 9px; color: var(--text3); margin-left: 4px; }
+.text-editor-wrap {
+  display: flex;
+  width: 100%;
+  height: calc(100% - 30px);
+  margin-top: 30px;
+}
+.text-edit-area {
+  flex: 1;
+  width: 100%;
+  resize: none;
+  border: none;
+  outline: none;
+  padding: 10px 12px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  line-height: 1.5;
+  white-space: pre;
+  tab-size: 4;
 }
 
 /* Orphan banner */
