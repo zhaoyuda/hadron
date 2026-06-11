@@ -188,6 +188,7 @@ let artifactLastMtime = null;
 
 function startArtifactMtimePolling() {
   stopArtifactMtimePolling();
+  if (typeof annotationsSyncPolling === "function") annotationsSyncPolling(); // annotations.js mirrors this lifecycle
   if (!activeTab?.startsWith("artifact:")) return;
   const session = sessions.find(s => s.id === activeSessionId);
   if (!session) return;

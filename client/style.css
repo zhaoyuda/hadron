@@ -2079,3 +2079,234 @@ html, body {
 .sprite-wh.sprite-blocked {
   animation: sprite-bounce-wh 0.5s ease-in-out infinite;
 }
+
+/* ═══ ANNOTATIONS (v0.8 review loop) ═══ */
+
+/* Highlight marks — 淡黄 on the dark theme; hover shows the body via title */
+mark.ann-mark {
+  background: rgba(210, 153, 34, .35);
+  color: inherit;
+  border-bottom: 1px dotted var(--yellow);
+  border-radius: 2px;
+  cursor: pointer;
+  padding: 0 1px;
+}
+mark.ann-mark:hover { background: rgba(210, 153, 34, .55); }
+
+/* Floating 💬 Comment button near the selection end */
+.ann-fab {
+  position: fixed;
+  z-index: 300;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  user-select: none;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .45);
+  white-space: nowrap;
+}
+.ann-fab:hover { border-color: var(--blue); color: var(--blue); }
+
+/* Comment composer popover (selection + whole-doc share it) */
+.ann-popover {
+  position: fixed;
+  z-index: 300;
+  width: 280px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .5);
+}
+.ann-pop-quote {
+  font-size: 10px;
+  color: var(--text2);
+  border-left: 2px solid var(--yellow);
+  padding: 2px 6px;
+  margin-bottom: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ann-pop-quote-doc { border-left-color: var(--blue); font-style: italic; }
+.ann-pop-body {
+  width: 100%;
+  min-height: 60px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+  padding: 6px;
+  resize: vertical;
+  outline: none;
+  box-sizing: border-box;
+}
+.ann-pop-body:focus { border-color: var(--blue); }
+.ann-pop-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+.ann-pop-hint { font-size: 9px; color: var(--text3); margin-right: auto; }
+.ann-pop-add, .ann-row-save {
+  padding: 2px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--blue);
+  background: var(--bg);
+  border: 1px solid var(--blue);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.ann-pop-add:hover, .ann-row-save:hover { background: rgba(88, 166, 255, .15); }
+
+/* Whole-doc 💬 chip in the toggle-bar area (left of Preview/Edit + Copy/Download) */
+.ann-doc-btn {
+  position: absolute;
+  top: 6px;
+  right: 248px; /* clears the Preview/Edit toggle (right:12) + Copy/Download actions (right:100) */
+  z-index: 10;
+  padding: 2px 8px;
+  font-size: 10px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+  transition: border-color .15s;
+}
+.ann-doc-btn:hover { border-color: var(--blue); }
+
+/* Floating bar — sticky pill pinned bottom-right of the scrolling artifact pane */
+.ann-bar-wrap {
+  position: sticky;
+  bottom: 48px;
+  height: 0;
+  display: flex;
+  justify-content: flex-end;
+  padding-right: 16px;
+  z-index: 11;
+  pointer-events: none;
+}
+.ann-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .45);
+  font-size: 11px;
+  pointer-events: auto;
+}
+.ann-bar-btn {
+  padding: 2px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ann-bar-btn:disabled { opacity: .5; cursor: default; }
+.ann-send { color: var(--blue); border-color: var(--blue); }
+.ann-send:hover:not(:disabled) { background: rgba(88, 166, 255, .15); }
+.ann-reopen:hover { color: var(--text); border-color: var(--text3); }
+.ann-retry { color: var(--red); border-color: var(--red); }
+.ann-retry:hover { background: rgba(248, 81, 73, .15); }
+.ann-waiting { color: var(--text2); white-space: nowrap; }
+.ann-badge { cursor: pointer; color: var(--text2); user-select: none; white-space: nowrap; }
+.ann-badge:hover { color: var(--text); }
+
+/* Comment drawer — slide-in list of active comments */
+.ann-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 320px;
+  z-index: 250;
+  background: var(--bg2);
+  border-left: 1px solid var(--border);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, .45);
+  display: flex;
+  flex-direction: column;
+  transform: translateX(100%);
+  transition: transform .18s ease;
+}
+.ann-drawer.open { transform: none; }
+.ann-drawer-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.ann-drawer-title { font-size: 12px; font-weight: 600; color: var(--text); }
+.ann-drawer-file { font-size: 10px; color: var(--text3); font-family: 'JetBrains Mono', monospace; }
+.ann-drawer-close { margin-left: auto; cursor: pointer; color: var(--text3); font-size: 16px; line-height: 1; }
+.ann-drawer-close:hover { color: var(--text); }
+.ann-rows { flex: 1; overflow-y: auto; padding: 10px; }
+.ann-row {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+.ann-row-flash { border-color: var(--yellow); }
+.ann-other { opacity: .55; }
+.ann-row-file { font-size: 9px; color: var(--text3); font-family: 'JetBrains Mono', monospace; margin-bottom: 4px; }
+.ann-row-head { display: flex; align-items: center; gap: 6px; }
+.ann-chip {
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: .3px;
+  flex-shrink: 0;
+}
+.ann-chip-draft { background: var(--bg3); color: var(--text2); }
+.ann-chip-sent { background: rgba(88, 166, 255, .15); color: var(--blue); }
+.ann-chip-bad { background: rgba(248, 81, 73, .15); color: var(--red); }
+.ann-row-loc {
+  font-size: 10px;
+  color: var(--text3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.ann-row-act { cursor: pointer; color: var(--text3); font-size: 12px; line-height: 1; flex-shrink: 0; }
+.ann-row-act:hover { color: var(--text); }
+.ann-row-body { font-size: 12px; color: var(--text); margin-top: 5px; white-space: pre-wrap; word-break: break-word; }
+.ann-row-editbox {
+  width: 100%;
+  min-height: 48px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+  padding: 5px;
+  resize: vertical;
+  outline: none;
+  box-sizing: border-box;
+}
+.ann-row-editbox:focus { border-color: var(--blue); }
+.ann-sec-title {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--text3);
+  margin: 12px 0 6px;
+}
+.ann-empty { font-size: 11px; color: var(--text3); padding: 8px 0; }

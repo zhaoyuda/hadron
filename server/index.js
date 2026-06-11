@@ -16,6 +16,10 @@ import { loadAgents, loadAgent, saveAgent, archiveAgent, deleteAgent, initWorksp
 import { resolve } from "path";
 import { tmux, tmuxSafe, isValidId } from "./tmux.js";
 import { syncSkills } from "./skills.js";
+import {
+  listAnnotations, createAnnotation, updateAnnotation, deleteAnnotation,
+  sendAnnotations, resolveAnnotation, reopenAnnotations, retryDispatch,
+} from "./annotations.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -613,6 +617,80 @@ app.post("/api/sessions/:id/send-keys", (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ═══ ANNOTATIONS API (v0.8 review loop) ═══
+// Store + transition logic live in server/annotations.js; routes only validate the
+// agent and map { error, status } results. State transitions go through dedicated
+// endpoints only — PATCH cannot move a comment's lifecycle.
+
+function annotationAgent(req, res) {
+  const { id } = req.params;
+  if (!isValidId(id)) { res.status(400).json({ error: "invalid id" }); return null; }
+  if (!sessions.has(id)) { res.status(404).json({ error: "session not found" }); return null; }
+  return id;
+}
+
+// The dispatch is ONE literal trigger line — comment content never crosses tmux
+// send-keys (it lives in the sidecars; the agent pulls it via `hadron annotations ls`).
+function dispatchReviewTrigger(id) {
+  const tmuxName = tmuxSessionName(id);
+  tmux(["send-keys", "-t", tmuxName, "-l", "--", "/hadron-review"]);
+  tmux(["send-keys", "-t", tmuxName, "Enter"]);
+}
+
+function sendAnnotationResult(res, out, okStatus = 200) {
+  if (out && out.error) return res.status(out.status || 500).json({ error: out.error });
+  res.status(okStatus).json(out);
+}
+
+app.get("/api/sessions/:id/annotations", (req, res) => {
+  const id = annotationAgent(req, res);
+  if (!id) return;
+  sendAnnotationResult(res, listAnnotations(id, { path: req.query.path, state: req.query.state || "active" }));
+});
+
+app.post("/api/sessions/:id/annotations", (req, res) => {
+  const id = annotationAgent(req, res);
+  if (!id) return;
+  const { path, anchor, body } = req.body || {};
+  sendAnnotationResult(res, createAnnotation(id, { path, anchor, body }), 201);
+});
+
+app.patch("/api/sessions/:id/annotations/:cid", (req, res) => {
+  const id = annotationAgent(req, res);
+  if (!id) return;
+  sendAnnotationResult(res, updateAnnotation(id, req.params.cid, { body: (req.body || {}).body }));
+});
+
+app.delete("/api/sessions/:id/annotations/:cid", (req, res) => {
+  const id = annotationAgent(req, res);
+  if (!id) return;
+  sendAnnotationResult(res, deleteAnnotation(id, req.params.cid));
+});
+
+app.post("/api/sessions/:id/annotations/send", (req, res) => {
+  const id = annotationAgent(req, res);
+  if (!id) return;
+  sendAnnotationResult(res, sendAnnotations(id, () => dispatchReviewTrigger(id)));
+});
+
+app.post("/api/sessions/:id/annotations/:cid/resolve", (req, res) => {
+  const id = annotationAgent(req, res);
+  if (!id) return;
+  sendAnnotationResult(res, resolveAnnotation(id, req.params.cid));
+});
+
+app.post("/api/sessions/:id/annotations/reopen", (req, res) => {
+  const id = annotationAgent(req, res);
+  if (!id) return;
+  sendAnnotationResult(res, reopenAnnotations(id));
+});
+
+app.post("/api/sessions/:id/annotations/retry-dispatch", (req, res) => {
+  const id = annotationAgent(req, res);
+  if (!id) return;
+  sendAnnotationResult(res, retryDispatch(id, () => dispatchReviewTrigger(id)));
 });
 
 // Append one artifact without clobbering the array (atomic, under per-agent lock).

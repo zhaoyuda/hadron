@@ -175,8 +175,18 @@ async function main() {
     }
     case "whoami": {
       const me = await whoami();
-      if (flags.json) console.log(JSON.stringify(me, null, 2));
-      else printAgent(me);
+      if (flags.json) { console.log(JSON.stringify(me, null, 2)); break; }
+      printAgent(me);
+      // Surface unfinished review comments — best-effort, silent on any failure
+      // (a whoami must never die because the annotations endpoint hiccuped).
+      try {
+        const r = await fetch(`${BASE}/api/sessions/${me.id}/annotations?state=sent`);
+        if (r.ok) {
+          const { comments } = await r.json();
+          const n = (comments || []).length;
+          if (n > 0) console.log(`  pending review comments: ${n} (run /hadron-review)`);
+        }
+      } catch {}
       break;
     }
     case "spawn": {
@@ -261,6 +271,31 @@ async function main() {
       die("usage: hadron notes [show|set \"...\"|append \"...\"]");
       break;
     }
+    case "annotations": {
+      const sub = positional[0];
+      if (sub === "ls") {
+        const me = await whoami();
+        const out = await api("GET", `/api/sessions/${me.id}/annotations?state=sent`);
+        if (flags.json) { console.log(JSON.stringify(out, null, 2)); break; }
+        if (!out.comments || !out.comments.length) { console.log("no pending review comments"); break; }
+        for (const c of out.comments) {
+          console.log(`[${c.id}] ${c.file} — ${c.locationText}`);
+          console.log(`    ${String(c.body).split("\n").join("\n    ")}`);
+        }
+        break;
+      }
+      if (sub === "resolve") {
+        const cid = positional[1];
+        if (!cid) die("usage: hadron annotations resolve <id>");
+        const me = await whoami();
+        const out = await api("POST", `/api/sessions/${me.id}/annotations/${encodeURIComponent(cid)}/resolve`);
+        const left = out.summary ? out.summary.sent : "?";
+        console.log(`resolved ${cid} (${left} remaining)`);
+        break;
+      }
+      die("usage: hadron annotations <ls [--json] | resolve <id>>");
+      break;
+    }
     default:
       console.log(`hadron — manage Hadron agents from the terminal
 
@@ -273,6 +308,8 @@ Commands:
   hadron artifacts add [--auto | <path...>]  attach files to the current agent
   hadron artifacts ls                      list the current agent's artifacts
   hadron notes [show|set "..."|append "..."]
+  hadron annotations ls [--json]           list pending review comments for the current agent
+  hadron annotations resolve <id>          mark a review comment done
   hadron skills install                    symlink operation skills into ~/.claude/skills/ (additive)
   hadron skills sync                       like install, but also prune our own dead links
   hadron skills [status|uninstall]

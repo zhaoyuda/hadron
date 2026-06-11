@@ -59,6 +59,7 @@ function renderMarkdownArtifact(container, text, filePath) {
   const html = typeof marked !== 'undefined' ? marked.parse(text) : esc(text);
   container.innerHTML = `<div class="md-toggle" onclick="toggleEditMode(this.parentElement)">Preview <span class="md-toggle-key">${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+Shift+V</span></div><div class="md-preview">${html}</div>`;
   rewriteRelativeImages(container.querySelector(".md-preview"), filePath);
+  if (typeof annotationsOnPreviewRendered === "function") annotationsOnPreviewRendered(container, filePath);
 }
 
 function renderHTMLArtifact(container, filePath, mtime) {
