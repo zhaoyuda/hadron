@@ -230,6 +230,21 @@ async function main() {
       console.log("sent");
       break;
     }
+    case "message": {
+      const id = positional[0];
+      let text = positional[1];
+      // `-` (or no positional) + piped stdin → read the whole prompt from stdin,
+      // so `cat brief.md | hadron message t009` just works.
+      if ((text === undefined || text === "-") && !process.stdin.isTTY) {
+        text = readFileSync(0, "utf-8");
+      }
+      if (!id || text === undefined || text === "-") {
+        die("usage: hadron message <id> \"text\" [--no-enter]   (or: cat brief.md | hadron message <id> -)");
+      }
+      const out = await api("POST", `/api/sessions/${id}/message`, { text, enter: !flags["no-enter"] });
+      console.log(`delivered ${out.bytes} bytes${flags["no-enter"] ? " (no Enter)" : ""}`);
+      break;
+    }
     case "artifacts": {
       const sub = positional[0];
       const me = await whoami();
@@ -313,7 +328,10 @@ Commands:
   hadron skills install                    symlink operation skills into ~/.claude/skills/ (additive)
   hadron skills sync                       like install, but also prune our own dead links
   hadron skills [status|uninstall]
-  hadron send <id> "keys"                  low-level: type keys into a pane
+  hadron message <id> "text" [--no-enter]  deliver a prompt to a running agent — reliable for
+                                           multiline/special chars (tmux buffer paste); `-` or
+                                           piped stdin reads the text from stdin
+  hadron send <id> "keys"                  low-level: type raw keys into a pane (single short line)
 
 Env: HADRON_PORT / HADRON_TOKEN override; otherwise both are read from the
 nearest .hadron/ (runtime.json + token) walking up from cwd; port defaults to 3000.`);

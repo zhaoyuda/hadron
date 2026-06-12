@@ -94,6 +94,22 @@ HADRON_WORKSPACE=~/work node server/index.js
 
 Priority: CLI argument > `HADRON_WORKSPACE` > `process.cwd()`
 
+### The `hadron` CLI
+
+Agents (and humans) script the server through the `hadron` CLI (`npm link` puts it on PATH). It reads the token + port from the nearest `.hadron/` walking up from cwd:
+
+```bash
+hadron ls                                # list all agents
+hadron whoami                            # show the current agent (resolved by the server)
+hadron spawn <name> --task "..." --start # create + launch an agent
+hadron message <id> "text"               # deliver a prompt to a running agent — reliable for
+                                         #   multiline/special chars (tmux buffer paste);
+                                         #   pipe stdin with `-`; --no-enter to skip submit
+hadron send <id> "keys"                  # low-level: type raw keys into a pane
+hadron artifacts add <path...>           # attach files to the current agent
+hadron notes [show|set|append]           # per-agent durable notes
+```
+
 ### State Detection
 
 Hadron automatically detects what each agent is doing by polling its tmux pane:

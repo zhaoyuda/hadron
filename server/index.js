@@ -6,9 +6,9 @@ import { spawn } from "node-pty";
 import { fileURLToPath } from "url";
 import { dirname, join, basename } from "path";
 import { execSync, execFileSync, spawn as cpSpawn } from "child_process";
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, watch as fsWatch, chmodSync, unlinkSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, watch as fsWatch, chmodSync, unlinkSync, mkdtempSync, rmSync } from "fs";
 import { connect as netConnect } from "net";
-import { networkInterfaces, hostname } from "os";
+import { networkInterfaces, hostname, tmpdir } from "os";
 import { URL } from "url";
 import { randomBytes } from "crypto";
 import { StateDetector } from "./state-detector.js";
@@ -617,6 +617,47 @@ app.post("/api/sessions/:id/send-keys", (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// Reliable prompt delivery into a TUI input box. send-keys -l is flaky for long /
+// multiline / special-char payloads ("not in a mode", partial delivery); a tmux
+// buffer + bracketed paste (-p) is not, and the bracketing keeps multiline text
+// from auto-submitting line by line. Enter goes as a separate keystroke after a
+// short delay so the TUI has absorbed the paste before the submit.
+app.post("/api/sessions/:id/message", async (req, res) => {
+  const { id } = req.params;
+  if (!isValidId(id)) return res.status(400).json({ error: "invalid id" });
+  if (!sessions.has(id)) return res.status(404).json({ error: "session not found" });
+  const { text, enter = true } = req.body;
+  if (typeof text !== "string" || text.length === 0) {
+    return res.status(400).json({ error: "text (non-empty string) required" });
+  }
+  const tmuxName = tmuxSessionName(id);
+  if (tmuxSafe(["has-session", "-t", tmuxName]) === null) {
+    return res.status(409).json({ error: `agent tmux session ${tmuxName} is not running` });
+  }
+  // The text reaches tmux via a temp file (load-buffer), never argv or a shell —
+  // length and content are unconstrained. Unique buffer name so concurrent
+  // deliveries can't clobber each other; -d reclaims it on paste.
+  const dir = mkdtempSync(join(tmpdir(), "hadron-msg-"));
+  const file = join(dir, "text");
+  const buf = `hadron-msg-${Date.now()}-${randomBytes(4).toString("hex")}`;
+  try {
+    writeFileSync(file, text);
+    tmux(["load-buffer", "-b", buf, file]);
+    tmux(["paste-buffer", "-p", "-d", "-b", buf, "-t", tmuxName]);
+  } catch (e) {
+    tmuxSafe(["delete-buffer", "-b", buf]);
+    return res.status(500).json({ error: e.message });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  if (enter) {
+    await new Promise((r) => setTimeout(r, 250));
+    try { tmux(["send-keys", "-t", tmuxName, "Enter"]); }
+    catch (e) { return res.status(500).json({ error: e.message }); }
+  }
+  res.json({ ok: true, bytes: Buffer.byteLength(text) });
 });
 
 // ═══ ANNOTATIONS API (v0.8 review loop) ═══

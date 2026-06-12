@@ -36,6 +36,7 @@ hadron spawn "Auth Refactor" \
 1. Confirm it appears: `hadron ls`.
 2. Tell the user the agent name + id and that it's running.
 3. If this agent and the new one should coordinate, the link is mutual context — mention it.
+4. To deliver a longer brief or follow-up prompt to an agent that's already running, use `hadron message <id> "..."` (or `cat brief.md | hadron message <id> -`) — it's the reliable way to paste multiline text into a live session.
 
 ## Notes
 
