@@ -47,8 +47,10 @@ async function createAgent(name) {
 
 const paneOf = (agentId) => `hadron-${WS_NAME}-${agentId}`;
 function capturePane(agentId) {
+  // -J joins wrapped screen rows back into logical lines — a long shell prompt
+  // (e.g. CI's runner@host:path$) can push pasted line 1 past 80 cols.
   try {
-    return execFileSync("tmux", ["capture-pane", "-t", paneOf(agentId), "-p"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] });
+    return execFileSync("tmux", ["capture-pane", "-t", paneOf(agentId), "-p", "-J"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] });
   } catch { return ""; }
 }
 // Discard whatever is sitting unsubmitted on the prompt between checks.
