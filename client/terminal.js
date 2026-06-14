@@ -14,6 +14,28 @@ let fitAddon = null;
 // Map of "<sessionId>:<shellId>" -> { term, fitAddon, ws, container, resizeObserver }
 let shellInstances = new Map();
 
+// OSC 52 clipboard write — a program in the pane (e.g. Claude Code's `/copy`,
+// vim's "+y) emits `ESC ] 52 ; <sel> ; <base64> BEL`; tmux forwards it out (it
+// thinks the terminal supports clipboard — see the terminal-features knob set
+// server-side). xterm.js has no built-in OSC 52 handler, so without this the
+// sequence reaches the browser and is silently dropped — `/copy` "did nothing".
+// Reuses copyTextToClipboard (artifacts.js) so plain-http Tailscale gets the
+// execCommand fallback. Read requests (`?`) are ignored — never hand the page's
+// clipboard back to a remote pane.
+function registerClipboardOsc(t) {
+  t.parser.registerOscHandler(52, (data) => {
+    const sep = data.indexOf(";");
+    const payload = sep === -1 ? data : data.slice(sep + 1);
+    if (!payload || payload === "?") return true;
+    let text;
+    try {
+      text = new TextDecoder().decode(Uint8Array.from(atob(payload), (c) => c.charCodeAt(0)));
+    } catch { return true; }
+    if (typeof copyTextToClipboard === "function") copyTextToClipboard(text).catch(() => {});
+    return true; // handled — swallow the sequence so it never prints
+  });
+}
+
 // ═══ TERMINAL ═══
 function initTerminal() {
   term = new Terminal({
@@ -49,6 +71,7 @@ function initTerminal() {
   fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
   term.loadAddon(new WebLinksAddon.WebLinksAddon());
+  registerClipboardOsc(term);
 
   const container = document.getElementById("terminal-container");
   term.open(container);
@@ -187,6 +210,7 @@ function createShellTab() {
   const shellFitAddon = new FitAddon.FitAddon();
   shellTerm.loadAddon(shellFitAddon);
   shellTerm.loadAddon(new WebLinksAddon.WebLinksAddon());
+  registerClipboardOsc(shellTerm);
 
   // Create container div
   const container = document.createElement("div");
@@ -355,6 +379,7 @@ function restoreShellTabs() {
       const shellFitAddon = new FitAddon.FitAddon();
       shellTerm.loadAddon(shellFitAddon);
       shellTerm.loadAddon(new WebLinksAddon.WebLinksAddon());
+      registerClipboardOsc(shellTerm);
 
       const container = document.createElement("div");
       container.className = "shell-container";
