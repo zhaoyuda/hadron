@@ -293,13 +293,12 @@ function openTextEditor(container, filePath, showToggle = true) {
       .then((r) => {
         ta.dataset.dirty = "0";
         if (container.dataset.mdRaw !== undefined) container.dataset.mdRaw = content;
-        // Sync mtime bookkeeping: pre-set the poller baseline + cache entry to our
-        // own write's mtime so neither treats it as an external change (same trick
+        // Pre-set the cache entry's mtime (the poller's baseline) to our own
+        // write's mtime so it isn't treated as an external change (same trick
         // as the CSV editor's save).
         const newMtime = r.headers.get("X-File-Mtime");
         if (newMtime) {
           try {
-            if (typeof artifactLastMtime !== "undefined") artifactLastMtime = newMtime;
             const key = container.dataset.cacheKey;
             const entry = key && typeof artifactCache !== "undefined" ? artifactCache.get(key) : null;
             if (entry) entry.mtime = newMtime;

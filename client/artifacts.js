@@ -11,8 +11,8 @@
 // startArtifactMtimePolling (renderWorkContent), stopArtifactServer (closeTab),
 // stopAllArtifactServers (closeSession), reloadCurrentArtifact (Ctrl+Shift+R),
 // showArtifactTabContextMenu (tab right-click), removeArtifact/showArtifactPopover/
-// addArtifact (right panel). markdown.js reads/writes artifactCache + artifactLastMtime
-// (typeof-guarded); markdown.js/data-preview.js/file-icons.js helpers (isHTMLFile,
+// addArtifact (right panel). markdown.js reads/writes artifactCache (typeof-guarded);
+// markdown.js/data-preview.js/file-icons.js helpers (isHTMLFile,
 // renderHTMLArtifact, openVimEditor, csvStatsHTML, nbErrorBannerHTML, fileExtIcon,
 // folderIcon, noteMarimoNotebook, ...) are called at runtime — those files load first.
 
@@ -162,14 +162,7 @@ function reloadCurrentArtifact() {
     const idx = parseInt(activeTab.split(":")[1]);
     const art = session.artifacts?.[idx];
     if (art && cached.el) {
-      fetch(`/api/file?path=${encodeURIComponent(art.value)}`, { method: "HEAD" })
-        .then((r) => r.ok ? r.headers.get("X-File-Mtime") : null)
-        .catch(() => null)
-        .then((mtime) => {
-          if (reloadHTMLIframe(cached.el, art.value, mtime)) {
-            cached.mtime = mtime;
-          }
-        });
+      reloadHTMLPaneFromDisk(cached.el, art.value, (m) => { cached.mtime = m; });
       return;
     }
   }
@@ -182,40 +175,103 @@ function reloadCurrentArtifact() {
   showArtifactInContainer(container, session, activeTab);
 }
 
-// Auto-reload: poll mtime for the active vim-based artifact
+// Auto-reload: poll mtime for the active artifact tab + any split-pane HTML panes.
+// The change baseline is always the mtime of the content ON SCREEN (cache/watch
+// entry, set by the render that fetched it) — never the poller's own first HEAD.
+// A first-tick baseline arrives up to 3s after render and silently swallows any
+// disk write inside that window (the "stale HTML iframe" bug).
 let artifactMtimePoller = null;
-let artifactLastMtime = null;
+let htmlPaneWatches = []; // split-mode HTML panes: { el, path, mtime }
 
 function startArtifactMtimePolling() {
   stopArtifactMtimePolling();
   if (typeof annotationsSyncPolling === "function") annotationsSyncPolling(); // annotations.js mirrors this lifecycle
-  if (!activeTab?.startsWith("artifact:")) return;
   const session = sessions.find(s => s.id === activeSessionId);
   if (!session) return;
-  const idx = parseInt(activeTab.split(":")[1]);
-  const art = session.artifacts?.[idx];
-  if (!art || art.type !== "file") return;
-  const key = `${session.id}:${activeTab}`;
-  const cached = artifactCache.get(key);
-  if (cached?.hasIframe) return;
 
-  artifactLastMtime = cached?.mtime || null;
+  // Tab mode: the active file-based artifact (md/csv/notebooks silently
+  // auto-reload; HTML gets an update pill — see the tick below).
+  let tabTarget = null;
+  if (activeTab?.startsWith("artifact:")) {
+    const idx = parseInt(activeTab.split(":")[1]);
+    const art = session.artifacts?.[idx];
+    const key = `${session.id}:${activeTab}`;
+    if (art?.type === "file" && !artifactCache.get(key)?.hasIframe) tabTarget = { art, key };
+  }
+
+  // Split mode: HTML panes render outside the artifact cache, so watch them
+  // directly. Their iframe was just created from the current file — HEAD now to
+  // record what's on screen as the baseline.
+  htmlPaneWatches = Array.from(document.querySelectorAll(".split-pane[data-html-path]"))
+    .map((el) => ({ el, path: el.dataset.htmlPath, mtime: null }));
+  for (const w of htmlPaneWatches) {
+    fetch(`/api/file?path=${encodeURIComponent(w.path)}`, { method: "HEAD" })
+      .then((r) => { if (r.ok && w.mtime === null) w.mtime = r.headers.get("X-File-Mtime"); })
+      .catch(() => {});
+  }
+
+  if (!tabTarget && htmlPaneWatches.length === 0) return;
+
   artifactMtimePoller = setInterval(async () => {
-    try {
-      const r = await fetch(`/api/file?path=${encodeURIComponent(art.value)}`, { method: "HEAD" });
-      const mtime = r.headers.get("X-File-Mtime");
-      if (artifactLastMtime === null) { artifactLastMtime = mtime; return; }
-      if (mtime !== artifactLastMtime) {
-        artifactLastMtime = mtime;
-        reloadCurrentArtifact();
-      }
-    } catch {}
+    if (tabTarget) {
+      try {
+        const r = await fetch(`/api/file?path=${encodeURIComponent(tabTarget.art.value)}`, { method: "HEAD" });
+        const mtime = r.headers.get("X-File-Mtime");
+        const cached = artifactCache.get(tabTarget.key);
+        // cached.mtime null = initial render still in flight (it will paint the
+        // latest content anyway — nothing to compare against yet).
+        if (cached?.mtime && mtime && mtime !== cached.mtime) {
+          if (cached.htmlFile) {
+            // Live iframe: a silent reload destroys its state (scroll, form
+            // input, JS app state) — offer a reload instead of forcing one.
+            showArtifactUpdatePill(cached.el, () =>
+              reloadHTMLPaneFromDisk(cached.el, tabTarget.art.value, (m) => { cached.mtime = m; }));
+          } else {
+            reloadCurrentArtifact();
+          }
+        }
+      } catch {}
+    }
+    for (const w of htmlPaneWatches) {
+      if (!w.el.isConnected || w.mtime === null) continue;
+      try {
+        const r = await fetch(`/api/file?path=${encodeURIComponent(w.path)}`, { method: "HEAD" });
+        const mtime = r.headers.get("X-File-Mtime");
+        if (mtime && mtime !== w.mtime) {
+          showArtifactUpdatePill(w.el, () =>
+            reloadHTMLPaneFromDisk(w.el, w.path, (m) => { w.mtime = m; }));
+        }
+      } catch {}
+    }
   }, 3000);
 }
 
 function stopArtifactMtimePolling() {
   if (artifactMtimePoller) { clearInterval(artifactMtimePoller); artifactMtimePoller = null; }
-  artifactLastMtime = null;
+  htmlPaneWatches = [];
+}
+
+// "File updated" pill on a live HTML iframe. Idempotent — one pill per pane;
+// stays until clicked (the underlying file may keep changing; the click always
+// loads whatever is newest).
+function showArtifactUpdatePill(container, onReload) {
+  if (!container || container.querySelector(".artifact-update-pill")) return;
+  const pill = document.createElement("button");
+  pill.type = "button";
+  pill.className = "artifact-update-pill";
+  pill.innerHTML = `File updated <span class="aup-action">↻ Reload</span>`;
+  pill.addEventListener("click", () => { pill.remove(); onReload(); });
+  container.appendChild(pill);
+}
+
+// HEAD for the current mtime, then re-point the pane's iframe at it.
+function reloadHTMLPaneFromDisk(el, filePath, onMtime) {
+  fetch(`/api/file?path=${encodeURIComponent(filePath)}`, { method: "HEAD" })
+    .then((r) => (r.ok ? r.headers.get("X-File-Mtime") : null))
+    .catch(() => null)
+    .then((mtime) => {
+      if (reloadHTMLIframe(el, filePath, mtime) && onMtime) onMtime(mtime);
+    });
 }
 
 function renderPaneContent(pane, tabId, session) {
@@ -384,10 +440,13 @@ function renderCSVTable(container, text, filePath) {
         .then((r) => {
           raw = content;
           status.textContent = "Saved";
-          // Pre-set the poller's baseline to our own mtime so it doesn't fire a
-          // reload that would rebuild the textarea out from under the user.
+          // Pre-set the cache entry's mtime (the poller's baseline) to our own
+          // write so it doesn't fire a reload that would rebuild the textarea
+          // out from under the user.
           const newMtime = r.headers.get("X-File-Mtime");
-          if (newMtime) artifactLastMtime = newMtime;
+          const cacheKey = ta.closest("[data-cache-key]")?.dataset.cacheKey;
+          const entry = cacheKey ? artifactCache.get(cacheKey) : null;
+          if (newMtime && entry) entry.mtime = newMtime;
           setTimeout(() => { status.textContent = ""; }, 1500);
         })
         .catch(() => { status.textContent = "Save failed"; })

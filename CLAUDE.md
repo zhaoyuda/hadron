@@ -109,6 +109,8 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #   + test/e2e/m5-data-preview.js (CSV stats strip + notebook error/changed cells)
 #   + test/e2e/m6-copy.js        (Copy/Download buttons + tab context menu)
 #   + test/e2e/m7-editor.js      (text/vim editor toggle, save, paste-image flow)
+#   + test/e2e/m8-annotations.js (review loop: comment → send → resolve → reopen)
+#   + test/e2e/m9-artifact-reload.js (mtime poller baseline + HTML update pill, tab & split)
 ```
 
 Kept out of `npm test` so the core suite stays fast and dependency-free

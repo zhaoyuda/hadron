@@ -857,6 +857,7 @@ app.head("/api/file", (req, res) => {
   if (!filePath) return res.status(400).end();
   try {
     const stat = statSync(filePath);
+    res.set("Cache-Control", "no-store");
     res.set("X-File-Mtime", String(stat.mtimeMs));
     res.status(200).end();
   } catch { res.status(404).end(); }
@@ -872,6 +873,12 @@ app.get("/api/file", (req, res) => {
   try {
     const stat = statSync(filePath);
     const ext = filePath.split(".").pop().toLowerCase();
+    // no-store: artifact content must always be served fresh. With heuristic
+    // caching (Last-Modified, no Cache-Control) the browser could revalidate
+    // into a 304 that resurrects a stale cached body — the editor's preview
+    // toggle then rendered old file content (flaky M7 repro). The same URL is
+    // also HEAD-polled with different headers, which corrupts cache validators.
+    res.set("Cache-Control", "no-store");
     res.set("Last-Modified", stat.mtime.toUTCString());
     res.set("X-File-Mtime", String(stat.mtimeMs));
     if (IMAGE_MIMES[ext]) {
