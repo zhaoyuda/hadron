@@ -11,8 +11,8 @@
     "start": "node server/index.js",
     "postinstall": "node scripts/fix-pty-perms.js",
     "setup:check": "node scripts/setup-check.js",
-    "test": "node test/unit/test-state-eval.js && node test/unit/test-state-machine.js && node test/unit/test-security.js && node test/unit/test-annotations.js && node test/unit/test-message.js",
-    "test:e2e": "node test/e2e/m1-onboarding.js && node test/e2e/m2-lifecycle.js && node test/e2e/m3-agent-mgmt.js && node test/e2e/m4-artifacts.js && node test/e2e/m5-data-preview.js && node test/e2e/m8-annotations.js"
+    "test": "node test/unit/test-state-eval.js && node test/unit/test-state-machine.js && node test/unit/test-security.js && node test/unit/test-annotations.js && node test/unit/test-message.js && node test/unit/test-upload.js",
+    "test:e2e": "node test/e2e/m1-onboarding.js && node test/e2e/m2-lifecycle.js && node test/e2e/m3-agent-mgmt.js && node test/e2e/m4-artifacts.js && node test/e2e/m5-data-preview.js && node test/e2e/m6-copy.js && node test/e2e/m7-editor.js && node test/e2e/m8-annotations.js"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",

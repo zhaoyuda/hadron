@@ -6,7 +6,7 @@ import { spawn } from "node-pty";
 import { fileURLToPath } from "url";
 import { dirname, join, basename } from "path";
 import { execSync, execFileSync, spawn as cpSpawn } from "child_process";
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, watch as fsWatch, chmodSync, unlinkSync, mkdtempSync, rmSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, watch as fsWatch, chmodSync, unlinkSync, mkdtempSync, mkdirSync, rmSync } from "fs";
 import { connect as netConnect } from "net";
 import { networkInterfaces, hostname, tmpdir } from "os";
 import { URL } from "url";
@@ -658,6 +658,31 @@ app.post("/api/sessions/:id/message", async (req, res) => {
     catch (e) { return res.status(500).json({ error: e.message }); }
   }
   res.json({ ok: true, bytes: Buffer.byteLength(text) });
+});
+
+// Paste-to-upload: raw image bytes in, server-constructed absolute path out. The
+// client supplies NO path — extension comes from a Content-Type whitelist, the
+// directory from workspace + agent id, so there is no traversal surface. No svg:
+// pasted screenshots never are, and svg is a script vector.
+const UPLOAD_EXTS = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" };
+app.post("/api/sessions/:id/upload", express.raw({ type: "image/*", limit: "12mb" }), (req, res) => {
+  const { id } = req.params;
+  if (!isValidId(id)) return res.status(400).json({ error: "invalid id" });
+  if (!sessions.has(id)) return res.status(404).json({ error: "session not found" });
+  const ct = (req.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
+  const ext = UPLOAD_EXTS[ct];
+  if (!ext) return res.status(415).json({ error: `unsupported image type: ${ct || "(none)"}` });
+  if (!Buffer.isBuffer(req.body) || req.body.length === 0) return res.status(400).json({ error: "empty body" });
+  const dir = join(getWorkspaceDir(), ".hadron", "uploads", id);
+  const rand = randomBytes(4).readUInt32BE(0).toString(36).padStart(4, "0").slice(-4);
+  const file = join(dir, `img-${Date.now()}-${rand}.${ext}`);
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(file, req.body);
+    res.json({ ok: true, path: file, bytes: req.body.length });
+  } catch (e) {
+    res.status(500).json({ error: "write failed" });
+  }
 });
 
 // ═══ ANNOTATIONS API (v0.8 review loop) ═══

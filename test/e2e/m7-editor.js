@@ -11,13 +11,17 @@
  *   - type a change + Ctrl+S → file content on disk updates; Save button
  *     shows "Saved ✓"; the mtime poller (3s) does not clobber the editor
  *   - toggle back to Preview → rendered markdown includes the new text
+ *   - paste an image (synthetic ClipboardEvent with real PNG bytes) into the
+ *     textarea → uploads to .hadron/uploads/<id>/, md image ref lands at the
+ *     cursor, file exists on disk; Save + Preview → the <img> rewrites through
+ *     /api/file and actually loads
  *   - View menu → Editor → "Vim (terminal)" (real clicks) → toggle Edit
  *     again → a vim tmux session IS created
  *
  * Run: node test/e2e/m7-editor.js
  */
 import { chromium } from "playwright";
-import { writeFileSync, readFileSync } from "fs";
+import { writeFileSync, readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { execFileSync } from "child_process";
 import { bootWorkspace, reporter, screenshotDir, authHeaders } from "./harness.js";
@@ -107,7 +111,52 @@ try {
   r.ok(preview.includes("second draft via textarea"), "Preview after save renders the new text");
   r.ok(preview.includes("Field Notes"), "Preview keeps the original content too");
 
-  // 4. View ▸ Editor ▸ "Vim (terminal)" via real clicks → Edit opens vim tmux.
+  // 4. Paste an image into the textarea → upload + md ref + preview renders it.
+  // 1x1 transparent PNG — real bytes, so /api/file serves a decodable image.
+  const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  await page.locator(".md-toggle").click();
+  await page.waitForFunction(() => {
+    const el = document.querySelector(".text-edit-area");
+    return el && !el.disabled && el.value.length > 0;
+  }, null, { timeout: 5000 });
+  await page.evaluate((b64) => {
+    const el = document.querySelector(".text-edit-area");
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    const dt = new DataTransfer();
+    dt.items.add(new File([bytes], "screenshot.png", { type: "image/png" }));
+    el.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  }, PNG_B64);
+  await page.waitForFunction(() => {
+    const el = document.querySelector(".text-edit-area");
+    return el && /!\[screenshot\]\(\/[^)]*\.hadron\/uploads\/[^)]+\.png\)/.test(el.value);
+  }, null, { timeout: 6000 });
+  const taValue = await page.locator(".text-edit-area").inputValue();
+  const uploadPath = (taValue.match(/!\[screenshot\]\((\/[^)]+\.png)\)/) || [])[1];
+  r.ok(!!uploadPath && uploadPath.includes(`/.hadron/uploads/`), `paste inserts an md image ref with an absolute uploads path (${uploadPath})`);
+  r.ok(uploadPath && existsSync(uploadPath), "uploaded file exists on disk");
+  r.ok((await page.locator(".text-edit-area").getAttribute("data-dirty")) === "1", "paste marks the textarea dirty like typing does");
+
+  await page.locator(".text-edit-area").press("Control+s");
+  await page.waitForFunction(() => {
+    const btn = document.querySelector(".text-editor-save");
+    return btn && btn.textContent.includes("Saved ✓");
+  }, null, { timeout: 4000 });
+  r.ok(readFileSync(mdPath, "utf-8").includes(`![screenshot](${uploadPath})`), "Save persists the image ref to the md file");
+
+  await page.locator(".md-toggle").click();
+  await page.locator(".md-preview").waitFor({ state: "visible", timeout: 5000 });
+  const imgLoaded = await page.waitForFunction(() => {
+    const img = document.querySelector('.md-preview img[src*="/api/file?path="]');
+    return !!img && img.complete && img.naturalWidth > 0;
+  }, null, { timeout: 6000 }).then(() => true).catch(() => false);
+  r.ok(imgLoaded, "preview rewrites the absolute path through /api/file and the image actually loads");
+
+  await page.locator("#artifact-container").screenshot({ path: join(dir, "m7-pasted-image-preview.png") });
+  console.log(`  📸 ${join(dir, "m7-pasted-image-preview.png")}`);
+
+  // 5. View ▸ Editor ▸ "Vim (terminal)" via real clicks → Edit opens vim tmux.
   await page.locator("#menu-view").click();
   const editorItem = page.locator(".menu-dropdown-item.has-submenu", { hasText: "Editor" });
   await editorItem.waitFor({ state: "visible", timeout: 5000 });

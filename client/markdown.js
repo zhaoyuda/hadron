@@ -38,12 +38,19 @@ function isEditableFile(filePath) {
 // Relative <img src> in a markdown file (md syntax or inline HTML) means
 // "relative to the .md file's directory", but in the preview it would resolve
 // against the dashboard origin. Rewrite those srcs to go through /api/file,
-// which serves images with their real mime.
+// which serves images with their real mime. Absolute filesystem paths (what
+// paste-to-upload inserts) get the same treatment — an origin-relative URL was
+// never meaningful in this app, so "/..." that isn't /api/ or protocol-relative
+// is a filesystem path.
 function rewriteRelativeImages(previewEl, filePath) {
   const dir = filePath.includes("/") ? filePath.slice(0, filePath.lastIndexOf("/")) : "";
   previewEl.querySelectorAll("img").forEach((img) => {
     const src = img.getAttribute("src") || "";
-    if (!src || /^(https?:|data:|\/)/.test(src)) return;
+    if (!src || /^(https?:|data:)/.test(src) || src.startsWith("/api/") || src.startsWith("//")) return;
+    if (src.startsWith("/")) {
+      img.src = `/api/file?path=${encodeURIComponent(src)}`;
+      return;
+    }
     const rel = src.replace(/^\.\//, "");
     img.src = `/api/file?path=${encodeURIComponent(dir ? `${dir}/${rel}` : rel)}`;
   });
@@ -314,4 +321,52 @@ function openTextEditor(container, filePath, showToggle = true) {
 
   saveBtn.addEventListener("click", saveTextEditor);
 }
+
+// ── Paste-to-upload ── an image on the clipboard (OS screenshot) pasted into the
+// built-in editor or a notes textarea uploads to the server (which stores it under
+// <workspace>/.hadron/uploads/<agentId>/ and returns the absolute path) and inserts
+// a markdown image ref at the cursor. One delegated listener instead of per-textarea
+// wiring: the targets are created and destroyed constantly (editor opens, notes tabs
+// re-render), a document-level handler survives all of that. Non-image pastes fall
+// through untouched. The dispatched "input" event is what keeps the host textarea's
+// own contract intact — it fires the editor's dirty-flag listener and the notes
+// textareas' inline oninput autosave exactly as typing would.
+const IMAGE_PASTE_TARGETS = ".text-edit-area, #notes-textarea, #rp-notes-textarea, .split-pane-notes";
+
+function imagePasteInsert(ta, text, start, end) {
+  ta.setRangeText(text, start, end, "end");
+  ta.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function handleImagePaste(e) {
+  const ta = e.target;
+  if (!ta || !ta.matches || !ta.matches(IMAGE_PASTE_TARGETS)) return;
+  const items = (e.clipboardData && e.clipboardData.items) || [];
+  let file = null;
+  for (const item of items) {
+    if (item.kind === "file" && /^image\//.test(item.type)) { file = item.getAsFile(); break; }
+  }
+  if (!file || !activeSessionId) return; // non-image paste (or no agent) falls through untouched
+  e.preventDefault();
+
+  const placeholder = "![uploading…]()";
+  imagePasteInsert(ta, placeholder, ta.selectionStart, ta.selectionEnd);
+
+  const swap = (replacement) => {
+    const idx = ta.value.indexOf(placeholder);
+    if (idx === -1) return; // user removed it — don't fight them
+    imagePasteInsert(ta, replacement, idx, idx + placeholder.length);
+  };
+
+  fetch(`/api/sessions/${encodeURIComponent(activeSessionId)}/upload`, {
+    method: "POST",
+    headers: { "Content-Type": file.type },
+    body: file,
+  })
+    .then((r) => r.ok ? r.json() : Promise.reject(new Error(`upload failed (${r.status})`)))
+    .then((j) => swap(`![screenshot](${j.path})`))
+    .catch(() => swap(""));
+}
+
+document.addEventListener("paste", handleImagePaste);
 
