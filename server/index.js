@@ -988,6 +988,45 @@ app.get("/api/files/browse", (req, res) => {
   res.json([...dirs, ...files]);
 });
 
+// ═══ TERMINAL PATH RESOLUTION ═══
+// Clickable terminal paths: the client matches path-ish tokens in xterm output and
+// asks here whether a token resolves to a real file. A relative token (./x, src/x.py)
+// is meaningless without a base, so we resolve it against the agent's *pane* cwd —
+// what the agent actually printed it relative to — not the static agent.cwd. Absolute
+// and ~/ paths resolve through the same resolveFilePath policy as every other file
+// read. Returns the canonical path only when it's an existing regular file, so the
+// link only lights up for something openable. GET (no mutation) — auth allows reads.
+app.get("/api/resolve-path", (req, res) => {
+  const raw = req.query.path;
+  if (!raw || typeof raw !== "string") return res.status(400).json({ error: "path is required" });
+  const id = req.query.session;
+  // Pane cwd for relative tokens. tmux exposes the live foreground cwd of the pane;
+  // fall back to the agent's configured cwd, then the workspace root.
+  let paneCwd = null;
+  if (isValidId(id)) {
+    paneCwd = tmuxSafe(["display-message", "-p", "-t", tmuxSessionName(id), "-F", "#{pane_current_path}"]);
+    if (!paneCwd) paneCwd = resolveAgentCwd(sessions.get(id));
+  }
+  const base = paneCwd || WORKSPACE;
+
+  let abs;
+  if (raw.startsWith("http://") || raw.startsWith("https://")) {
+    return res.status(400).json({ error: "not a file path" });
+  } else if (raw.startsWith("/") || raw.startsWith("~")) {
+    abs = resolveFilePath(raw); // absolute / ~ → same policy as every other file read
+  } else {
+    abs = resolve(base, raw); // relative → resolve against the pane's cwd
+  }
+
+  try {
+    const stat = statSync(abs);
+    if (!stat.isFile()) return res.status(404).json({ error: "not a regular file" });
+    res.json({ path: abs });
+  } catch {
+    res.status(404).json({ error: "file not found" });
+  }
+});
+
 // ═══ KERNEL CONFIG API ═══
 function getKernelConfig() {
   const configPath = join(getWorkspaceDir(), ".hadron", "config.json");

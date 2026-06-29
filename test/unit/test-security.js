@@ -191,6 +191,30 @@ async function main() {
     ok(r.status === 400, "non-string content rejected (400)");
   }
 
+  console.log("\n[resolve-path API (clickable terminal paths)]");
+  {
+    const md = join(WS, "resolve-me.md");
+    writeFileSync(md, "# hi\n");
+    // Existing workspace-relative file → canonical absolute path. No session id
+    // (no live pane) falls back to the workspace root as the resolution base.
+    let r = await fetch(`${BASE}/api/resolve-path?path=${encodeURIComponent("resolve-me.md")}`);
+    let j = await r.json();
+    ok(r.status === 200 && j.path === md, "existing relative file resolves to canonical abs path");
+    // Nonexistent path → 404 (link stays dark).
+    r = await fetch(`${BASE}/api/resolve-path?path=${encodeURIComponent("does-not-exist-xyz.md")}`);
+    ok(r.status === 404, "nonexistent path → 404 (not lit)");
+    // A directory is not a regular file → 404 (we only open files).
+    mkdirSync(join(WS, "somedir"), { recursive: true });
+    r = await fetch(`${BASE}/api/resolve-path?path=${encodeURIComponent("somedir")}`);
+    ok(r.status === 404, "directory → 404 (not a regular file)");
+    // A URL is not a file path → 400.
+    r = await fetch(`${BASE}/api/resolve-path?path=${encodeURIComponent("https://example.com/x.md")}`);
+    ok(r.status === 400, "URL token → 400 (not a file path)");
+    // Missing path → 400.
+    r = await fetch(`${BASE}/api/resolve-path`);
+    ok(r.status === 400, "missing path → 400");
+  }
+
   console.log("\n[malicious task text]");
   {
     const pwned = join(WS, "pwned");
