@@ -32,6 +32,7 @@ let openTabsPerSession = {}; // { sessionId: Set of tab ids }
 let layoutMode = "tabs"; // "tabs", "vsplit", "hsplit"
 let perSessionTab = {}; // { sessionId: activeTab }
 let perSessionLayout = {}; // { sessionId: layoutMode }
+let collapsedArtFolders = {}; // { sessionId: Set of collapsed artifact-folder dirs } — survives the 3s re-render
 let workspaceGroups = null; // persisted group order from config, or null if not loaded
 let groupConfig = {}; // per-group attributes like { expandable: false }
 let deckSortMode = "state"; // "state", "manual", "name"
@@ -1055,9 +1056,15 @@ function renderRightPanel() {
   el.querySelectorAll(".af-group-hdr").forEach((hdr) => {
     hdr.addEventListener("click", () => {
       const group = hdr.parentElement;
-      group.classList.toggle("open");
+      const isOpen = group.classList.toggle("open");
       const dirIcon = hdr.querySelector(".af-dir-icon");
-      if (dirIcon) dirIcon.innerHTML = folderIcon(group.classList.contains("open"), 15);
+      if (dirIcon) dirIcon.innerHTML = folderIcon(isOpen, 15);
+      // Remember the collapse so the 3s deck refresh doesn't re-open it.
+      const dir = group.dataset.afDir;
+      if (dir) {
+        const set = (collapsedArtFolders[activeSession.id] ||= new Set());
+        if (isOpen) set.delete(dir); else set.add(dir);
+      }
     });
   });
 
@@ -1166,8 +1173,9 @@ function buildArtifactsSection(activeSession) {
       topLevel.push(items[0]);
       return;
     }
-    html += `<div class="af-group open" data-af-dir="${esc(dir)}">`;
-    html += `<div class="af-group-hdr"><span class="af-arrow">&#9654;</span><span class="af-dir-icon">${folderIcon(true, 15)}</span> ${esc(dirName)}</div>`;
+    const collapsed = (collapsedArtFolders[activeSession.id] || new Set()).has(dir);
+    html += `<div class="af-group${collapsed ? "" : " open"}" data-af-dir="${esc(dir)}">`;
+    html += `<div class="af-group-hdr"><span class="af-arrow">&#9654;</span><span class="af-dir-icon">${folderIcon(!collapsed, 15)}</span> ${esc(dirName)}</div>`;
     html += `<div class="af-group-body">`;
     items.forEach(({ art, idx, filename }) => {
       const icon = fileIcon(filename, 15);

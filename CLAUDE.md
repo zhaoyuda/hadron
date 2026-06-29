@@ -49,7 +49,7 @@ scripts/
   setup-workspace.js  # Interactive workspace initializer
 test/
   unit/               # detectState/nextState fixtures + security HTTP suite (npm test)
-  e2e/                # Playwright browser modules M1-M11 (npm run test:e2e)
+  e2e/                # Playwright browser modules M1-M12 (npm run test:e2e)
 ```
 
 ## Conventions
@@ -113,6 +113,7 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #   + test/e2e/m9-artifact-reload.js (mtime poller baseline + HTML update pill, tab & split)
 #   + test/e2e/m10-clipboard.js  (OSC 52 from pane → browser clipboard; read-request ignored)
 #   + test/e2e/m11-terminal-paths.js (clickable terminal path → resolve vs pane cwd → open as current agent's artifact)
+#   + test/e2e/m12-artifact-folders.js (artifact folder collapse persists across the 3s deck refresh)
 ```
 
 Kept out of `npm test` so the core suite stays fast and dependency-free
