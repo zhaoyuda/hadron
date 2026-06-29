@@ -1293,6 +1293,14 @@ async function addArtifact(type, value, label) {
   const s = sessions.find((s) => s.id === activeSessionId);
   if (!s) return;
   if (!s.artifacts) s.artifacts = [];
+  // De-dupe by value: the same file/URL should never be added twice. This client
+  // PATCHes the whole array (bypassing the server's appendAgentField dedup), so the
+  // guard has to live here. If it's already an artifact, just focus its tab.
+  const existing = s.artifacts.findIndex((a) => a.value === value);
+  if (existing !== -1) {
+    switchTab(`artifact:${existing}`);
+    return;
+  }
   const artifact = { type, value };
   if (label) artifact.label = label;
   s.artifacts.push(artifact);

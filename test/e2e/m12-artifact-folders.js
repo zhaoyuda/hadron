@@ -68,6 +68,19 @@ try {
   await wait(3600);
   r.ok(await page.locator('.af-group')
     .evaluate((el) => el.classList.contains("open")), "folder stays open after another refresh");
+
+  // ── Artifact de-dupe: adding the same value twice must not create a duplicate ──
+  const count = () => page.evaluate(() => {
+    const s = sessions.find((x) => x.id === activeSessionId);
+    return (s.artifacts || []).length;
+  });
+  const before = await count();
+  await page.evaluate(async () => { await addArtifact("file", "out/gamma.md"); });
+  await wait(150);
+  r.ok((await count()) === before + 1, "first add of a new file lands");
+  await page.evaluate(async () => { await addArtifact("file", "out/gamma.md"); });
+  await wait(150);
+  r.ok((await count()) === before + 1, "re-adding the same file is a no-op (no duplicate)");
 } catch (e) {
   r.fail(`unexpected error: ${e.message}`);
 } finally {
