@@ -122,6 +122,15 @@ The differentiator. Spec each item when started; gather usage feedback first.
 - [ ] **Native agent session restore** — after a server restart/crash, resume the actual Claude session (`claude --resume=<id>`), not just the tmux shell. High self-use value for remote OCI long-runs.
 - [ ] **Persistence hardening** — clean reconnect/restore so sessions + the artifact panel survive server restart and client detach/reattach.
 
+## Next up — competitive absorption (FanBox cross-check, 2026-06)
+
+Cross-checked Hadron against **FanBox** (`alchaincyf/fanbox` — a polished Electron desktop "cockpit for coding agents", macOS-only, file/project-discovery centric). Three independent reviews (main, a subagent, codex) converged: distinct lane, not "a worse FanBox" — but FanBox is ahead on shared-surface polish. These four borrow what FanBox does well *and* fits our web + tmux + supervise-agents thesis. The Electron-only stuff stays out by design (native Finder drag, Monaco/Milkdown, signed .dmg, OS image annotation, WeChat phone bot). Build in this order:
+
+1. [x] **Clickable terminal paths → open as the current agent's artifact** — an agent prints a file path; click it → opens as a new artifact tab on the *current* agent (no session switch). xterm already loads web-links (URL-only today); add a local-path link provider, server resolves relative to the pane cwd. Closes the "agent produced X → inspect X now" loop. Web-native because files live server-side; FanBox's "drag from Finder" version is impossible for a remote browser and we don't want it. *Cheapest + most thesis-aligned — start here.*
+2. [ ] **⌘K / Ctrl+K command palette** — fuzzy switch across agents + artifacts + recent files + state filters. Pure client-side over already-loaded lists (+ existing `/api/files/suggest`); `preventDefault` the browser's Cmd+K and add a visible entry point as fallback. Supersedes the older "keyboard-driven agent switching" backlog line (same idea, scoped wider). Do **not** clone FanBox's whole-disk project-discovery center.
+3. [ ] **Artifact curate / cleanup button** — a button in the artifacts panel that (a) recommends artifacts to add (the planned score-based suggest) and (b) flags stale ones to remove: file gone, long-unopened, or superseded. Cleanup removes the *link* from the sidebar (safe, reversible); deleting the real file needs an explicit confirm. Heuristic pass first (0 token); AI-assisted pass opt-in. Image-as-artifact rendering folds in here as a minor add (we already accept image *uploads*, just don't render them).
+4. [ ] **On-done status digest (opt-in)** — when an agent's state flips to `done`, emit a compact per-agent summary (files touched, final state, whether it was ever blocked). Event-triggered, **not** an always-on feed; heuristic / 0-token by default, LLM summary behind a toggle. `state-detector` already detects `done`. Complements the planner workflow (where the user already does this), doesn't replace it.
+
 ## Backlog
 
 ### Multi-project support (design notes)
@@ -145,7 +154,8 @@ The differentiator. Spec each item when started; gather usage feedback first.
 - [ ] Search across agent terminals
 - [ ] Agent activity timeline / history view
 - [ ] Agent templates (pre-configured agents with artifacts/groups)
-- [ ] Keyboard-driven agent switching (fuzzy finder)
+- [ ] **Terminal copy UX polish** — manual selection/copy from the tmux-backed pane is clunky vs a native app. Keep tmux (it's the session-*durability* substrate — agents survive detach/restart on the remote box — not an agent-comms mechanism; auto agent-to-agent is anti-roadmap). Two fixes, no tmux removal: (a) make tmux copy-mode yank emit OSC 52 (`set-clipboard on` + `copy-pipe`) so it rides the OSC 52 *receiver* shipped in M10 → browser clipboard; (b) a modifier key (Option/Shift) for native browser drag-select that bypasses tmux mouse mode. Web terminals won't fully match a native app, but this kills most of the friction.
+- [ ] **Layout optimization (configurable panels)** — current layout: agent roster across the top bar, terminal left (main work area), artifacts right. The VS-Code "files on the left" instinct doesn't map 1:1 — our left is the terminal/work area, and artifacts ≈ VS Code's *right-side preview* (which is the consistent convention). For familiarity, explore: a View-menu toggle for artifact-panel side (left/right), collapsible panels, and maybe an activity-rail treatment of the roster. Prototype 2–3 ASCII layouts before committing; don't reflexively mirror VS Code.
 - [ ] Plugin system for custom artifact renderers
 - [ ] `.xlsx` artifact rendering (low priority, not moat)
 - [ ] Upgrade sprites to PNG/AI-generated (大航海時代4 style) — cosmetic, low priority
