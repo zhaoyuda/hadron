@@ -102,6 +102,9 @@ app.get(["/", "/index.html"], (req, res, next) => {
     let html = readFileSync(join(__dirname, "..", "client", "index.html"), "utf-8");
     const inject = `<script>window.HADRON_TOKEN=${JSON.stringify(AUTH_TOKEN || "")};</script>`;
     html = html.includes("</head>") ? html.replace("</head>", `${inject}</head>`) : inject + html;
+    // Revalidate the shell on every load so a new app.js is picked up without a hard-refresh.
+    // (app.js itself is served by express.static with max-age=0, which already revalidates.)
+    res.set("Cache-Control", "no-cache");
     res.type("html").send(html);
   } catch { next(); }
 });
@@ -286,6 +289,15 @@ function applyAgentEnv(tmuxName, cwd) {
   tmuxSafe(["respawn-pane", "-k", "-t", tmuxName, "-c", cwd || WORKSPACE]);
 }
 
+// Let tmux size each window to the SMALLEST attached client so no client's view is ever
+// clipped on the right. NOTE: never call `tmux resize-window` for this — it permanently flips
+// the window to `window-size manual`, freezing it at one width. A window frozen wider than the
+// browser's visible area is the cause of right-edge text clipping. Setting `window-size smallest`
+// also un-freezes windows already pinned to manual by older versions.
+function fitWindowToClients(tmuxName) {
+  tmuxSafe(["set-window-option", "-t", tmuxName, "window-size", "smallest"]);
+}
+
 function ensureTmuxSession(sessionId, cwd) {
   const tmuxName = tmuxSessionName(sessionId);
   try {
@@ -294,6 +306,7 @@ function ensureTmuxSession(sessionId, cwd) {
     tmux(["new-session", "-d", "-s", tmuxName, "-x", "80", "-y", "24", "-c", cwd || WORKSPACE]);
     applyAgentEnv(tmuxName, cwd || WORKSPACE);
   }
+  fitWindowToClients(tmuxName);
 }
 
 function killTmuxSession(sessionId) {
@@ -1376,6 +1389,7 @@ wss.on("connection", (ws) => {
       tmux(["new-session", "-d", "-s", effectiveTmuxName, "-x", "80", "-y", "24", "-c", cwd]);
       applyAgentEnv(effectiveTmuxName, cwd);
     }
+    fitWindowToClients(effectiveTmuxName);
   } else {
     ensureTmuxSession(sessionId, resolveAgentCwd(sessions.get(sessionId)));
   }
@@ -1434,8 +1448,10 @@ wss.on("connection", (ws) => {
         pty.write(message.data);
       } else if (message.type === "resize") {
         const { cols, rows } = message;
+        // Resize the pty only — tmux gets SIGWINCH and refits the window to this client
+        // (window-size smallest, set in fitWindowToClients). Do NOT call `tmux resize-window`:
+        // it pins window-size to manual and freezes the size, causing right-edge clipping.
         pty.resize(cols, rows);
-        tmuxSafe(["resize-window", "-t", effectiveTmuxName, "-x", String(cols), "-y", String(rows)]);
       }
     } catch {
       pty.write(msg.toString());
@@ -1534,6 +1550,8 @@ server.listen(PORT, HADRON_HOST, () => {
   detectOrphanedTmuxSessions();
   for (const s of sessions.values()) {
     startMonitor(s.id);
+    // Heal any window left pinned to `window-size manual` by older versions (caused clipping).
+    fitWindowToClients(tmuxSessionName(s.id));
   }
   // Watch agent JSON files for external edits (e.g. Claude agents editing their own config)
   const agentsDir = join(getWorkspaceDir(), ".hadron", "agents");
