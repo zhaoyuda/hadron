@@ -2337,3 +2337,63 @@ mark.ann-mark:hover { background: rgba(210, 153, 34, .55); }
   margin: 12px 0 6px;
 }
 .ann-empty { font-size: 11px; color: var(--text3); padding: 8px 0; }
+
+/* ── Command palette (⌘K) ── */
+#palette-trigger {
+  display: flex; align-items: center; gap: 6px;
+  margin-left: 10px; padding: 1px 8px;
+  font-size: 11px; color: var(--text3);
+  border: 1px solid var(--border); border-radius: 5px;
+  cursor: pointer; user-select: none; background: var(--bg);
+}
+#palette-trigger:hover { color: var(--text2); border-color: var(--text3); }
+#palette-trigger .pt-icon { font-size: 13px; }
+#palette-trigger .pt-key {
+  font-family: inherit; font-size: 10px; color: var(--text3);
+  background: var(--bg3); border: 1px solid var(--border);
+  border-radius: 3px; padding: 0 4px;
+}
+
+#palette-overlay {
+  display: none; position: fixed; inset: 0; z-index: 600;
+  background: rgba(1,4,9,.55); backdrop-filter: blur(2px);
+  justify-content: center; align-items: flex-start;
+}
+#palette-overlay.active { display: flex; }
+#palette-box {
+  margin-top: 12vh; width: 560px; max-width: 92vw; max-height: 64vh;
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 12px; box-shadow: 0 16px 48px rgba(0,0,0,.6);
+  display: flex; flex-direction: column; overflow: hidden;
+}
+#palette-input {
+  border: none; outline: none; background: transparent;
+  color: var(--text); font-size: 15px; padding: 14px 16px;
+  border-bottom: 1px solid var(--border); font-family: inherit;
+}
+#palette-input::placeholder { color: var(--text3); }
+#palette-results { overflow-y: auto; padding: 6px 0; }
+.palette-cat {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .6px;
+  color: var(--text3); padding: 8px 16px 3px;
+}
+.palette-row {
+  display: flex; align-items: center; gap: 9px;
+  padding: 6px 16px; cursor: pointer; font-size: 13px; color: var(--text2);
+}
+.palette-row.sel { background: var(--bg3); color: var(--text); }
+.palette-ic { display: flex; width: 16px; flex-shrink: 0; }
+.palette-label { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.palette-sub {
+  margin-left: auto; padding-left: 12px; font-size: 11px; color: var(--text3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 50%;
+}
+.palette-empty { padding: 18px 16px; color: var(--text3); font-size: 13px; }
+#palette-foot {
+  border-top: 1px solid var(--border); padding: 7px 16px;
+  font-size: 10px; color: var(--text3); display: flex; gap: 10px;
+}
+#palette-foot kbd {
+  background: var(--bg3); border: 1px solid var(--border);
+  border-radius: 3px; padding: 0 4px; font-family: inherit;
+}

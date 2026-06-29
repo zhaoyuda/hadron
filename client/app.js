@@ -1683,6 +1683,7 @@ function renderShortcutBar() {
   const alt = mac ? "⌥" : "Alt";
   const mod = mac ? "⌘" : "Ctrl";
   const hints = [
+    `<kbd>${mod}+K</kbd> command palette`,
     `<kbd>${alt}+1</kbd>–<kbd>${alt}+9</kbd> switch agent`,
     `<kbd>${alt}+H</kbd> / <kbd>${alt}+L</kbd> prev/next agent`,
     `<kbd>${alt}+T</kbd> new shell`,
@@ -1725,6 +1726,13 @@ function initKeyboard() {
     if (isAltKey(e, "k")) { e.preventDefault(); cycleTab(1); return true; }
     if (isAltKey(e, "t")) { e.preventDefault(); createShellTab(); return true; }
 
+    // Cmd/Ctrl+K: command palette (preventDefault to override the browser's own).
+    if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.code === "KeyK") {
+      e.preventDefault();
+      if (typeof openCommandPalette === "function") openCommandPalette();
+      return true;
+    }
+
     // Ctrl+Shift+R: reload current artifact
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === "KeyR") {
       e.preventDefault();
@@ -1752,7 +1760,8 @@ function initKeyboard() {
 
   term.attachCustomKeyEventHandler((e) => {
     const digit = getAltDigit(e);
-    if ((digit >= 1 && digit <= 9) || isAltKey(e, "h") || isAltKey(e, "l") || isAltKey(e, "j") || isAltKey(e, "k") || isAltKey(e, "t")) {
+    const isPaletteKey = (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.code === "KeyK";
+    if ((digit >= 1 && digit <= 9) || isAltKey(e, "h") || isAltKey(e, "l") || isAltKey(e, "j") || isAltKey(e, "k") || isAltKey(e, "t") || isPaletteKey) {
       if (e.type === "keydown") {
         e._hadronHandled = true;
         handleGlobalShortcut(e);
