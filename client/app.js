@@ -115,16 +115,28 @@ async function fetchSessions() {
 
 // ═══ DISPLAY ORDER ═══
 function getSessionGroups() {
-  const groupMap = {};
+  // Group case-insensitively: "Workers" and "workers" are the same group
+  // (they'd otherwise render identically once CSS uppercases the label).
+  // Keyed by lowercase; the display label is the persisted casing when the
+  // group exists in workspaceGroups, else the first casing we encounter.
+  const labelFor = (raw) => {
+    if (workspaceGroups) {
+      const hit = workspaceGroups.find((g) => g.toLowerCase() === raw.toLowerCase());
+      if (hit) return hit;
+    }
+    return raw;
+  };
+  const groupMap = {}; // lcKey -> { label, items }
   sessions.forEach((s) => {
-    const g = s.group || "Workers";
-    if (!groupMap[g]) groupMap[g] = [];
-    groupMap[g].push(s);
+    const raw = s.group || "Workers";
+    const key = raw.toLowerCase();
+    if (!groupMap[key]) groupMap[key] = { label: labelFor(raw), items: [] };
+    groupMap[key].items.push(s);
   });
 
   const STATE_PRIORITY = { blocked: 0, done: 1, working: 2, idle: 3 };
-  for (const g of Object.keys(groupMap)) {
-    groupMap[g].sort((a, b) => {
+  for (const key of Object.keys(groupMap)) {
+    groupMap[key].items.sort((a, b) => {
       if (deckSortMode === "state") {
         const ap = STATE_PRIORITY[a.state || "idle"] ?? 3;
         const bp = STATE_PRIORITY[b.state || "idle"] ?? 3;
@@ -146,12 +158,14 @@ function getSessionGroups() {
     const result = [];
     const seen = new Set();
     for (const gName of workspaceGroups) {
-      result.push({ label: gName, items: groupMap[gName] || [] });
-      seen.add(gName);
+      const key = gName.toLowerCase();
+      if (seen.has(key)) continue; // dedupe persisted entries differing only by case
+      seen.add(key);
+      result.push({ label: gName, items: (groupMap[key] && groupMap[key].items) || [] });
     }
     // Append any groups not in the persisted list (shouldn't happen normally)
-    for (const g of Object.keys(groupMap)) {
-      if (!seen.has(g)) result.push({ label: g, items: groupMap[g] });
+    for (const key of Object.keys(groupMap)) {
+      if (!seen.has(key)) result.push({ label: groupMap[key].label, items: groupMap[key].items });
     }
     return result;
   }
@@ -160,8 +174,8 @@ function getSessionGroups() {
   const result = [];
   Object.keys(groupMap)
     .sort()
-    .forEach((g) => {
-      result.push({ label: g, items: groupMap[g] });
+    .forEach((key) => {
+      result.push({ label: groupMap[key].label, items: groupMap[key].items });
     });
   return result;
 }
@@ -791,7 +805,8 @@ function renderDeck() {
       const save = async () => {
         const newName = input.value.trim();
         if (newName && newName !== oldName) {
-          const toUpdate = sessions.filter((s) => s.group === oldName);
+          // Match case-insensitively — the label may merge several casings.
+          const toUpdate = sessions.filter((s) => (s.group || "Workers").toLowerCase() === oldName.toLowerCase());
           await Promise.all(toUpdate.map((s) => {
             s.group = newName;
             return fetch(`/api/sessions/${s.id}`, {
@@ -802,7 +817,10 @@ function renderDeck() {
           }));
           // Update persisted group list
           if (workspaceGroups) {
-            const list = workspaceGroups.map((g) => g === oldName ? newName : g);
+            const seen = new Set();
+            const list = workspaceGroups
+              .map((g) => g.toLowerCase() === oldName.toLowerCase() ? newName : g)
+              .filter((g) => { const k = g.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; });
             await saveWorkspaceGroups(list);
           }
         }
@@ -819,7 +837,7 @@ function renderDeck() {
     // Right-click to delete empty groups
     label.addEventListener("contextmenu", (e) => {
       const groupName = label.dataset.groupName;
-      const groupItems = sessions.filter((s) => s.group === groupName);
+      const groupItems = sessions.filter((s) => (s.group || "Workers").toLowerCase() === groupName.toLowerCase());
       if (groupItems.length > 0) return;
       e.preventDefault();
       const menu = document.getElementById("ctx-menu");
@@ -2069,9 +2087,13 @@ async function handleMenuAction(action, item) {
   } else if (action === "new-group") {
     const name = prompt("Group name:");
     if (name && name.trim()) {
+      const trimmed = name.trim();
       if (!workspaceGroups) workspaceGroups = [];
-      workspaceGroups.push(name.trim());
-      saveWorkspaceGroups(workspaceGroups);
+      // Don't create a case-duplicate of an existing group.
+      if (!workspaceGroups.some((g) => g.toLowerCase() === trimmed.toLowerCase())) {
+        workspaceGroups.push(trimmed);
+        saveWorkspaceGroups(workspaceGroups);
+      }
       renderDeck();
     }
   } else if (action === "archive-agent") {
