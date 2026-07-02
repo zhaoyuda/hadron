@@ -1308,6 +1308,9 @@ function formatWorkingSubstatus(s) {
   if (sub.type === "responding") {
     return "responding...";
   }
+  if (sub.type === "retrying") {
+    return "retrying API...";
+  }
   return "working...";
 }
 

@@ -23,6 +23,10 @@ function machine(current = "idle", extra = {}) {
 // snaps
 const sToolStrong = { state: "working", stale: false, promptVisible: true, substatus: { type: "tool", tool: "Bash" } };
 const sThinkStale = { state: "working", stale: true, promptVisible: true, substatus: { type: "thinking" } };
+// API retry: strong (stale:false) even with the prompt visible — the on-screen
+// thinking timer freezes mid-retry, so content stops changing, but the agent is
+// very much working. Must flip idle→working without a content change.
+const sRetrying = { state: "working", stale: false, promptVisible: true, substatus: { type: "retrying" } };
 const sBlockedInput = { state: "blocked", blockReason: "Needs input" };
 const sBlockedApi = { state: "blocked", blockReason: "API error" };
 const sInconclusive = { state: "inconclusive" };
@@ -87,6 +91,14 @@ console.log("\n[stale thinking vs strong indicator at idle]");
   const m = machine("idle");
   const d = T(m, { cmd: "node", snap: sToolStrong, contentChanged: false });
   ok(d && d.state === "working", "strong tool indicator → working immediately (no content-change needed)");
+}
+{
+  // The reported bug: an agent stuck in an API retry loop (auth conflict) with a
+  // frozen "Wandering…" timer. Content never changes, so the stale-thinking path
+  // would keep it idle — but the retry snap is strong, so it flips to working.
+  const m = machine("idle");
+  const d = T(m, { cmd: "node", snap: sRetrying, contentChanged: false });
+  ok(d && d.state === "working", "API retry → working immediately even with frozen (unchanging) content");
 }
 
 console.log("\n[idle → working via inconclusive debounce]");

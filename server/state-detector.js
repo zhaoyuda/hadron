@@ -68,6 +68,12 @@ const PROPAGATING_RE = /Propagating…\s*\(([^)]+)\)/;
 // Compacting conversation… (with or without duration — /compact shows progress bar, no parens)
 const COMPACTING_RE = /Compacting\s+\w+…/;
 
+// API retry in progress: "Retrying in 3s · attempt 2/10" — a transient API
+// failure the agent is auto-recovering from. Real-time work, and crucially the
+// "thinking" timer above it often freezes while the call is blocked, so without
+// this an actively-retrying agent reads as idle.
+const RETRYING_RE = /Retrying in \d+s\b|·\s*attempt \d+\/\d+/i;
+
 // ── Blocked indicators ──
 
 const RATE_LIMIT_PATTERNS = [
@@ -189,6 +195,19 @@ export function detectState(rawLines, opts = {}) {
     if (TOOL_WAITING_RE.test(above[i]) || TOOL_RUNNING_RE.test(above[i])) {
       return { state: "working", promptVisible: hasPrompt, stale: false, substatus: { type: "tool", tool: _findToolName(above, i) } };
     }
+  }
+
+  // 3b'. API retry in progress ("Retrying in 3s · attempt 2/10"). Strong, not
+  // stale: an active retry is real-time work, and the thinking timer above it
+  // frequently freezes while the failing call blocks — so check it before the
+  // (stale) thinking indicators, which would otherwise need a content change
+  // that never comes and leave a retrying agent stuck on idle. Scan the tail
+  // (the "⎿ Retrying…" line sits below the spinner, not in the `above` window).
+  // Exception: a retry that accompanies a hard API error code (429/5xx/auth) is
+  // a real block the user should see — let step 5d claim it instead.
+  const retryTail = tail.join("\n");
+  if (RETRYING_RE.test(retryTail) && !RATE_LIMIT_PATTERNS.some((p) => p.test(retryTail))) {
+    return { state: "working", promptVisible: hasPrompt, stale: false, substatus: { type: "retrying" } };
   }
 
   // 3c. Thinking with duration: <spinner> <description>… (duration · tokens)

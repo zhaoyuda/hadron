@@ -1,0 +1,15 @@
+  Opus 4.8 with high effort · API Usage Billing
+  ~/work/ato
+
+⚠ Auth conflict: Using ANTHROPIC_API_KEY instead of Anthropic Console key. Either unset ANTHROPIC_API_KEY, or run `claude /logout`.
+
+  hi — how's the status now
+  ⎿  Retrying in 0s · attempt 1/10
+
+✶ Wandering… (52s)
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 4.8  |  ctx [██░░░░░░░░] 18% (200k)
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

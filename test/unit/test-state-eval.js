@@ -72,6 +72,11 @@ const EXPECTED = {
   // ── Broad fallback ──
   "working-broad-fallback":        { state: "working", substatus: { type: "thinking" } },
 
+  // ── API retry in progress (auth conflict → retry loop; thinking timer frozen) ──
+  // Must win over the stale "Wandering…" spinner above the prompt so a retrying
+  // agent reads as working, not idle.
+  "working-retrying-api":          { state: "working", promptVisible: true, substatus: { type: "retrying" } },
+
   // ── Idle (prompt visible, NO working indicators in above window) ──
   "idle-at-prompt":                        { state: null },
   "idle-prompt-with-user-text":            { state: null },
