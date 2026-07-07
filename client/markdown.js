@@ -369,3 +369,59 @@ function handleImagePaste(e) {
 
 document.addEventListener("paste", handleImagePaste);
 
+// ── Clicking a link in a markdown preview ──
+// A relative/absolute link to another local file (e.g. [design](./notes/plan.md)
+// or [report](../out/report.md)) opens in-place as an artifact tab of the current
+// agent — the same "open as this agent's artifact" model as clicking a terminal
+// path — instead of navigating the whole dashboard away. Links are resolved
+// against the .md file's own directory (matching rewriteRelativeImages). External
+// links (http(s)/mailto/…) open in a new tab; in-page #anchors are left alone.
+function resolveMdLinkPath(mdPath, href) {
+  href = href.replace(/[?#].*$/, "");            // drop query / fragment
+  try { href = decodeURIComponent(href); } catch {}
+  href = href.replace(/^file:\/\//, "");
+  if (!href) return null;
+  if (href.startsWith("~") || href.startsWith("/")) return href; // ~ / filesystem-absolute
+  const dir = mdPath && mdPath.includes("/") ? mdPath.slice(0, mdPath.lastIndexOf("/")) : "";
+  const parts = dir ? dir.split("/") : [];
+  for (const seg of href.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") { if (parts.length) parts.pop(); continue; }
+    parts.push(seg);
+  }
+  return parts.join("/");
+}
+
+function flashMdLinkMissing(a) {
+  a.classList.add("md-link-missing");
+  setTimeout(() => a.classList.remove("md-link-missing"), 1200);
+}
+
+function handleMdLinkClick(e) {
+  if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  const a = e.target.closest && e.target.closest("a[href]");
+  if (!a || !a.closest(".md-preview")) return; // only links inside a rendered preview
+  const href = a.getAttribute("href") || "";
+  if (!href || href.startsWith("#")) return;    // in-page anchor → browser default
+  // External / non-file scheme → open in a new tab, don't hijack it into an artifact.
+  if (/^[a-z][a-z0-9+.-]*:/i.test(href) && !/^file:/i.test(href)) {
+    e.preventDefault();
+    window.open(href, "_blank", "noopener");
+    return;
+  }
+  const host = a.closest("[data-md-path]");
+  const resolved = resolveMdLinkPath(host && host.dataset.mdPath, href);
+  if (!resolved) return;
+  e.preventDefault();
+  // Confirm it exists before adding a tab, so a broken link doesn't leave junk;
+  // otherwise flash the link so the click doesn't feel dead.
+  fetch(`/api/file?path=${encodeURIComponent(resolved)}`, { method: "HEAD" })
+    .then((r) => {
+      if (r.ok && typeof addArtifact === "function") addArtifact("file", resolved);
+      else flashMdLinkMissing(a);
+    })
+    .catch(() => flashMdLinkMissing(a));
+}
+
+document.addEventListener("click", handleMdLinkClick);
+

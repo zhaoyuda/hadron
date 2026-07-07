@@ -1311,6 +1311,8 @@ html, body {
 .md-preview p { margin-bottom: 12px; }
 .md-preview a { color: var(--blue); text-decoration: none; }
 .md-preview a:hover { text-decoration: underline; }
+/* A link whose target file couldn't be found flashes red so the click isn't silent. */
+.md-preview a.md-link-missing { color: var(--red, #ff7b72); text-decoration: line-through; }
 .md-preview strong { color: var(--white); font-weight: 600; }
 .md-preview em { font-style: italic; }
 .md-preview ul, .md-preview ol { margin-bottom: 12px; padding-left: 24px; }

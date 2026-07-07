@@ -49,7 +49,7 @@ scripts/
   setup-workspace.js  # Interactive workspace initializer
 test/
   unit/               # detectState/nextState fixtures + security HTTP suite (npm test)
-  e2e/                # Playwright browser modules M1-M14 (npm run test:e2e)
+  e2e/                # Playwright browser modules M1-M15 (npm run test:e2e)
 ```
 
 ## Conventions
@@ -116,6 +116,7 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #   + test/e2e/m12-artifact-folders.js (artifact folder collapse persists across the 3s deck refresh)
 #   + test/e2e/m13-command-palette.js (⌘K palette: fuzzy switch agents / open artifacts / add files via suggest)
 #   + test/e2e/m14-group-case.js (agent groups are case-insensitive: "Workers"/"workers" merge into one deck group; rename re-tags every casing)
+#   + test/e2e/m15-md-links.js (clicking a link in a rendered .md preview opens the target as an artifact tab; external → new tab; missing → flash)
 ```
 
 Kept out of `npm test` so the core suite stays fast and dependency-free
