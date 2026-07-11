@@ -12,6 +12,8 @@ import { networkInterfaces, hostname, tmpdir } from "os";
 import { URL } from "url";
 import { randomBytes } from "crypto";
 import { StateDetector } from "./state-detector.js";
+import { probeClaudeCaps, RuntimeTracker, performResume } from "./resume.js";
+import { randomUUID } from "crypto";
 import { loadAgents, loadAgent, saveAgent, archiveAgent, deleteAgent, initWorkspace, getWorkspaceDir, appendAgentField, isSelfWrite } from "./agent-store.js";
 import { resolve } from "path";
 import { tmux, tmuxSafe, isValidId } from "./tmux.js";
@@ -251,7 +253,16 @@ function autostartAgent(id, launchCommand, task) {
   const tmuxName = tmuxSessionName(id);
   (async () => {
     try {
-      tmux(["send-keys", "-t", tmuxName, "--", argv.join(" "), "Enter"]);
+      let cmdLine = argv.join(" ");
+      // Claude launches get a Hadron-chosen session id — the authoritative
+      // source for later auto-resume (see resume.js). Server-generated UUID,
+      // never user input, so gluing it into the command line is inert.
+      if (launchCommand === "claude" && (await probeClaudeCaps()).sessionId) {
+        const sid = randomUUID();
+        cmdLine += ` --session-id ${sid}`;
+        runtimeTrackers.get(id)?.recordSpawnedSession(sid);
+      }
+      tmux(["send-keys", "-t", tmuxName, "--", cmdLine, "Enter"]);
       const clean = task ? sanitizeForKeystrokes(task) : "";
       if (clean) {
         await new Promise((r) => setTimeout(r, 4000)); // let the agent boot
@@ -298,15 +309,20 @@ function fitWindowToClients(tmuxName) {
   tmuxSafe(["set-window-option", "-t", tmuxName, "window-size", "smallest"]);
 }
 
+// Returns true when it had to CREATE the session — i.e. the pane is a brand-new
+// shell (post-crash boot), the one moment auto-resume is allowed to trigger.
 function ensureTmuxSession(sessionId, cwd) {
   const tmuxName = tmuxSessionName(sessionId);
+  let created = false;
   try {
     tmux(["has-session", "-t", tmuxName]);
   } catch {
     tmux(["new-session", "-d", "-s", tmuxName, "-x", "80", "-y", "24", "-c", cwd || WORKSPACE]);
     applyAgentEnv(tmuxName, cwd || WORKSPACE);
+    created = true;
   }
   fitWindowToClients(tmuxName);
+  return created;
 }
 
 function killTmuxSession(sessionId) {
@@ -649,9 +665,19 @@ app.post("/api/sessions/:id/message", async (req, res) => {
   if (tmuxSafe(["has-session", "-t", tmuxName]) === null) {
     return res.status(409).json({ error: `agent tmux session ${tmuxName} is not running` });
   }
-  // The text reaches tmux via a temp file (load-buffer), never argv or a shell —
-  // length and content are unconstrained. Unique buffer name so concurrent
-  // deliveries can't clobber each other; -d reclaims it on paste.
+  try {
+    await deliverToPane(tmuxName, text, enter);
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+  res.json({ ok: true, bytes: Buffer.byteLength(text) });
+});
+
+// The text reaches tmux via a temp file (load-buffer), never argv or a shell —
+// length and content are unconstrained. Unique buffer name so concurrent
+// deliveries can't clobber each other; -d reclaims it on paste. Shared by the
+// message API and the auto-resume path (resume.js).
+async function deliverToPane(tmuxName, text, enter = true) {
   const dir = mkdtempSync(join(tmpdir(), "hadron-msg-"));
   const file = join(dir, "text");
   const buf = `hadron-msg-${Date.now()}-${randomBytes(4).toString("hex")}`;
@@ -661,17 +687,15 @@ app.post("/api/sessions/:id/message", async (req, res) => {
     tmux(["paste-buffer", "-p", "-d", "-b", buf, "-t", tmuxName]);
   } catch (e) {
     tmuxSafe(["delete-buffer", "-b", buf]);
-    return res.status(500).json({ error: e.message });
+    throw e;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
   if (enter) {
     await new Promise((r) => setTimeout(r, 250));
-    try { tmux(["send-keys", "-t", tmuxName, "Enter"]); }
-    catch (e) { return res.status(500).json({ error: e.message }); }
+    tmux(["send-keys", "-t", tmuxName, "Enter"]);
   }
-  res.json({ ok: true, bytes: Buffer.byteLength(text) });
-});
+}
 
 // Paste-to-upload: raw image bytes in, server-constructed absolute path out. The
 // client supplies NO path — extension comes from a Content-Type whitelist, the
@@ -1272,16 +1296,44 @@ app.post("/api/jupyter/stop", (req, res) => {
 
 // ═══ BACKGROUND STATE MONITORS ═══
 const monitors = new Map();
+const runtimeTrackers = new Map();
+
+// Throttled checkpoint persistence: transitions (tombstone, new session id)
+// flush immediately; heartbeat-only refreshes ride a 30s trailing write.
+const runtimeSaveTimers = new Map();
+function saveRuntimeCheckpoint(session, urgent) {
+  if (urgent) {
+    clearTimeout(runtimeSaveTimers.get(session.id));
+    runtimeSaveTimers.delete(session.id);
+    saveAgent(session);
+    return;
+  }
+  if (runtimeSaveTimers.has(session.id)) return;
+  runtimeSaveTimers.set(session.id, setTimeout(() => {
+    runtimeSaveTimers.delete(session.id);
+    saveAgent(session);
+  }, 30000));
+}
 
 function startMonitor(sessionId) {
   if (monitors.has(sessionId)) return;
   const session = sessions.get(sessionId);
   if (!session) return;
 
-  ensureTmuxSession(sessionId);
+  const created = ensureTmuxSession(sessionId, resolveAgentCwd(session));
   const detector = new StateDetector(tmuxSessionName(sessionId), session);
   monitors.set(sessionId, detector);
+
+  const tracker = new RuntimeTracker(session, { save: saveRuntimeCheckpoint });
+  runtimeTrackers.set(sessionId, tracker);
+  detector.onCmd = (cmd) => tracker.observe(cmd);
+
   console.log(`Monitor started for session: ${sessionId}`);
+  if (created) {
+    performResume(session, tmuxSessionName(sessionId), { deliver: deliverToPane, save: (s) => saveAgent(s) })
+      .then((r) => { if (r.reason) console.log(`[resume] ${sessionId}: skip — ${r.reason}`); })
+      .catch((e) => console.error(`[resume] ${sessionId}: ${e.message}`));
+  }
 }
 
 function stopMonitor(sessionId) {
@@ -1290,6 +1342,9 @@ function stopMonitor(sessionId) {
     detector.dispose();
     monitors.delete(sessionId);
   }
+  runtimeTrackers.delete(sessionId);
+  clearTimeout(runtimeSaveTimers.get(sessionId));
+  runtimeSaveTimers.delete(sessionId);
 }
 
 // ═══ WebSocket server ═══
@@ -1529,6 +1584,7 @@ server.listen(PORT, HADRON_HOST, () => {
   const config = initWorkspace(WORKSPACE);
   AUTH_TOKEN = loadOrCreateToken();
   writeRuntimeFile();
+  probeClaudeCaps(); // warm the capability cache before any autostart needs it
   // Additive self-heal: link any not-yet-linked operation skills into ~/.claude/skills/
   // so a new skill appears after `git pull` + restart. Additive only (never prune or
   // re-point) → safe with multiple servers / checkouts. Full reconcile is `hadron skills sync`.

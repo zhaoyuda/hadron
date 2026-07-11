@@ -92,6 +92,8 @@ npm test
 #   = test-state-eval.js   (detectState snapshot fixtures)
 #   + test-state-machine.js (nextState reducer — temporal transitions)
 #   + test-security.js      (auth, cwd policy, injection, concurrency over HTTP)
+#   + test-annotations.js / test-message.js / test-upload.js (v0.8 surfaces)
+#   + test-resume.js        (v0.9 auto-resume gate: checkpoint, tombstone, scrape validation)
 ```
 
 Individual suites can be run directly, e.g. `node test/unit/test-state-eval.js`.

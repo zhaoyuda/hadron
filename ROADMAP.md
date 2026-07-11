@@ -58,8 +58,8 @@ The differentiator. Spec each item when started; gather usage feedback first.
 
 ## v0.9 — Durability & reach
 
-- [ ] **Native agent session restore** — after a server restart/crash, resume the actual Claude session (`claude --resume=<id>`), not just the tmux shell. High self-use value for remote OCI long-runs.
-- [ ] **Persistence hardening** — clean reconnect/restore so sessions + the artifact panel survive server restart and client detach/reattach.
+- [x] **Native agent session restore** — after a machine crash/reboot, agents resume their actual Claude session, not just an empty shell. *Shipped:* `server/resume.js` — RuntimeTracker piggybacks the 1s state poll to checkpoint each agent's runtime (`claude` vs shell, session id, confidence, clean-exit tombstone) into the agent JSON; Hadron-launched claudes get a spawn-injected `--session-id` (authoritative), user-launched ones a content-validated transcript scrape (correlated — filename picked by mtime counts only if the jsonl head confirms sessionId+cwd). Auto-resume triggers ONLY when Hadron itself recreates a missing tmux session (boot after crash): `claude --resume <id>` injected via the bracketed-paste path, bounded retries, per-boot idempotency; `--continue` is never used automatically, deliberate exits (tombstone) are never healed, and the opt-in per-agent `resumeCommand` (e.g. `/rc`) is sent only after the TUI owns the pane — agents without one get nothing. Design: `design-notes/deploy-resume-design.md` (codex-reviewed). Unit suite test-resume.js (28 asserts) + live crash-recovery E2E verified. Deploy-side: `KillMode=process` on hadron.service means server restarts no longer touch agents at all (2026-07-11, zero-casualty migration).
+- [ ] **Persistence hardening** — clean reconnect/restore so sessions + the artifact panel survive server restart and client detach/reattach. Remaining after session restore: tmux ownership moves to an independent user unit (`hadron-tmux.service` + linger, design §5), resume-ambiguity UI ("Resume?" picker for uncertain checkpoints).
 
 ## Next up — competitive absorption (FanBox cross-check, 2026-06)
 

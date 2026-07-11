@@ -477,6 +477,10 @@ export class StateDetector {
       return;
     }
 
+    // Runtime-checkpoint piggyback (resume.js): the tracker just needs the
+    // pane's foreground command each poll. Never let it break detection.
+    if (this.onCmd) try { this.onCmd(cmd); } catch {}
+
     if (panePath && panePath !== this.session.cwd) {
       this.session.cwd = panePath;
     }

@@ -102,6 +102,10 @@ export function saveAgent(agent) {
   if (cwd) data.cwd = cwd;
   if (launchCommand) data.launchCommand = launchCommand;
   if (autostartedAt) data.autostartedAt = autostartedAt;
+  // v0.9 resume: the runtime checkpoint and the opt-in post-resume command
+  // (both absent unless the resume machinery / the user set them).
+  if (agent.runtime) data.runtime = agent.runtime;
+  if (agent.resumeCommand) data.resumeCommand = agent.resumeCommand;
   data.updatedAt = new Date().toISOString();
   writeAgentFile(id, data);
 }
