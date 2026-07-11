@@ -266,7 +266,8 @@ function renderWorkHeader() {
         const fname = tab.value.split("/").pop();
         if (fname) iconHtml = `<span class="wh-tab-i">${fileIcon(fname, 14)}</span>`;
       }
-      tabsHtml += `<div class="wh-tab wh-tab-art${isActive}" data-tab="${tab.id}" data-art-type="${esc(tab.type || 'file')}" data-art-value="${esc(tab.value || '')}" title="${esc(tab.label)}">${iconHtml}<span class="wh-tab-label">${esc(tab.label)}</span><span class="wh-tab-x" data-close-tab="${tab.id}">×</span></div>`;
+      const hasDraft = tab.type !== "url" && tab.value && typeof hasDirtyDraft === "function" && hasDirtyDraft(tab.value) ? " wh-tab-hasdraft" : "";
+      tabsHtml += `<div class="wh-tab wh-tab-art${isActive}${hasDraft}" data-tab="${tab.id}" data-art-type="${esc(tab.type || 'file')}" data-art-value="${esc(tab.value || '')}" title="${esc(tab.label)}">${iconHtml}<span class="wh-tab-label">${esc(tab.label)}</span><span class="wh-tab-x" data-close-tab="${tab.id}">×</span></div>`;
     });
   }
 
@@ -1713,7 +1714,7 @@ function renderShortcutBar() {
   const s = sessions.find(x => x.id === activeSessionId);
   const art = s?.artifacts?.[0];
   if (art && isMarkdownFile(art.value)) {
-    hints.push(`<kbd>${mod}+Shift+V</kbd> toggle preview`);
+    hints.push(`<kbd>${mod}+Shift+E</kbd> toggle preview`);
   }
   bar.innerHTML = hints.map(h => `<span>${h}</span>`).join("");
 }
@@ -1761,8 +1762,10 @@ function initKeyboard() {
       return true;
     }
 
-    // Ctrl+Shift+V / Cmd+Shift+V: toggle view/edit mode
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === "KeyV") {
+    // Ctrl/Cmd+Shift+E: toggle view/edit mode (VS Code-adjacent). Shift+V kept
+    // as a silent legacy alias — but note ⌘⇧V means "paste as plain text" in
+    // many apps, which is why E is now the documented binding.
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.code === "KeyE" || e.code === "KeyV")) {
       const editableContainer = document.querySelector('[data-md-raw]');
       if (editableContainer) {
         e.preventDefault();
@@ -2005,7 +2008,7 @@ async function showMenu(menuId, anchorEl) {
       menuItem("Editor", "", { submenu: editorSub }),
       menuItem("Notifications", "", { submenu: notifySub }),
       '<div class="menu-dropdown-sep"></div>',
-      menuItem("Toggle Preview", "toggle-preview", { shortcut: `${mod}+Shift+V` }),
+      menuItem("Toggle Preview", "toggle-preview", { shortcut: `${mod}+Shift+E` }),
     ].join("");
   } else if (menuId === "kernel") {
     menu.style.left = rect.left + "px";

@@ -49,7 +49,7 @@ scripts/
   setup-workspace.js  # Interactive workspace initializer
 test/
   unit/               # detectState/nextState fixtures + security HTTP suite (npm test)
-  e2e/                # Playwright browser modules M1-M15 (npm run test:e2e)
+  e2e/                # Playwright browser modules M1-M16 (npm run test:e2e)
 ```
 
 ## Conventions
@@ -94,6 +94,7 @@ npm test
 #   + test-security.js      (auth, cwd policy, injection, concurrency over HTTP)
 #   + test-annotations.js / test-message.js / test-upload.js (v0.8 surfaces)
 #   + test-resume.js        (v0.9 auto-resume gate: checkpoint, tombstone, scrape validation)
+#   + test-file-revision.js (conditional /api/file writes: revision, 409 conflict, atomicity)
 ```
 
 Individual suites can be run directly, e.g. `node test/unit/test-state-eval.js`.
@@ -119,6 +120,7 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #   + test/e2e/m13-command-palette.js (⌘K palette: fuzzy switch agents / open artifacts / add files via suggest)
 #   + test/e2e/m14-group-case.js (agent groups are case-insensitive: "Workers"/"workers" merge into one deck group; rename re-tags every casing)
 #   + test/e2e/m15-md-links.js (clicking a link in a rendered .md preview opens the target as an artifact tab; external → new tab; missing → flash)
+#   + test/e2e/m16-editor-drafts.js (editor draft model: preview renders draft, reload restores it, agent-write → Save 409s with Compare/Overwrite/Cancel, Discard confirms)
 ```
 
 Kept out of `npm test` so the core suite stays fast and dependency-free

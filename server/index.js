@@ -6,7 +6,7 @@ import { spawn } from "node-pty";
 import { fileURLToPath } from "url";
 import { dirname, join, basename } from "path";
 import { execSync, execFileSync, spawn as cpSpawn } from "child_process";
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, watch as fsWatch, chmodSync, unlinkSync, mkdtempSync, mkdirSync, rmSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, watch as fsWatch, chmodSync, unlinkSync, mkdtempSync, mkdirSync, rmSync, renameSync } from "fs";
 import { connect as netConnect } from "net";
 import { networkInterfaces, hostname, tmpdir } from "os";
 import { URL } from "url";
@@ -889,6 +889,13 @@ app.delete("/api/sessions/:id/shells/:shellName", (req, res) => {
 });
 
 // ═══ FILE READ API ═══
+// Opaque per-file revision for conditional writes (editor draft model). mtime
+// alone is not a reliable revision (coarse resolution, restorable) — fold in
+// size too. Callers must treat it as opaque.
+function fileRevision(stat) {
+  return `${stat.mtimeMs}-${stat.size}`;
+}
+
 app.head("/api/file", (req, res) => {
   const filePath = resolveFilePath(req.query.path);
   if (!filePath) return res.status(400).end();
@@ -896,6 +903,7 @@ app.head("/api/file", (req, res) => {
     const stat = statSync(filePath);
     res.set("Cache-Control", "no-store");
     res.set("X-File-Mtime", String(stat.mtimeMs));
+    res.set("X-File-Revision", fileRevision(stat));
     res.status(200).end();
   } catch { res.status(404).end(); }
 });
@@ -918,6 +926,7 @@ app.get("/api/file", (req, res) => {
     res.set("Cache-Control", "no-store");
     res.set("Last-Modified", stat.mtime.toUTCString());
     res.set("X-File-Mtime", String(stat.mtimeMs));
+    res.set("X-File-Revision", fileRevision(stat));
     if (IMAGE_MIMES[ext]) {
       res.type(IMAGE_MIMES[ext]).send(readFileSync(filePath));
       return;
@@ -933,19 +942,39 @@ app.get("/api/file", (req, res) => {
 // Write API — edits an *existing* file in place. Restricted to regular files that
 // already exist (so it can't be used to create arbitrary new files anywhere the
 // server user can write); token + host + origin are already enforced by requireAuth.
+//
+// Conditional write: when the body carries `baseRevision` (the revision the
+// editor's draft is based on), a mismatch with the file's CURRENT revision
+// means someone (usually an agent) wrote the file since — refuse with 409 and
+// hand back the current content so the client can offer Compare/Overwrite.
+// Callers that omit baseRevision keep the old unconditional semantics.
+// The write itself is temp+rename so a concurrent reader never sees a torn file.
 app.post("/api/file", (req, res) => {
   const filePath = resolveFilePath(req.body && req.body.path);
   if (!filePath) return res.status(400).json({ error: "path is required" });
   const content = req.body && req.body.content;
   if (typeof content !== "string") return res.status(400).json({ error: "content (string) is required" });
+  const baseRevision = req.body && req.body.baseRevision;
   let stat;
   try { stat = statSync(filePath); } catch { return res.status(404).json({ error: "file not found" }); }
   if (!stat.isFile()) return res.status(400).json({ error: "not a regular file" });
+  if (baseRevision !== undefined && fileRevision(stat) !== baseRevision) {
+    let currentContent = null;
+    try { currentContent = readFileSync(filePath, "utf-8"); } catch {}
+    return res.status(409).json({
+      error: "revision_conflict",
+      currentRevision: fileRevision(stat),
+      currentContent,
+    });
+  }
   try {
-    writeFileSync(filePath, content, "utf-8");
+    const tmp = `${filePath}.hadron-write-${process.pid}-${Date.now()}`;
+    writeFileSync(tmp, content, "utf-8");
+    renameSync(tmp, filePath);
     const newStat = statSync(filePath);
     res.set("X-File-Mtime", String(newStat.mtimeMs));
-    res.json({ ok: true, mtime: newStat.mtimeMs });
+    res.set("X-File-Revision", fileRevision(newStat));
+    res.json({ ok: true, mtime: newStat.mtimeMs, revision: fileRevision(newStat) });
   } catch (e) {
     res.status(500).json({ error: "write failed" });
   }

@@ -64,7 +64,7 @@ function renderMarkdownArtifact(container, text, filePath) {
   container.dataset.editablePath = filePath;
 
   const html = typeof marked !== 'undefined' ? marked.parse(text) : esc(text);
-  container.innerHTML = `<div class="md-toggle" onclick="toggleEditMode(this.parentElement)">Preview <span class="md-toggle-key">${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+Shift+V</span></div><div class="md-preview">${html}</div>`;
+  container.innerHTML = `<div class="md-toggle" onclick="toggleEditMode(this.parentElement)">Preview <span class="md-toggle-key">${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+Shift+E</span></div><div class="md-preview">${html}</div>`;
   rewriteRelativeImages(container.querySelector(".md-preview"), filePath);
   if (typeof annotationsOnPreviewRendered === "function") annotationsOnPreviewRendered(container, filePath);
 }
@@ -102,6 +102,115 @@ function setEditorPref(mode) {
   try { localStorage.setItem("hadron-editor", mode); } catch {}
 }
 
+// ── Editor draft store ──
+// The textarea's content is a DRAFT — user data, distinct from the file on
+// disk. Three states drive every behavior (design-notes/editor-ux-design.md):
+//   baseline = disk content + revision the draft started from
+//   draft    = current textarea content
+//   dirty    = draft !== baseline
+// Drafts live in a path-keyed Map (never tied to DOM lifecycle) and are
+// debounce-persisted to localStorage so tab switches, page reloads and browser
+// crashes all recover them (VS Code Hot Exit / github.dev model). beforeunload
+// is only a last-resort flush, not the protection mechanism.
+const editorDrafts = new Map(); // path -> {content, baseline, baselineRev}
+const DRAFT_LS_PREFIX = "hadron-draft:";
+const DRAFT_MAX_BYTES = 400000; // localStorage budget; bigger drafts stay memory-only
+const draftPersistTimers = new Map();
+
+function draftLsKey(path) { return DRAFT_LS_PREFIX + path; }
+
+function getDraft(path) {
+  if (editorDrafts.has(path)) return editorDrafts.get(path);
+  try {
+    const raw = localStorage.getItem(draftLsKey(path));
+    if (!raw) return null;
+    const d = JSON.parse(raw);
+    editorDrafts.set(path, d);
+    return d;
+  } catch { return null; }
+}
+
+function isDraftDirty(path) {
+  const d = getDraft(path);
+  return !!(d && d.content !== d.baseline);
+}
+
+function persistDraftNow(path) {
+  const d = editorDrafts.get(path);
+  try {
+    if (!d || d.content === d.baseline) { localStorage.removeItem(draftLsKey(path)); return true; }
+    const raw = JSON.stringify(d);
+    if (raw.length > DRAFT_MAX_BYTES) return false; // too big — memory-only
+    localStorage.setItem(draftLsKey(path), raw);
+    return true;
+  } catch { return false; }
+}
+
+function scheduleDraftPersist(path) {
+  clearTimeout(draftPersistTimers.get(path));
+  draftPersistTimers.set(path, setTimeout(() => persistDraftNow(path), 500));
+}
+
+function clearDraft(path) {
+  editorDrafts.delete(path);
+  clearTimeout(draftPersistTimers.get(path));
+  try { localStorage.removeItem(draftLsKey(path)); } catch {}
+  updateTabDirtyDots(path);
+}
+
+// Instant dirty dot on the artifact tab(s) showing this file — no re-render.
+function updateTabDirtyDots(path) {
+  const dirty = isDraftDirty(path);
+  document.querySelectorAll(".wh-tab-art").forEach((tab) => {
+    if (tab.dataset.artValue === path) tab.classList.toggle("wh-tab-hasdraft", dirty);
+  });
+}
+
+// Exposed for app.js's tab renderer (markdown.js loads first).
+function hasDirtyDraft(path) { return isDraftDirty(path); }
+
+// Last-resort flush: persist every in-memory draft synchronously. Only warn
+// the user when a dirty draft could NOT be persisted (too big / quota).
+window.addEventListener("beforeunload", (e) => {
+  let unsaved = false;
+  for (const [path, d] of editorDrafts) {
+    if (d.content !== d.baseline && !persistDraftNow(path)) unsaved = true;
+  }
+  if (unsaved) { e.preventDefault(); e.returnValue = ""; }
+});
+
+// ── Per-file caret/scroll memory (UI state, session-scoped — NOT user data) ──
+function saveEditPos(path, ta) {
+  try {
+    sessionStorage.setItem(`hadron-editpos:${path}`,
+      JSON.stringify({ s: ta.selectionStart, e: ta.selectionEnd, top: ta.scrollTop }));
+  } catch {}
+}
+function restoreEditPos(path, ta) {
+  let pos = null;
+  try { pos = JSON.parse(sessionStorage.getItem(`hadron-editpos:${path}`) || "null"); } catch {}
+  const len = ta.value.length;
+  // Default = document start (never the old cursor-at-end behavior); clamp a
+  // remembered position to the current content length.
+  const s = Math.min(pos ? pos.s : 0, len), e = Math.min(pos ? pos.e : 0, len);
+  try { ta.setSelectionRange(s, e); } catch {}
+  ta.scrollTop = pos ? pos.top : 0;
+}
+
+// Transient toast inside the editor (keybinding hints, restored-draft notice).
+function editorHint(container, text, ms = 2600) {
+  let el = container.querySelector(".editor-hint-toast");
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "editor-hint-toast";
+    container.appendChild(el);
+  }
+  el.textContent = text;
+  el.classList.add("show");
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.remove("show"), ms);
+}
+
 // Track active vim editor instances: container -> { term, fitAddon, ws, shellName, resizeObserver }
 let activeEditors = new Map();
 
@@ -118,14 +227,25 @@ function toggleEditMode(container) {
   } else {
     container.dataset.mdMode = "preview";
     closeVimEditor(container);
-    fetch(`/api/file?path=${encodeURIComponent(filePath)}`)
-      .then((r) => r.ok ? r.text() : Promise.reject())
-      .then((text) => {
-        container.dataset.mdRaw = text;
-        const html = typeof marked !== 'undefined' ? marked.parse(text) : esc(text);
-        container.innerHTML = `<div class="md-toggle" onclick="toggleEditMode(this.parentElement)">Preview <span class="md-toggle-key">${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+Shift+V</span></div><div class="md-preview">${html}</div>`;
-        rewriteRelativeImages(container.querySelector(".md-preview"), filePath);
-      });
+    // Preview is a VIEW of the draft, not a reload: with unsaved edits, render
+    // the draft (toggling never discards work). Clean → fetch fresh from disk.
+    const draft = getDraft(filePath);
+    const renderPreview = (text, draftNote) => {
+      container.dataset.mdRaw = text;
+      const key = navigator.platform.includes('Mac') ? '⌘' : 'Ctrl';
+      const note = draftNote ? `<span class="md-toggle-draftnote">unsaved changes</span>` : "";
+      const html = typeof marked !== 'undefined' ? marked.parse(text) : esc(text);
+      container.innerHTML = `<div class="md-toggle" onclick="toggleEditMode(this.parentElement)">Preview ${note}<span class="md-toggle-key">${key}+Shift+E</span></div><div class="md-preview">${html}</div>`;
+      rewriteRelativeImages(container.querySelector(".md-preview"), filePath);
+    };
+    if (draft && draft.content !== draft.baseline) {
+      renderPreview(draft.content, true);
+    } else {
+      fetch(`/api/file?path=${encodeURIComponent(filePath)}`)
+        .then((r) => r.ok ? r.text() : Promise.reject())
+        .then((text) => renderPreview(text, false))
+        .catch(() => {});
+    }
   }
 }
 
@@ -133,7 +253,7 @@ function openVimEditor(container, filePath, showToggle = true) {
   const shellName = `vim-${Date.now()}`;
 
   if (showToggle) {
-    container.innerHTML = `<div class="md-toggle" onclick="toggleEditMode(this.parentElement)">Editing <span class="md-toggle-key">${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+Shift+V</span></div>`;
+    container.innerHTML = `<div class="md-toggle" onclick="toggleEditMode(this.parentElement)">Editing <span class="md-toggle-key">${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+Shift+E</span></div>`;
   } else {
     container.innerHTML = "";
   }
@@ -222,21 +342,26 @@ function closeVimEditor(container) {
 }
 
 // ── Built-in plain-textarea editor ── (default Edit mode; vim is opt-in via View ▸ Editor).
-// Fetches the file fresh at open time, saves via POST /api/file (auth header added by the
-// app.js fetch patch), and syncs the artifact mtime bookkeeping after a save so the
-// auto-reload poller doesn't treat our own write as an external change and clobber the pane.
+// The textarea holds a DRAFT (see draft store above). Open restores any stored
+// draft over the fresh disk read; save is a CONDITIONAL write (baseRevision) —
+// a 409 means someone (usually an agent) wrote the file since the baseline and
+// opens the conflict dialog instead of silently overwriting them.
 function openTextEditor(container, filePath, showToggle = true) {
   const macKey = navigator.platform.includes('Mac') ? '⌘' : 'Ctrl';
+  const isMac = navigator.platform.includes('Mac');
 
   if (showToggle) {
-    container.innerHTML = `<div class="md-toggle" onclick="toggleEditMode(this.parentElement)">Editing <span class="md-toggle-key">${macKey}+Shift+V</span></div>`;
+    container.innerHTML = `<div class="md-toggle" onclick="toggleEditMode(this.parentElement)">Editing <span class="md-toggle-key">${macKey}+Shift+E</span></div>`;
   } else {
     container.innerHTML = "";
   }
 
   const bar = document.createElement("div");
   bar.className = "text-editor-bar" + (showToggle ? "" : " no-toggle");
-  bar.innerHTML = `<span class="text-editor-status"></span><div class="text-editor-save" title="Save file">Save <span class="md-toggle-key">${macKey}+S</span></div>`;
+  bar.innerHTML =
+    `<span class="text-editor-status"></span>` +
+    `<div class="text-editor-discard" title="Discard changes and reload from disk">Discard changes…</div>` +
+    `<div class="text-editor-save" title="Save file">Save <span class="md-toggle-key">${macKey}+S</span></div>`;
   container.appendChild(bar);
 
   const wrap = document.createElement("div");
@@ -252,73 +377,207 @@ function openTextEditor(container, filePath, showToggle = true) {
 
   const status = bar.querySelector(".text-editor-status");
   const saveBtn = bar.querySelector(".text-editor-save");
+  const discardBtn = bar.querySelector(".text-editor-discard");
   const saveBtnHtml = saveBtn.innerHTML;
 
-  // Always fetch fresh content at open time — the preview text may be stale.
+  // Save-button state machine: Saved / Unsaved / Saving… / Save failed / Conflict.
+  let savedTimer = null;
+  function setSaveState(state) {
+    saveBtn.classList.remove("saved", "unsaved", "conflict");
+    if (savedTimer) { clearTimeout(savedTimer); savedTimer = null; }
+    if (state === "saved") {
+      saveBtn.innerHTML = "Saved ✓"; saveBtn.classList.add("saved");
+      savedTimer = setTimeout(() => { saveBtn.innerHTML = saveBtnHtml; syncDirtyUi(); }, 1500);
+    } else if (state === "saving") saveBtn.innerHTML = "Saving…";
+    else if (state === "conflict") { saveBtn.innerHTML = "Conflict"; saveBtn.classList.add("conflict"); }
+    else { saveBtn.innerHTML = saveBtnHtml; if (state === "unsaved") saveBtn.classList.add("unsaved"); }
+  }
+
+  function draft() { return editorDrafts.get(filePath); }
+
+  function syncDirtyUi() {
+    const dirty = isDraftDirty(filePath);
+    ta.dataset.dirty = dirty ? "1" : "0";
+    discardBtn.style.display = dirty ? "" : "none";
+    if (!saveBtn.classList.contains("saved") && !saveBtn.classList.contains("conflict")) {
+      setSaveState(dirty ? "unsaved" : "idle");
+    }
+    updateTabDirtyDots(filePath);
+  }
+
+  function onEdited() {
+    const d = draft();
+    if (!d) return;
+    d.content = ta.value;
+    scheduleDraftPersist(filePath);
+    syncDirtyUi();
+  }
+
+  // Fresh disk read establishes the baseline; a stored dirty draft (from a tab
+  // switch, reload or crash) is then restored ON TOP, never silently replaced.
   fetch(`/api/file?path=${encodeURIComponent(filePath)}`)
-    .then((r) => r.ok ? r.text() : Promise.reject(new Error("could not load file")))
-    .then((text) => {
-      ta.value = text;
+    .then((r) => r.ok
+      ? r.text().then((text) => ({ text, rev: r.headers.get("X-File-Revision") }))
+      : Promise.reject(new Error("could not load file")))
+    .then(({ text, rev }) => {
+      const stored = getDraft(filePath);
+      if (stored && stored.content !== stored.baseline) {
+        // Rebase note: if the disk moved while the draft slept, keep the draft
+        // (save will 409 and offer Compare) but tell the user.
+        editorDrafts.set(filePath, { content: stored.content, baseline: text, baselineRev: rev });
+        ta.value = stored.content;
+        editorHint(container, stored.baseline === text
+          ? "Restored unsaved draft"
+          : "Restored unsaved draft — file changed on disk since (Save will offer Compare)", 4000);
+      } else {
+        editorDrafts.set(filePath, { content: text, baseline: text, baselineRev: rev });
+        ta.value = text;
+      }
       ta.disabled = false;
-      ta.dataset.dirty = "0";
+      restoreEditPos(filePath, ta);
       ta.focus();
+      restoreEditPos(filePath, ta); // focus() can scroll-to-caret; re-apply
+      syncDirtyUi();
     })
     .catch(() => { status.textContent = "Could not load file"; });
 
-  ta.addEventListener("input", () => { ta.dataset.dirty = "1"; });
+  ta.addEventListener("input", onEdited);
+  const posSave = () => { if (!ta.disabled) saveEditPos(filePath, ta); };
+  ta.addEventListener("blur", posSave);
+  ta.addEventListener("scroll", posSave, { passive: true });
+  ta.addEventListener("keyup", posSave);
+  ta.addEventListener("mouseup", posSave);
 
   ta.addEventListener("keydown", (e) => {
     if (e.key === "Tab") {
       // Tab inserts two spaces instead of moving focus
       e.preventDefault();
       ta.setRangeText("  ", ta.selectionStart, ta.selectionEnd, "end");
-      ta.dataset.dirty = "1";
-    } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+      onEdited();
+    } else if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === "s") {
       e.preventDefault();
       saveTextEditor();
+    } else if (isMac && e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === "v") {
+      // macOS Emacs binding (Ctrl+V = page down) reads as a broken paste to
+      // most users — neutralize it and point at ⌘V (VS Code-style habits).
+      e.preventDefault();
+      editorHint(container, "Paste is ⌘V (Ctrl+V is a macOS page-down key)");
+    } else if (isMac && e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === "k") {
+      // macOS Emacs kill-line silently deletes to end of line — too destructive
+      // to leave as a surprise.
+      e.preventDefault();
+      editorHint(container, "Ctrl+K (macOS delete-to-end-of-line) is disabled here");
     }
   });
 
-  let savedTimer = null;
-  function saveTextEditor() {
-    if (ta.disabled) return;
-    const content = ta.value;
+  discardBtn.addEventListener("click", () => {
+    const fname = filePath.split("/").pop();
+    if (!confirm(`Discard changes to ${fname}?\n\nYour unsaved edits will be removed.`)) return;
+    clearDraft(filePath);
+    openTextEditor(container, filePath, showToggle); // reload fresh from disk
+  });
+
+  function applySavedResponse(r, content) {
+    if (container.dataset.mdRaw !== undefined) container.dataset.mdRaw = content;
+    // Pre-set the cache entry's mtime (the poller's baseline) to our own
+    // write's mtime so it isn't treated as an external change.
+    const newMtime = r.headers.get("X-File-Mtime");
+    if (newMtime) {
+      try {
+        const key = container.dataset.cacheKey;
+        const entry = key && typeof artifactCache !== "undefined" ? artifactCache.get(key) : null;
+        if (entry) entry.mtime = newMtime;
+      } catch {}
+    }
+    const newRev = r.headers.get("X-File-Revision");
+    editorDrafts.set(filePath, { content, baseline: content, baselineRev: newRev });
+    persistDraftNow(filePath); // clean → removes the stored draft
+    setSaveState("saved");
+    syncDirtyUi();
+    setSaveState("saved"); // syncDirtyUi resets idle; keep the ✓ visible
+  }
+
+  function doConditionalSave(content, baseRevision) {
+    setSaveState("saving");
     status.textContent = "";
-    fetch(`/api/file`, {
+    return fetch(`/api/file`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: filePath, content }),
-    })
-      .then((r) => r.ok ? r : r.json().catch(() => ({})).then((j) => Promise.reject(new Error(j.error || `save failed (${r.status})`))))
-      .then((r) => {
-        ta.dataset.dirty = "0";
-        if (container.dataset.mdRaw !== undefined) container.dataset.mdRaw = content;
-        // Pre-set the cache entry's mtime (the poller's baseline) to our own
-        // write's mtime so it isn't treated as an external change (same trick
-        // as the CSV editor's save).
-        const newMtime = r.headers.get("X-File-Mtime");
-        if (newMtime) {
-          try {
-            const key = container.dataset.cacheKey;
-            const entry = key && typeof artifactCache !== "undefined" ? artifactCache.get(key) : null;
-            if (entry) entry.mtime = newMtime;
-          } catch {}
-        }
-        saveBtn.innerHTML = "Saved ✓";
-        saveBtn.classList.add("saved");
-        if (savedTimer) clearTimeout(savedTimer);
-        savedTimer = setTimeout(() => {
-          saveBtn.innerHTML = saveBtnHtml;
-          saveBtn.classList.remove("saved");
-        }, 1500);
-      })
-      .catch((e) => {
-        // Keep the textarea content — the user's edits are not lost.
-        status.textContent = e && e.message ? e.message : "Save failed";
-      });
+      body: JSON.stringify({ path: filePath, content, baseRevision }),
+    }).then((r) => {
+      if (r.ok) { applySavedResponse(r, content); return; }
+      if (r.status === 409) {
+        return r.json().then((j) => {
+          setSaveState("conflict");
+          showSaveConflictDialog({
+            filePath, container,
+            draftContent: content,
+            diskContent: j.currentContent,
+            onOverwrite: () => doConditionalSave(content, j.currentRevision),
+            onDismiss: () => syncDirtyUi(),
+          });
+        });
+      }
+      return r.json().catch(() => ({})).then((j) => Promise.reject(new Error(j.error || `save failed (${r.status})`)));
+    }).catch((e) => {
+      // Keep the draft — the user's edits are never lost by a failed save.
+      setSaveState("idle"); syncDirtyUi();
+      status.textContent = e && e.message ? e.message : "Save failed";
+    });
+  }
+
+  function saveTextEditor() {
+    if (ta.disabled) return;
+    const d = draft();
+    doConditionalSave(ta.value, d ? d.baselineRev : undefined);
   }
 
   saveBtn.addEventListener("click", saveTextEditor);
+  syncDirtyUi();
+}
+
+// ── Save-conflict dialog ── the file changed on disk after the draft's
+// baseline. Cancel (default, safe) / Compare (read-only two-pane) /
+// Overwrite… (second confirm, conditional on the revision just seen — if the
+// file changes AGAIN mid-dialog the save re-conflicts instead of punching
+// through). Every path keeps the draft.
+function showSaveConflictDialog({ filePath, container, draftContent, diskContent, onOverwrite, onDismiss }) {
+  document.querySelector(".editor-conflict-overlay")?.remove();
+  const fname = filePath.split("/").pop();
+  const ov = document.createElement("div");
+  ov.className = "editor-conflict-overlay";
+  ov.innerHTML = `
+    <div class="editor-conflict-box">
+      <div class="ec-title">Save blocked: <b>${esc(fname)}</b> changed on disk after you started editing.</div>
+      <div class="ec-compare" style="display:none">
+        <div class="ec-col"><div class="ec-col-hd">Your draft</div><pre></pre></div>
+        <div class="ec-col"><div class="ec-col-hd">Current file on disk</div><pre></pre></div>
+      </div>
+      <div class="ec-actions">
+        <button class="ec-btn ec-compare-btn">Compare</button>
+        <button class="ec-btn ec-overwrite-btn">Overwrite…</button>
+        <button class="ec-btn ec-cancel-btn">Cancel</button>
+      </div>
+      <div class="ec-note">Cancel keeps your draft untouched. Overwrite replaces the on-disk version.</div>
+    </div>`;
+  const pres = ov.querySelectorAll(".ec-compare pre");
+  pres[0].textContent = draftContent;
+  pres[1].textContent = diskContent == null ? "(file is gone)" : diskContent;
+  const close = () => { ov.remove(); if (onDismiss) onDismiss(); };
+  ov.querySelector(".ec-cancel-btn").addEventListener("click", close);
+  ov.querySelector(".ec-compare-btn").addEventListener("click", () => {
+    const cmp = ov.querySelector(".ec-compare");
+    cmp.style.display = cmp.style.display === "none" ? "" : "none";
+  });
+  ov.querySelector(".ec-overwrite-btn").addEventListener("click", () => {
+    if (!confirm(`Overwrite ${fname} on disk with your draft?\n\nThe other version will be replaced.`)) return;
+    ov.remove();
+    onOverwrite();
+  });
+  // Esc closes the DIALOG only (never discards the draft).
+  ov.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); close(); } });
+  document.body.appendChild(ov);
+  ov.querySelector(".ec-cancel-btn").focus();
 }
 
 // ── Paste-to-upload ── an image on the clipboard (OS screenshot) pasted into the
