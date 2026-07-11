@@ -771,7 +771,7 @@ function renderArtifactView(container, artifact, onMeta) {
         return r.text().then(text => ({ text, mtime }));
       })
       .then(({ text, mtime }) => {
-        const isIframe = isMarimoNotebook(text, artifact.label || artifact.value) || isJupyterNotebook(artifact.value);
+        const isIframe = isMarimoNotebook(text, artifact.label || artifact.value);
         if (isMarimoNotebook(text, artifact.label || artifact.value)) {
           if (noteMarimoNotebook(artifact.value)) renderWorkHeader();
           renderMarimoNotebook(container, text, artifact.value);
@@ -781,11 +781,15 @@ function renderArtifactView(container, artifact, onMeta) {
           const captured = text;
           addArtifactActionButtons(container, () => captured, artifact.value.split("/").pop());
         } else if (isJupyterNotebook(artifact.value)) {
-          // Static fallback (no live server): re-report as non-iframe and start
-          // mtime polling so disk writes auto-reload it (that reload is what
-          // surfaces the changed-cell badges).
+          // Static renders now, so it joins mtime polling immediately (disk
+          // writes auto-reload it — that reload surfaces the changed-cell
+          // badges); if the live server comes up, the swap re-reports the pane
+          // as iframe, and re-running the poller drops it from the watch list.
           renderJupyterNotebook(container, text, artifact.value, () => {
             if (onMeta) onMeta(mtime, false);
+            startArtifactMtimePolling();
+          }, () => {
+            if (onMeta) onMeta(mtime, true);
             startArtifactMtimePolling();
           });
         } else if (isMarkdownFile(artifact.value)) {
@@ -965,16 +969,27 @@ async function startJupyterServer(filePath) {
   return await res.json();
 }
 
-// onStatic (optional) fires when we fall back to the static renderer — the
-// caller flips its cache entry to non-iframe so mtime polling auto-reloads it.
-function renderJupyterNotebook(container, text, filePath, onStatic) {
+// Static-first: the on-disk notebook renders immediately (there's always
+// something to read), while the live server launches in the background and
+// swaps in when ready. onStatic fires right away so the caller reports the
+// pane as non-iframe and starts mtime polling; onLive fires on the swap so it
+// can flip the cache entry back to iframe (and drop it from polling).
+function renderJupyterNotebook(container, text, filePath, onStatic, onLive) {
   const fileName = filePath.substring(filePath.lastIndexOf("/") + 1);
-  container.innerHTML = `<div class="jupyter-notebook"><div class="jupyter-header"><span class="jupyter-logo">Jupyter</span><span class="jupyter-kernel">Launching server...</span></div></div>`;
+  renderJupyterNotebookStatic(container, text, filePath);
+  if (onStatic) onStatic();
+  const header = container.querySelector(".jupyter-header");
+  let status = null;
+  if (header) {
+    status = document.createElement("span");
+    status.className = "jupyter-launching";
+    status.textContent = "launching live server…";
+    header.appendChild(status);
+  }
 
   startJupyterServer(filePath).then(({ proxyBase }) => {
     if (!proxyBase) {
-      renderJupyterNotebookStatic(container, text, filePath);
-      if (onStatic) onStatic();
+      if (status) status.remove();
       return;
     }
     const src = `${proxyBase}/notebooks/${encodeURIComponent(fileName)}`;
@@ -984,9 +999,9 @@ function renderJupyterNotebook(container, text, filePath, onStatic) {
     try { banner = nbErrorBannerHTML(analyzeNotebookCells(JSON.parse(text).cells || [], filePath).errors); } catch {}
     const iframe = `<iframe class="jupyter-live" src="${src}" style="width:100%;${banner ? "flex:1;" : "height:100%;"}border:none;background:#111" allow="clipboard-read; clipboard-write"></iframe>`;
     container.innerHTML = banner ? `<div class="jupyter-live-wrap">${banner}${iframe}</div>` : iframe;
+    if (onLive) onLive();
   }).catch(() => {
-    renderJupyterNotebookStatic(container, text, filePath);
-    if (onStatic) onStatic();
+    if (status) status.remove();
   });
 }
 

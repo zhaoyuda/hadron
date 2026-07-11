@@ -1240,8 +1240,16 @@ app.post("/api/jupyter/start", (req, res) => {
         res.json({ port, proxyBase: `/jupyter-proxy/${port}`, fileName });
       });
       checkReq.on("error", () => {
-        if (attempts < 20) setTimeout(checkReady, 500);
-        else res.json({ port, proxyBase: `/jupyter-proxy/${port}`, fileName });
+        if (attempts < 20) return setTimeout(checkReady, 500);
+        // Never came up: kill it and say so — handing the client a proxyBase
+        // to a dead server would iframe a blank pane over the static preview.
+        const entry = jupyterProcesses.get(filePath);
+        if (entry) {
+          try { process.kill(-entry.process.pid); } catch {}
+          try { entry.process.kill(); } catch {}
+          jupyterProcesses.delete(filePath);
+        }
+        res.json({ error: "jupyter did not become ready" });
       });
       checkReq.setTimeout(1000, () => { checkReq.destroy(); });
     };

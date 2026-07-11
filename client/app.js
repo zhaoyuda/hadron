@@ -1197,7 +1197,7 @@ function buildArtifactsSection(activeSession) {
     html += `<div class="af-group-body">`;
     items.forEach(({ art, idx, filename }) => {
       const icon = fileIcon(filename, 15);
-      html += `<div class="af" data-art-idx="${idx}"><span class="af-i">${icon}</span><span class="af-label">${esc(filename)}</span><span class="af-rm" data-art-rm="${idx}" title="Remove">×</span></div>`;
+      html += `<div class="af" data-art-idx="${idx}"><span class="af-i">${icon}</span><span class="af-label">${esc(art.label || filename)}</span><span class="af-rm" data-art-rm="${idx}" title="Remove">×</span></div>`;
     });
     html += `</div></div>`;
   });

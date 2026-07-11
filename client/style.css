@@ -1080,6 +1080,16 @@ html, body {
   font-size: 10px;
   color: var(--text3);
 }
+.jupyter-launching {
+  font-size: 10px;
+  color: var(--text3);
+  font-style: italic;
+  animation: jupyter-launch-pulse 1.6s ease-in-out infinite;
+}
+@keyframes jupyter-launch-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
 
 /* Data-aware preview: error banner + cell markers (data-preview.js) */
 .jupyter-error-banner {
