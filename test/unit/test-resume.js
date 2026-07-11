@@ -88,5 +88,24 @@ console.log("\n[RuntimeTracker — transitions and tombstone]");
   ok(session.runtime.cleanExitAt === null && session.runtime.desiredRuntime === "claude", "re-entering claude clears the tombstone");
 }
 
+console.log("\n[RuntimeTracker — shared-cwd scrape guard]");
+{
+  // Two agents in one cwd: transcripts validate identically for both sharers,
+  // so the tracker must refuse to scrape rather than adopt a sibling's session.
+  const root = mkdtempSync(join(tmpdir(), "resume-shared-"));
+  const cwd = "/shared/cwd";
+  const dir = join(root, claudeProjectDir(cwd));
+  mkdirSync(dir, { recursive: true });
+  const sib = "22222222-3333-4444-8555-666666666666";
+  writeFileSync(join(dir, `${sib}.jsonl`), JSON.stringify({ sessionId: sib, cwd }) + "\n");
+  const session = { id: "a", cwd };
+  const tr = new RuntimeTracker(session, { save: () => {}, cwdShared: () => true });
+  tr.observe("claude"); tr.observe("claude"); tr.observe("claude");
+  ok(!session.runtime.sessionId, "shared cwd → no session id is ever scraped (sibling transcript ignored)");
+  const trX = new RuntimeTracker({ id: "b", cwd }, { save: () => {} });
+  ok(typeof trX.cwdShared === "function" && trX.cwdShared() === false, "cwdShared defaults to exclusive when not provided");
+  rmSync(root, { recursive: true, force: true });
+}
+
 console.log(`\n${failed === 0 ? "PASS" : "FAIL"}: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

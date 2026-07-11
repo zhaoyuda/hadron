@@ -118,9 +118,14 @@ const CLAUDE_CMDS = new Set(["claude"]);
 const SETTLE_POLLS = 3; // claude must be foreground this long before we track it
 
 export class RuntimeTracker {
-  constructor(session, { save }) {
+  constructor(session, { save, cwdShared }) {
     this.session = session;
     this.save = save; // (session, urgent) => void — urgent flushes immediately
+    // cwdShared(): does any OTHER agent share this agent's cwd right now?
+    // Shared-cwd transcripts validate identically for every sharer (the head
+    // only proves the cwd, not which agent owns the session), so scraping
+    // there can adopt a sibling's session — refuse rather than guess.
+    this.cwdShared = cwdShared || (() => false);
     this.claudePolls = 0;
     this.lastScrapeAt = 0;
   }
@@ -150,7 +155,7 @@ export class RuntimeTracker {
         // Session id: cheap to skip, expensive to find — only when missing or
         // stale (revalidate every 5 min; ids change when sessions fork).
         const now = Date.now();
-        if (!rt.sessionId || now - this.lastScrapeAt > 5 * 60 * 1000) {
+        if ((!rt.sessionId || now - this.lastScrapeAt > 5 * 60 * 1000) && !this.cwdShared()) {
           this.lastScrapeAt = now;
           const hit = scrapeSessionId(this.session.cwd || process.cwd());
           // Never demote an authoritative id with a scrape guess.

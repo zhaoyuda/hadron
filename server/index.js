@@ -1324,7 +1324,16 @@ function startMonitor(sessionId) {
   const detector = new StateDetector(tmuxSessionName(sessionId), session);
   monitors.set(sessionId, detector);
 
-  const tracker = new RuntimeTracker(session, { save: saveRuntimeCheckpoint });
+  const tracker = new RuntimeTracker(session, {
+    save: saveRuntimeCheckpoint,
+    // Shared-cwd agents can't be told apart by transcript scraping (the jsonl
+    // head proves the cwd, not the owner) — the tracker refuses to scrape there.
+    cwdShared: () => {
+      const me = sessions.get(sessionId);
+      if (!me || !me.cwd) return true; // unknown cwd → be conservative
+      return [...sessions.values()].some((s) => s.id !== sessionId && s.cwd === me.cwd);
+    },
+  });
   runtimeTrackers.set(sessionId, tracker);
   detector.onCmd = (cmd) => tracker.observe(cmd);
 
