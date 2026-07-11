@@ -33,21 +33,35 @@ export const BOOT_GENERATION = `boot-${Date.now().toString(36)}-${randomUUID().s
 
 // ── capability probe ─────────────────────────────────────────────────────
 // Codex review: probe and persist, never silently fall back to guessing.
+// Under systemd the service PATH is minimal and `claude` lives in the user's
+// login PATH (~/.local/bin) — the agents' interactive shells find it, so the
+// probe must look where THEY look: try the bare name first, then the same
+// user-level install locations a login shell would.
+const CLAUDE_CANDIDATES = [
+  "claude",
+  join(homedir(), ".local", "bin", "claude"),
+  join(homedir(), ".npm-global", "bin", "claude"),
+  "/usr/local/bin/claude",
+];
 let capsPromise = null;
 export function probeClaudeCaps() {
   if (capsPromise) return capsPromise;
-  capsPromise = new Promise((res) => {
-    execFile("claude", ["--help"], { timeout: 15000 }, (err, stdout) => {
-      const help = String(stdout || "");
-      const caps = {
-        probed: !err,
-        resume: help.includes("--resume"),
-        sessionId: help.includes("--session-id"),
-      };
-      console.log(`[resume] claude caps: probed=${caps.probed} resume=${caps.resume} session-id=${caps.sessionId}`);
-      res(caps);
-    });
-  });
+  capsPromise = (async () => {
+    for (const bin of CLAUDE_CANDIDATES) {
+      const caps = await new Promise((res) => {
+        execFile(bin, ["--help"], { timeout: 15000 }, (err, stdout) => {
+          const help = String(stdout || "");
+          res(err ? null : { probed: true, resume: help.includes("--resume"), sessionId: help.includes("--session-id") });
+        });
+      });
+      if (caps) {
+        console.log(`[resume] claude caps via ${bin}: resume=${caps.resume} session-id=${caps.sessionId}`);
+        return caps;
+      }
+    }
+    console.log("[resume] claude caps: probe failed (claude not found) — spawn-id injection disabled");
+    return { probed: false, resume: false, sessionId: false };
+  })();
   return capsPromise;
 }
 
