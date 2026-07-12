@@ -41,6 +41,10 @@ try {
     method: "POST", headers: authHeaders(env.token),
     body: JSON.stringify({ name: "drafter", launchCommand: "shell", artifacts: [{ type: "file", value: "plan.md" }, { type: "file", value: "data.csv" }] }),
   });
+  await fetch(`${env.baseUrl}/api/sessions`, {
+    method: "POST", headers: authHeaders(env.token),
+    body: JSON.stringify({ name: "bystander", launchCommand: "shell" }),
+  });
 
   browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 1400, height: 850 } });
@@ -85,16 +89,37 @@ try {
     "toggling back to Edit keeps the draft");
   r.ok((await page.locator(".wh-tab-hasdraft").count()) >= 1, "artifact tab shows the dirty draft dot");
 
-  // ── 3. draft survives a full page reload ──
+  // ── 2b. mid-edit agent switch: come back to Edit mode, draft intact ──
+  // (the reported real-world flow: edit halfway → look at another agent →
+  // switch back; must NOT land on a preview of the disk version)
+  await page.locator('.dk[data-sid="bystander"]').click();
+  await page.locator('.dk[data-sid="drafter"]').waitFor({ timeout: 5000 });
+  await page.locator('.dk[data-sid="drafter"]').click();
+  await page.locator('.af[data-art-idx]', { hasText: "plan.md" }).click();
+  await taReady(page);
+  r.ok((await page.locator(".text-edit-area").inputValue()).includes("DRAFT-ONLY LINE"),
+    "switch agent and back → still in Edit mode with the draft");
+  // Harder variant: the file changes on disk while we're away (evicts the
+  // cached pane → full re-render must still restore Edit + draft).
+  await page.locator('.dk[data-sid="bystander"]').click();
+  writeFileSync(mdPath, original + "\nAGENT-TOUCHED-WHILE-AWAY\n");
+  await wait(150);
+  await page.locator('.dk[data-sid="drafter"]').click();
+  await page.locator('.af[data-art-idx]', { hasText: "plan.md" }).click();
+  await taReady(page);
+  r.ok((await page.locator(".text-edit-area").inputValue()).includes("DRAFT-ONLY LINE"),
+    "even after the file changed on disk while away, Edit mode + draft come back");
+  writeFileSync(mdPath, original); // restore for the rest of the module
+  await wait(150);
+
+  // ── 3. draft survives a full page reload (opens straight back into Edit) ──
   await wait(700); // ride out the 500ms persist debounce (beforeunload also flushes)
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.locator('.dk[data-sid="drafter"]').click();
   await page.locator('.af[data-art-idx]', { hasText: "plan.md" }).click();
-  await page.locator(".md-toggle").waitFor({ state: "visible", timeout: 10000 });
-  await page.locator(".md-toggle").click();
-  await taReady(page);
+  await taReady(page); // dirty draft + last mode "edit" → editor restores directly
   r.ok((await page.locator(".text-edit-area").inputValue()).includes("DRAFT-ONLY LINE"),
-    "draft restored after a page reload");
+    "draft restored after a page reload, straight into Edit mode");
 
   // ── 4. agent writes the file mid-edit → Save must 409, never overwrite ──
   writeFileSync(mdPath, original + "\nTHE AGENTS WORK\n");
@@ -192,9 +217,7 @@ try {
   writeFileSync(mdPath, original + "\nAGENT-WROTE-WHILE-DRAFT-SLEPT\n"); // disk moves while draft sleeps
   await page.locator('.dk[data-sid="drafter"]').click();
   await page.locator('.af[data-art-idx]', { hasText: "plan.md" }).click();
-  await page.locator(".md-toggle").waitFor({ state: "visible", timeout: 10000 });
-  await page.locator(".md-toggle").click();
-  await taReady(page);
+  await taReady(page); // dirty draft + last mode "edit" → editor restores directly
   r.ok((await page.locator(".text-editor-status").innerText()).includes("changed on disk"),
     "restore surfaces a persistent 'file changed on disk' warning");
   await page.locator(".text-edit-area").press("Control+s");

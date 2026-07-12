@@ -58,13 +58,30 @@ function rewriteRelativeImages(previewEl, filePath) {
 
 function renderMarkdownArtifact(container, text, filePath) {
   container.style.position = "relative";
-  container.dataset.mdRaw = text;
-  container.dataset.mdMode = "preview";
   container.dataset.mdPath = filePath;
   container.dataset.editablePath = filePath;
 
-  const html = typeof marked !== 'undefined' ? marked.parse(text) : esc(text);
-  container.innerHTML = `<div class="md-toggle" onclick="toggleEditMode(this.parentElement)">Preview <span class="md-toggle-key">${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+Shift+E</span></div><div class="md-preview">${html}</div>`;
+  // A re-render (agent switch, mtime-triggered rebuild) must not present the
+  // DISK version as if the user's work vanished. With a dirty draft: return
+  // straight to Edit if that's where they were (draft + caret restore), else
+  // preview the DRAFT with the unsaved-changes note.
+  const draft = getDraft(filePath);
+  const dirty = !!(draft && draft.content !== draft.baseline);
+  let lastMode = null;
+  try { lastMode = sessionStorage.getItem(`hadron-mdmode:${filePath}`); } catch {}
+  if (dirty && lastMode === "edit") {
+    container.dataset.mdMode = "edit";
+    container.dataset.mdRaw = text;
+    openTextEditor(container, filePath); // vim pref: dirty drafts route here anyway
+    return;
+  }
+
+  const content = dirty ? draft.content : text;
+  container.dataset.mdRaw = content;
+  container.dataset.mdMode = "preview";
+  const note = dirty ? `<span class="md-toggle-draftnote">unsaved changes</span>` : "";
+  const html = typeof marked !== 'undefined' ? marked.parse(content) : esc(content);
+  container.innerHTML = `<div class="md-toggle" onclick="toggleEditMode(this.parentElement)">Preview ${note}<span class="md-toggle-key">${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+Shift+E</span></div><div class="md-preview">${html}</div>`;
   rewriteRelativeImages(container.querySelector(".md-preview"), filePath);
   if (typeof annotationsOnPreviewRendered === "function") annotationsOnPreviewRendered(container, filePath);
 }
@@ -220,8 +237,10 @@ function toggleEditMode(container) {
   if (!filePath) return;
 
   const mode = container.dataset.mdMode || "preview";
+  const rememberMode = (m) => { try { sessionStorage.setItem(`hadron-mdmode:${filePath}`, m); } catch {} };
   if (mode === "preview") {
     container.dataset.mdMode = "edit";
+    rememberMode("edit");
     // vim edits the DISK version directly — with an unsaved textarea draft
     // pending, that forks two divergent edit states (codex QA P1). Route to
     // the text editor until the draft is saved or discarded.
@@ -232,6 +251,7 @@ function toggleEditMode(container) {
     else openTextEditor(container, filePath);
   } else {
     container.dataset.mdMode = "preview";
+    rememberMode("preview");
     closeVimEditor(container);
     // Preview is a VIEW of the draft, not a reload: with unsaved edits, render
     // the draft (toggling never discards work). Clean → fetch fresh from disk.
