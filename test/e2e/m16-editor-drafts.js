@@ -58,6 +58,14 @@ try {
   });
   r.ok(pos.top === 0 && pos.sel === 0, `first Edit opens at the top (scrollTop=${pos.top}, caret=${pos.sel})`);
 
+  // Word wrap: VS Code language defaults — markdown wraps, Alt+Z toggles.
+  const wrapOn = await page.evaluate(() => getComputedStyle(document.querySelector(".text-edit-area")).whiteSpace);
+  r.ok(wrapOn === "pre-wrap", `markdown editor wraps by default (white-space=${wrapOn})`);
+  await page.locator(".text-edit-area").press("Alt+z");
+  const wrapOff = await page.evaluate(() => getComputedStyle(document.querySelector(".text-edit-area")).whiteSpace);
+  r.ok(wrapOff === "pre", "Alt+Z turns wrap off");
+  await page.locator(".text-edit-area").press("Alt+z"); // back on for the rest
+
   // ── 2. dirty draft survives Preview⇄Edit (preview renders the DRAFT) ──
   await page.locator(".text-edit-area").focus();
   await page.evaluate(() => {

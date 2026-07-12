@@ -1569,7 +1569,7 @@ html, body {
   font-size: 13px;
   font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
   line-height: 1.5;
-  white-space: pre;
+  white-space: pre-wrap; /* wrap by default (markdown/prose); .nowrap for code */
   tab-size: 4;
 }
 .csv-edit-bar {
@@ -1692,6 +1692,18 @@ html, body {
   white-space: nowrap;
 }
 .text-editor-discard:hover { color: var(--red); border-color: var(--red); }
+.text-edit-area.nowrap { white-space: pre; overflow-x: auto; }
+.text-editor-wrapbtn {
+  padding: 2px 8px;
+  font-size: 10px;
+  color: var(--text3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+.text-editor-wrapbtn:hover { color: var(--text); border-color: var(--text3); }
+.text-editor-wrapbtn.on { color: var(--blue, #58a6ff); border-color: var(--blue, #58a6ff); }
 
 /* draft dot on artifact tabs (unsaved editor draft for that file) */
 .wh-tab-hasdraft .wh-tab-label::after {
@@ -1797,7 +1809,7 @@ html, body {
   font-size: 13px;
   font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
   line-height: 1.5;
-  white-space: pre;
+  white-space: pre-wrap; /* wrap by default (markdown/prose); .nowrap for code */
   tab-size: 4;
 }
 

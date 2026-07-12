@@ -367,6 +367,7 @@ function openTextEditor(container, filePath, showToggle = true) {
   bar.innerHTML =
     `<span class="text-editor-status"></span>` +
     `<div class="text-editor-discard" title="Discard changes and reload from disk">Discard changes…</div>` +
+    `<div class="text-editor-wrapbtn" title="Toggle word wrap (Alt+Z)">Wrap</div>` +
     `<div class="text-editor-save" title="Save file">Save <span class="md-toggle-key">${macKey}+S</span></div>`;
   container.appendChild(bar);
 
@@ -384,7 +385,30 @@ function openTextEditor(container, filePath, showToggle = true) {
   const status = bar.querySelector(".text-editor-status");
   const saveBtn = bar.querySelector(".text-editor-save");
   const discardBtn = bar.querySelector(".text-editor-discard");
+  const wrapBtn = bar.querySelector(".text-editor-wrapbtn");
   const saveBtnHtml = saveBtn.innerHTML;
+
+  // Word wrap — VS Code convention: off for code, ON for markdown/plain text
+  // (its language default), Alt+Z to toggle, remembered per extension.
+  const fileExt = (filePath.split(".").pop() || "").toLowerCase();
+  const wrapDefault = isMarkdownFile(filePath) || fileExt === "txt" ? "on" : "off";
+  function wrapPref() {
+    try { return localStorage.getItem(`hadron-wrap:${fileExt}`) || wrapDefault; }
+    catch { return wrapDefault; }
+  }
+  function applyWrap(w) {
+    ta.setAttribute("wrap", w === "on" ? "soft" : "off");
+    ta.classList.toggle("nowrap", w !== "on");
+    wrapBtn.classList.toggle("on", w === "on");
+  }
+  function toggleWrap() {
+    const w = wrapPref() === "on" ? "off" : "on";
+    try { localStorage.setItem(`hadron-wrap:${fileExt}`, w); } catch {}
+    applyWrap(w);
+  }
+  wrapBtn.addEventListener("mousedown", (e) => e.preventDefault());
+  wrapBtn.addEventListener("click", toggleWrap);
+  applyWrap(wrapPref());
 
   // Save-button state machine: Saved / Unsaved / Saving… / Save failed / Conflict.
   let savedTimer = null;
@@ -487,6 +511,9 @@ function openTextEditor(container, filePath, showToggle = true) {
     } else if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === "s") {
       e.preventDefault();
       saveTextEditor();
+    } else if (e.altKey && !e.ctrlKey && !e.metaKey && e.code === "KeyZ") {
+      e.preventDefault();
+      toggleWrap();
     } else if (isMac && e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === "v") {
       // macOS Emacs binding (Ctrl+V = page down) reads as a broken paste to
       // most users — neutralize it and point at ⌘V (VS Code-style habits).
