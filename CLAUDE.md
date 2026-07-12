@@ -150,3 +150,23 @@ what changed, and run `npm test` + `npm run test:e2e`.
 1. Read `ROADMAP.md` for the current roadmap
 2. Implement and test (run the server, open in browser)
 3. Update `ROADMAP.md` if completing roadmap items
+
+## Deploying to prod (standard flow)
+
+Risky changes (server-side, state detection, editor/save paths) go through
+staging first:
+
+1. Branch in the staging worktree (`/home/ubuntu/hadron-staging`, own systemd
+   unit `hadron-staging` on :3001, workspace `/home/ubuntu/staging-ws` with
+   canary agents) — `sudo systemctl restart hadron-staging` to pick up server
+   changes.
+2. `npm test` + `npm run test:e2e` in the worktree. (Known env issue: M10's
+   clipboard-write assert currently fails in headless chromium on this box —
+   it fails identically on main, so it doesn't gate a branch.)
+3. `scripts/predeploy-check.sh` — live-fire proof on staging that a service
+   restart does NOT interrupt running agents (claude PIDs survive, a
+   mid-response canary keeps working, no auto-resume fires), plus prod-unit
+   config sanity (KillMode=process, boot-enabled). Do not restart prod if it
+   fails.
+4. Check no prod agent is `working`, then: merge → main, `git push`,
+   `sudo systemctl restart hadron`.
