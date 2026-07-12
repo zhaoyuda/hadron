@@ -46,9 +46,11 @@ async function showArtifactInContainer(container, session, tabId) {
   const key = `${session.id}:${tabId}`;
   container.style.display = "block";
   container.classList.add("active");
+  ensureArtifactCloseButton(container);
 
-  // Hide all children first, then show the right one
+  // Hide all children first, then show the right one (keep the corner close button)
   for (const child of container.children) {
+    if (child.id === "artifact-close-btn") continue;
     child.style.display = "none";
   }
 
@@ -103,6 +105,26 @@ async function showArtifactInContainer(container, session, tabId) {
     const entry = artifactCache.get(key);
     if (entry) { entry.mtime = mtime; entry.hasIframe = hasIframe; entry.htmlFile = htmlFile; }
   });
+}
+
+// Corner close button — closing the current file from the pane itself is the
+// natural gesture while reading/editing (the tab-bar × is far away). One
+// persistent element per container; closes the ACTIVE artifact tab.
+function ensureArtifactCloseButton(container) {
+  let btn = container.querySelector("#artifact-close-btn");
+  if (!btn) {
+    btn = document.createElement("div");
+    btn.id = "artifact-close-btn";
+    btn.title = "Close file";
+    btn.textContent = "×";
+    btn.addEventListener("click", () => {
+      if (typeof activeTab === "string" && activeTab.startsWith("artifact:") && typeof closeTab === "function") {
+        closeTab(activeTab);
+      }
+    });
+    container.appendChild(btn);
+  }
+  btn.style.display = "flex";
 }
 
 function stopArtifactServer(session, tabId) {

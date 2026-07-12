@@ -250,6 +250,14 @@ try {
   await page.waitForFunction(() => document.querySelectorAll(".editor-conflict-overlay").length === 0, null, { timeout: 5000 });
   await wait(500);
   r.ok(readFileSync(csvPath, "utf-8").includes("user,9"), "CSV deliberate Overwrite writes the edit to disk");
+
+  // ── 12. corner close button — closing the file from the pane itself ──
+  const closeBtn = page.locator("#artifact-close-btn");
+  r.ok(await closeBtn.isVisible(), "corner close button is visible top-left of the pane");
+  const tabsBefore = await page.locator(".wh-tab-art").count();
+  await closeBtn.click();
+  await page.waitForFunction((n) => document.querySelectorAll(".wh-tab-art").length < n, tabsBefore, { timeout: 5000 });
+  r.ok(true, "clicking the corner × closes the active artifact tab");
 } catch (e) {
   r.fail(`unexpected error: ${e.message}`);
 } finally {
