@@ -381,8 +381,9 @@ function setArtifactModePref(ext, mode) {
   try { localStorage.setItem(`hadron-artmode-${ext}`, mode); } catch {}
 }
 
-function renderCSVTable(container, text, filePath) {
+function renderCSVTable(container, text, filePath, fileRev) {
   let raw = text;
+  let baseRev = fileRev; // revision the edit buffer is based on (conditional saves)
   let mode = artifactModePref("csv", "preview");
   const macKey = navigator.platform.includes('Mac') ? '⌘' : 'Ctrl';
 
@@ -427,33 +428,63 @@ function renderCSVTable(container, text, filePath) {
     const status = container.querySelector('.csv-edit-status');
     const saveBtn = container.querySelector('.csv-edit-save');
 
-    function save() {
+    // Conditional save — same contract as the text editor (codex QA P0-3: the
+    // CSV path used to be an unconditional write that silently clobbered
+    // agent edits). Draft persistence for CSV is still P1; this closes the
+    // silent-overwrite half.
+    function save(revOverride) {
       const content = ta.value;
       status.textContent = "Saving…";
       saveBtn.disabled = true;
       fetch(`/api/file`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: filePath, content }),
+        body: JSON.stringify({ path: filePath, content, ...(revOverride || baseRev ? { baseRevision: revOverride || baseRev } : {}) }),
       })
-        .then((r) => r.ok ? r : Promise.reject())
+        .then((r) => {
+          if (r.ok) return r;
+          if (r.status === 409) {
+            return r.json().then((j) => {
+              if (j.currentContent === content) return { idempotent: true, rev: j.currentRevision };
+              status.textContent = "";
+              if (typeof showSaveConflictDialog === "function") {
+                showSaveConflictDialog({
+                  filePath, container,
+                  draftContent: content,
+                  diskContent: j.currentContent,
+                  onOverwrite: () => save(j.currentRevision),
+                  onDismiss: () => { status.textContent = "Conflict — not saved"; },
+                });
+              } else {
+                status.textContent = "File changed on disk — reopen to reload";
+              }
+              return Promise.reject({ handled: true });
+            });
+          }
+          return Promise.reject();
+        })
         .then((r) => {
           raw = content;
           status.textContent = "Saved";
-          // Pre-set the cache entry's mtime (the poller's baseline) to our own
-          // write so it doesn't fire a reload that would rebuild the textarea
-          // out from under the user.
-          const newMtime = r.headers.get("X-File-Mtime");
-          const cacheKey = ta.closest("[data-cache-key]")?.dataset.cacheKey;
-          const entry = cacheKey ? artifactCache.get(cacheKey) : null;
-          if (newMtime && entry) entry.mtime = newMtime;
-          setTimeout(() => { status.textContent = ""; }, 1500);
+          if (r.idempotent) { baseRev = r.rev; }
+          else {
+            baseRev = r.headers.get("X-File-Revision") || baseRev;
+            // Pre-set the cache entry's mtime (the poller's baseline) to our own
+            // write so it doesn't fire a reload that would rebuild the textarea
+            // out from under the user.
+            const newMtime = r.headers.get("X-File-Mtime");
+            const cacheKey = ta.closest("[data-cache-key]")?.dataset.cacheKey;
+            const entry = cacheKey ? artifactCache.get(cacheKey) : null;
+            if (newMtime && entry) entry.mtime = newMtime;
+          }
+          setTimeout(() => { if (status.textContent === "Saved") status.textContent = ""; }, 1500);
         })
-        .catch(() => { status.textContent = "Save failed"; })
+        .catch((e) => { if (!e || !e.handled) status.textContent = "Save failed"; })
         .finally(() => { saveBtn.disabled = false; });
     }
 
-    saveBtn.addEventListener('click', save);
+    saveBtn.addEventListener('mousedown', (e) => e.preventDefault()); // keep focus in the textarea
+    saveBtn.addEventListener('click', () => save());
     ta.addEventListener('keydown', (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
@@ -768,15 +799,16 @@ function renderArtifactView(container, artifact, onMeta) {
       .then((r) => {
         if (!r.ok) return Promise.reject("not found");
         const mtime = r.headers.get("X-File-Mtime");
-        return r.text().then(text => ({ text, mtime }));
+        const rev = r.headers.get("X-File-Revision");
+        return r.text().then(text => ({ text, mtime, rev }));
       })
-      .then(({ text, mtime }) => {
+      .then(({ text, mtime, rev }) => {
         const isIframe = isMarimoNotebook(text, artifact.label || artifact.value);
         if (isMarimoNotebook(text, artifact.label || artifact.value)) {
           if (noteMarimoNotebook(artifact.value)) renderWorkHeader();
           renderMarimoNotebook(container, text, artifact.value);
         } else if (isCSVFile(artifact.value)) {
-          renderCSVTable(container, text, artifact.value);
+          renderCSVTable(container, text, artifact.value, rev);
           // CSV: inject actions; text captured in closure
           const captured = text;
           addArtifactActionButtons(container, () => captured, artifact.value.split("/").pop());

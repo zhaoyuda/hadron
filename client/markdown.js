@@ -222,7 +222,13 @@ function toggleEditMode(container) {
   const mode = container.dataset.mdMode || "preview";
   if (mode === "preview") {
     container.dataset.mdMode = "edit";
-    if (editorPref() === "vim") openVimEditor(container, filePath);
+    // vim edits the DISK version directly — with an unsaved textarea draft
+    // pending, that forks two divergent edit states (codex QA P1). Route to
+    // the text editor until the draft is saved or discarded.
+    if (editorPref() === "vim" && isDraftDirty(filePath)) {
+      openTextEditor(container, filePath);
+      editorHint(container, "Unsaved draft — opened in the text editor (vim would edit the disk version). Save or discard first.", 5000);
+    } else if (editorPref() === "vim") openVimEditor(container, filePath);
     else openTextEditor(container, filePath);
   } else {
     container.dataset.mdMode = "preview";
@@ -395,6 +401,14 @@ function openTextEditor(container, filePath, showToggle = true) {
 
   function draft() { return editorDrafts.get(filePath); }
 
+  // Persistent note in the editor bar (restored-draft / oversize warnings) —
+  // toasts alone are too transient for high-risk states (codex QA P3).
+  function setStatusNote(text, cls) {
+    status.textContent = text || "";
+    status.classList.remove("note", "warn");
+    if (text && cls) status.classList.add(cls);
+  }
+
   function syncDirtyUi() {
     const dirty = isDraftDirty(filePath);
     ta.dataset.dirty = dirty ? "1" : "0";
@@ -405,11 +419,19 @@ function openTextEditor(container, filePath, showToggle = true) {
     updateTabDirtyDots(filePath);
   }
 
+  let warnedOversize = false;
   function onEdited() {
     const d = draft();
     if (!d) return;
     d.content = ta.value;
     scheduleDraftPersist(filePath);
+    // localStorage can't hold this draft → recovery after a crash won't work.
+    // Persistent warning, not a toast (the length check is approximate — JS
+    // string length, not UTF-8 bytes — so warn with margin).
+    if (!warnedOversize && ta.value.length > DRAFT_MAX_BYTES - 30000) {
+      warnedOversize = true;
+      setStatusNote("Draft too large for auto-recovery storage — save often (a crash won't restore it)", "warn");
+    }
     syncDirtyUi();
   }
 
@@ -422,13 +444,21 @@ function openTextEditor(container, filePath, showToggle = true) {
     .then(({ text, rev }) => {
       const stored = getDraft(filePath);
       if (stored && stored.content !== stored.baseline) {
-        // Rebase note: if the disk moved while the draft slept, keep the draft
-        // (save will 409 and offer Compare) but tell the user.
-        editorDrafts.set(filePath, { content: stored.content, baseline: text, baselineRev: rev });
+        // Keep the draft's ORIGINAL baseline + revision. Rebasing baselineRev
+        // to the current disk revision would make a later Save pass the
+        // conditional check and silently overwrite whatever was written while
+        // the draft slept (codex QA P0-1). A draft with no recorded revision
+        // gets a sentinel that can never match — Save then forces the
+        // conflict flow instead of guessing.
+        const keptRev = stored.baselineRev != null ? stored.baselineRev : "stale-unknown";
+        editorDrafts.set(filePath, { content: stored.content, baseline: stored.baseline, baselineRev: keptRev });
         ta.value = stored.content;
-        editorHint(container, stored.baseline === text
-          ? "Restored unsaved draft"
-          : "Restored unsaved draft — file changed on disk since (Save will offer Compare)", 4000);
+        if (stored.baseline !== text) {
+          setStatusNote("Restored draft — file changed on disk since (Save will offer Compare)", "warn");
+        } else {
+          setStatusNote("Restored unsaved draft", "note");
+          editorHint(container, "Restored unsaved draft");
+        }
       } else {
         editorDrafts.set(filePath, { content: text, baseline: text, baselineRev: rev });
         ta.value = text;
@@ -477,27 +507,39 @@ function openTextEditor(container, filePath, showToggle = true) {
     openTextEditor(container, filePath, showToggle); // reload fresh from disk
   });
 
-  function applySavedResponse(r, content) {
-    if (container.dataset.mdRaw !== undefined) container.dataset.mdRaw = content;
-    // Pre-set the cache entry's mtime (the poller's baseline) to our own
-    // write's mtime so it isn't treated as an external change.
-    const newMtime = r.headers.get("X-File-Mtime");
+  // The save request carries a SNAPSHOT of the draft. By the time the response
+  // lands the user may have typed more — the snapshot becomes the new baseline,
+  // but the LIVE textarea content stays the draft (still dirty if it moved).
+  // Marking the pane clean here would vanish the typed-while-saving text on
+  // the next preview toggle (codex QA P0-2).
+  function markSaved(savedContent, newRev, newMtime) {
+    if (container.dataset.mdRaw !== undefined) container.dataset.mdRaw = savedContent;
     if (newMtime) {
+      // Pre-set the cache entry's mtime (the poller's baseline) to our own
+      // write's mtime so it isn't treated as an external change.
       try {
         const key = container.dataset.cacheKey;
         const entry = key && typeof artifactCache !== "undefined" ? artifactCache.get(key) : null;
         if (entry) entry.mtime = newMtime;
       } catch {}
     }
-    const newRev = r.headers.get("X-File-Revision");
-    editorDrafts.set(filePath, { content, baseline: content, baselineRev: newRev });
-    persistDraftNow(filePath); // clean → removes the stored draft
-    setSaveState("saved");
+    const live = ta.value;
+    editorDrafts.set(filePath, { content: live, baseline: savedContent, baselineRev: newRev });
+    persistDraftNow(filePath);
+    setStatusNote("");
+    if (live === savedContent) {
+      setSaveState("saved");
+    } else {
+      // Edits arrived mid-save: baseline advanced, draft still dirty.
+      setSaveState("idle");
+    }
     syncDirtyUi();
-    setSaveState("saved"); // syncDirtyUi resets idle; keep the ✓ visible
+    if (live === savedContent) setSaveState("saved"); // keep the ✓ over syncDirtyUi's reset
   }
 
+  let saving = false;
   function doConditionalSave(content, baseRevision) {
+    saving = true;
     setSaveState("saving");
     status.textContent = "";
     return fetch(`/api/file`, {
@@ -505,16 +547,26 @@ function openTextEditor(container, filePath, showToggle = true) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path: filePath, content, baseRevision }),
     }).then((r) => {
-      if (r.ok) { applySavedResponse(r, content); return; }
+      if (r.ok) {
+        markSaved(content, r.headers.get("X-File-Revision"), r.headers.get("X-File-Mtime"));
+        return;
+      }
       if (r.status === 409) {
         return r.json().then((j) => {
+          if (j.currentContent === content) {
+            // The disk already holds exactly what we tried to write (e.g. a
+            // double-clicked Save racing itself) — idempotent success, not a
+            // conflict to alarm the user with.
+            markSaved(content, j.currentRevision, null);
+            return;
+          }
           setSaveState("conflict");
           showSaveConflictDialog({
             filePath, container,
             draftContent: content,
             diskContent: j.currentContent,
             onOverwrite: () => doConditionalSave(content, j.currentRevision),
-            onDismiss: () => syncDirtyUi(),
+            onDismiss: () => { setSaveState("idle"); syncDirtyUi(); },
           });
         });
       }
@@ -523,15 +575,19 @@ function openTextEditor(container, filePath, showToggle = true) {
       // Keep the draft — the user's edits are never lost by a failed save.
       setSaveState("idle"); syncDirtyUi();
       status.textContent = e && e.message ? e.message : "Save failed";
-    });
+    }).finally(() => { saving = false; });
   }
 
   function saveTextEditor() {
-    if (ta.disabled) return;
+    if (ta.disabled || saving) return; // no concurrent saves racing themselves
     const d = draft();
     doConditionalSave(ta.value, d ? d.baselineRev : undefined);
   }
 
+  // Toolbar buttons must not steal focus from the textarea — typing right
+  // after clicking Save should keep flowing into the document.
+  saveBtn.addEventListener("mousedown", (e) => e.preventDefault());
+  discardBtn.addEventListener("mousedown", (e) => e.preventDefault());
   saveBtn.addEventListener("click", saveTextEditor);
   syncDirtyUi();
 }
@@ -563,11 +619,21 @@ function showSaveConflictDialog({ filePath, container, draftContent, diskContent
   const pres = ov.querySelectorAll(".ec-compare pre");
   pres[0].textContent = draftContent;
   pres[1].textContent = diskContent == null ? "(file is gone)" : diskContent;
+  // Two-way synced scrolling so the panes can actually be compared.
+  let syncing = false;
+  const link = (a, b) => a.addEventListener("scroll", () => {
+    if (syncing) return; syncing = true;
+    b.scrollTop = a.scrollTop; b.scrollLeft = a.scrollLeft;
+    syncing = false;
+  }, { passive: true });
+  link(pres[0], pres[1]); link(pres[1], pres[0]);
   const close = () => { ov.remove(); if (onDismiss) onDismiss(); };
   ov.querySelector(".ec-cancel-btn").addEventListener("click", close);
   ov.querySelector(".ec-compare-btn").addEventListener("click", () => {
     const cmp = ov.querySelector(".ec-compare");
-    cmp.style.display = cmp.style.display === "none" ? "" : "none";
+    const open = cmp.style.display === "none";
+    cmp.style.display = open ? "" : "none";
+    ov.querySelector(".editor-conflict-box").classList.toggle("wide", open);
   });
   ov.querySelector(".ec-overwrite-btn").addEventListener("click", () => {
     if (!confirm(`Overwrite ${fname} on disk with your draft?\n\nThe other version will be replaced.`)) return;

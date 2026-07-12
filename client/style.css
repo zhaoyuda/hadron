@@ -1438,9 +1438,14 @@ html, body {
   gap: 4px;
   align-items: center;
 }
-/* Push right when a .md-toggle is also present */
+/* Push left when a .md-toggle is also present */
 .artifact-persistent:has(.md-toggle) .artifact-actions {
   right: 100px;
+}
+/* Same for the CSV Preview/Edit toggle — it occupies the same top-right spot,
+   and overlapping made the Edit button unclickable (Download intercepted). */
+.artifact-persistent:has(.csv-toggle) .artifact-actions {
+  right: 148px;
 }
 .artifact-action-btn {
   padding: 2px 8px;
@@ -1656,6 +1661,8 @@ html, body {
 }
 .text-editor-bar.no-toggle { right: 12px; }
 .text-editor-status { font-size: 10px; color: var(--red); }
+.text-editor-status.note { color: var(--text3); }
+.text-editor-status.warn { color: var(--yellow, #d29922); }
 .text-editor-save {
   padding: 2px 8px;
   font-size: 10px;
@@ -1741,6 +1748,7 @@ html, body {
   flex-direction: column;
   gap: 12px;
 }
+.editor-conflict-box.wide { width: 92vw; max-width: 1500px; }
 .ec-title { font-size: 13px; color: var(--text); }
 .ec-compare { display: flex; gap: 10px; min-height: 0; }
 .ec-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
@@ -1753,9 +1761,9 @@ html, body {
   border-radius: 6px;
   padding: 8px;
   font-size: 11px;
-  max-height: 48vh;
-  white-space: pre-wrap;
-  word-break: break-word;
+  max-height: 56vh;
+  min-height: 200px;
+  white-space: pre; /* no wrapping — aligned comparison; scroll horizontally */
 }
 .ec-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .ec-btn {
