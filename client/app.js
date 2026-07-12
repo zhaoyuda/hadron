@@ -432,7 +432,7 @@ function renderWorkContent() {
   stashArtifacts();
 
   // Clean up dynamic split panes
-  wsContent.querySelectorAll(".split-pane, .split-handle").forEach((el) => el.remove());
+  wsContent.querySelectorAll(".split-pane-wrap, .split-pane, .split-handle").forEach((el) => el.remove());
   let artContainer = document.getElementById("artifact-container");
   if (!artContainer) {
     artContainer = document.createElement("div");
@@ -513,11 +513,22 @@ function renderWorkContent() {
         }
         initSplitResize(handle, layoutMode);
       } else {
+        // Wrapper carries the flex sizing and hosts the corner close button —
+        // the pane's own innerHTML is rebuilt constantly (edit toggles,
+        // reloads), so the button must live OUTSIDE it.
+        const wrap = document.createElement("div");
+        wrap.className = "split-pane-wrap";
         const pane = document.createElement("div");
         pane.className = "split-pane";
-        pane.style.flex = "1";
         renderPaneContent(pane, tab.id, s);
-        wsContent.appendChild(pane);
+        wrap.appendChild(pane);
+        const x = document.createElement("div");
+        x.className = "split-pane-close";
+        x.title = "Close pane";
+        x.textContent = "×";
+        x.addEventListener("click", () => closeTab(tab.id));
+        wrap.appendChild(x);
+        wsContent.appendChild(wrap);
         initSplitResize(handle, layoutMode);
       }
     });

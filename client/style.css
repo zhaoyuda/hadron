@@ -1461,6 +1461,36 @@ html, body {
   transition: color .15s, border-color .15s;
 }
 #artifact-close-btn:hover { color: var(--red); border-color: var(--red); }
+.split-pane-wrap {
+  position: relative;
+  flex: 1;
+  display: flex;
+  min-width: 80px;
+  min-height: 80px;
+  overflow: hidden;
+}
+.split-pane-wrap > .split-pane { flex: 1; }
+.split-pane-close {
+  position: absolute;
+  top: 8px;
+  left: 10px;
+  z-index: 20;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--text3);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+  user-select: none;
+  transition: color .15s, border-color .15s;
+}
+.split-pane-close:hover { color: var(--red); border-color: var(--red); }
 /* top-level preview only (NOT notebook md cells): keep clear of the corner button */
 #artifact-container .artifact-persistent > .md-preview { padding-left: 44px; padding-top: 20px; }
 /* Push left when a .md-toggle is also present */
