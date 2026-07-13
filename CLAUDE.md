@@ -123,6 +123,15 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #   + test/e2e/m16-editor-drafts.js (editor draft model: preview renders draft, reload restores it, agent-write → Save 409s with Compare/Overwrite/Cancel, Discard confirms)
 ```
 
+`npm run test:e2e` runs `test/e2e/run-all.js`, which executes every `m*.js`
+module regardless of individual failures and exits non-zero only on an
+*unexpected* failure. M10 (OSC-52 clipboard) is a documented `XFAIL` in that
+runner — it fails identically on main (headless-chromium can't complete the
+`navigator.clipboard.writeText` bridge) so it prints but doesn't gate the suite.
+This replaced the old `m1 && m2 && …` chain, where M10's failure aborted before
+M11–M16 ran (a real regression could hide behind it). Remove M10 from `XFAIL`
+the moment the clipboard bridge is fixed — a stale xfail hides regressions too.
+
 Kept out of `npm test` so the core suite stays fast and dependency-free
 (Playwright pulls a ~300MB browser). Screenshots land in `test/e2e/screenshots/`
 (gitignored). Each `test/e2e/m*.js` is a plain node script using `test/e2e/harness.js`
@@ -160,9 +169,10 @@ staging first:
    unit `hadron-staging` on :3001, workspace `/home/ubuntu/staging-ws` with
    canary agents) — `sudo systemctl restart hadron-staging` to pick up server
    changes.
-2. `npm test` + `npm run test:e2e` in the worktree. (Known env issue: M10's
-   clipboard-write assert currently fails in headless chromium on this box —
-   it fails identically on main, so it doesn't gate a branch.)
+2. `npm test` + `npm run test:e2e` in the worktree. The runner reports M10 as
+   `XFAIL` (known headless-chromium clipboard issue, fails identically on main)
+   and exits 0 when it's the only failure — so a green run means M1–M9, M11–M16
+   all passed. Any `FAIL` (non-xfail) gates the branch.
 3. `scripts/predeploy-check.sh` — live-fire proof on staging that a service
    restart does NOT interrupt running agents (claude PIDs survive, a
    mid-response canary keeps working, no auto-resume fires), plus prod-unit
