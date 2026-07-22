@@ -121,8 +121,8 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #   + test/e2e/m14-group-case.js (agent groups are case-insensitive: "Workers"/"workers" merge into one deck group; rename re-tags every casing)
 #   + test/e2e/m15-md-links.js (clicking a link in a rendered .md preview opens the target as an artifact tab; external → new tab; missing → flash)
 #   + test/e2e/m16-editor-drafts.js (editor draft model: preview renders draft, reload restores it, agent-write → Save 409s with Compare/Overwrite/Cancel, Discard confirms)
-#   + test/e2e/m17-annotation-ux.js (annotation UX: FAB follows the selection; cross-block/formatted/duplicate/overlapping selections anchor + paint honestly; hover card edit, sent read-only; CLI excerpt for formatted anchors; marks survive auto-reload — runs at a <720px preview so the P0 surfaces stay authoritative)
-#   + test/e2e/m18-comment-rail.js (comment rail: cards permanently visible at ≥720px previews, aligned with highlights; rail composer + in-rail edit/delete; mark↔card two-way linking; orphan + doc sections; annRailBusy edit guard; <720px falls back to the P0 hover card)
+#   + test/e2e/m17-annotation-ux.js (annotation UX: FAB follows the selection; cross-block/formatted/duplicate/overlapping selections anchor + paint honestly; hover card edit, sent read-only; CLI excerpt for formatted anchors; marks survive auto-reload — runs at a <560px preview so the P0 surfaces stay authoritative)
+#   + test/e2e/m18-comment-rail.js (comment rail: cards permanently visible at ≥560px previews (width-adaptive 190-260px — split panes qualify), aligned with highlights; rail composer + in-rail edit/delete; mark↔card two-way linking; orphan + doc sections; annRailBusy edit guard; split-layout context derivation; <560px falls back to the P0 hover card)
 ```
 
 `npm run test:e2e` runs `test/e2e/run-all.js`, which executes every `m*.js`
