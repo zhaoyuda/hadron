@@ -149,6 +149,11 @@ function normalizeAnchor(anchor) {
     const a = { type: "text", exact: anchor.exact };
     if (typeof anchor.prefix === "string" && anchor.prefix) a.prefix = anchor.prefix;
     if (typeof anchor.suffix === "string" && anchor.suffix) a.suffix = anchor.suffix;
+    // Rendered-space context (optional, v2 clients): drives the normalized
+    // relocation fallback + the client painter's duplicate disambiguation.
+    if (typeof anchor.rPrefix === "string" && anchor.rPrefix) a.rPrefix = anchor.rPrefix;
+    if (typeof anchor.rSuffix === "string" && anchor.rSuffix) a.rSuffix = anchor.rSuffix;
+    if (Number.isInteger(anchor.rOrdinal) && anchor.rOrdinal >= 0) a.rOrdinal = anchor.rOrdinal;
     return { anchor: a };
   }
   return { error: 'anchor.type must be "doc" or "text"' };
@@ -164,13 +169,90 @@ function findOccurrences(content, exact) {
   return idxs;
 }
 
-// Relocate against current content: unique exact → matched; multiple → narrow by
-// prefix/suffix context, still multiple → ambiguous; zero → orphaned.
+// Markdown → plain-text normalization, best-effort: link/image syntax keeps its
+// text, heading/list/blockquote line prefixes and inline emphasis markers drop,
+// whitespace collapses. Match-or-not only — NO offset map, so a hit found in
+// normalized space has no raw index.
+// Known limitation (accepted for best-effort): fenced code blocks are NOT
+// exempted — syntax-like characters inside a fence get stripped too, so an
+// anchor can report matched against code text the preview renders verbatim.
+// Only locationText/anchorStatus are affected; the client painter works in
+// rendered space and is immune. Fence-aware parsing is source-map territory
+// (anti-roadmap).
+function normalizeMd(s) {
+  return s
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")       // image → alt text
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")        // link → link text
+    .replace(/^[ \t]*(?:>[ \t]?)+/gm, "")           // blockquote > prefixes
+    .replace(/^[ \t]*#{1,6}[ \t]+/gm, "")           // heading #s
+    .replace(/^[ \t]*(?:[-*+]|\d+\.)[ \t]+/gm, "")  // list markers
+    .replace(/\*\*|__|~~|[*_`]/g, "")               // inline emphasis markers
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Fallback when the exact pass finds nothing: formatting markers hide text from
+// indexOf ("bold move" vs raw "**bold** move"). Retry in normalized space,
+// narrowed by rendered-space context (rPrefix/rSuffix) or raw prefix/suffix.
+function relocateNormalized(anchor, content) {
+  const exact = normalizeMd(anchor.exact);
+  if (!exact) return { status: "orphaned", index: null };
+  const norm = normalizeMd(content);
+  const matches = findOccurrences(norm, exact);
+  if (matches.length === 0) return { status: "orphaned", index: null };
+  let narrowed = matches;
+  if (matches.length > 1) {
+    const prefix = normalizeMd(anchor.rPrefix || anchor.prefix || "");
+    const suffix = normalizeMd(anchor.rSuffix || anchor.suffix || "");
+    narrowed = matches.filter((i) => {
+      // trim at the joint: normalization may add/drop a space right at the cut
+      const prefixOk = !prefix || norm.slice(0, i).trimEnd().endsWith(prefix);
+      const suffixOk = !suffix || norm.slice(i + exact.length).trimStart().startsWith(suffix);
+      return prefixOk && suffixOk;
+    });
+  }
+  if (narrowed.length === 1) return { status: "matched", index: null };
+  // Occurrences exist but context can't pick one (even narrowed-to-zero) →
+  // ambiguous, mirroring the exact pass: "multiple matches", not "no longer found".
+  return { status: "ambiguous", index: null };
+}
+
+// A raw match that contradicts a v2 anchor's rendered-space context is a DECOY:
+// the occurrence the user selected is hidden behind formatting markers, and the
+// same rendered text happens to appear as plain text somewhere else. Verify the
+// normalized neighborhood of the raw hit against rPrefix/rSuffix (generous 200-char
+// raw windows cover markers the normalization strips). Anchors without rendered
+// context (legacy) always pass.
+function rawMatchAgreesWithCtx(anchor, content, i) {
+  if (!anchor.rPrefix && !anchor.rSuffix) return true;
+  const pre = normalizeMd(anchor.rPrefix || "");
+  const suf = normalizeMd(anchor.rSuffix || "");
+  const preWin = normalizeMd(content.slice(Math.max(0, i - 200), i));
+  const sufWin = normalizeMd(content.slice(i + anchor.exact.length, i + anchor.exact.length + 200));
+  // Window under-run (doc edge, or markers/URLs eating the raw window down to
+  // fewer normalized chars than the stored context): all available evidence must
+  // still agree — the shorter side has to be an edge-fragment of the longer one.
+  // An EMPTY window is not agreement: a non-empty saved context proves the
+  // selected occurrence had neighbors at creation, so a hit at the bare document
+  // edge contradicts it (otherwise a doc-edge decoy sails through on
+  // "".endsWith/startsWith("") being vacuously true).
+  const preOk = !pre || preWin.endsWith(pre) || (preWin !== "" && pre.endsWith(preWin));
+  const sufOk = !suf || sufWin.startsWith(suf) || (sufWin !== "" && suf.startsWith(sufWin));
+  return preOk && sufOk;
+}
+
+// Relocate against current content: unique exact → matched (vetoed to the
+// normalized pass when it contradicts the rendered context); multiple → narrow by
+// prefix/suffix context, still multiple → ambiguous; zero exact → normalized
+// fallback (formatted text), which itself ends in matched/ambiguous/orphaned.
 export function relocateAnchor(anchor, content) {
   if (!anchor || anchor.type !== "text") return { status: "matched", index: null };
   if (typeof content !== "string") return { status: "orphaned", index: null };
   const matches = findOccurrences(content, anchor.exact);
-  if (matches.length === 0) return { status: "orphaned", index: null };
+  if (matches.length === 0) return relocateNormalized(anchor, content);
+  if (matches.length === 1 && !rawMatchAgreesWithCtx(anchor, content, matches[0])) {
+    return relocateNormalized(anchor, content);
+  }
   if (matches.length === 1) return { status: "matched", index: matches[0] };
   const narrowed = matches.filter((i) => {
     const prefixOk = !anchor.prefix || content.slice(Math.max(0, i - anchor.prefix.length), i) === anchor.prefix;
@@ -191,6 +273,8 @@ export function describeAnchor(comment, content) {
   const oneLine = anchor.exact.replace(/\s+/g, " ").trim();
   const excerpt = oneLine.length > 80 ? `${oneLine.slice(0, 77)}…` : oneLine;
   if (status === "matched") {
+    // null index = normalized-space match — no raw offset, so no line number.
+    if (index === null) return `"${excerpt}" (formatted text)`;
     const line = content.slice(0, index).split("\n").length;
     return `"${excerpt}" (line ${line})`;
   }

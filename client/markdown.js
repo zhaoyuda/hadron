@@ -263,6 +263,10 @@ function toggleEditMode(container) {
       const html = typeof marked !== 'undefined' ? marked.parse(text) : esc(text);
       container.innerHTML = `<div class="md-toggle" onclick="toggleEditMode(this.parentElement)">Preview ${note}<span class="md-toggle-key">${key}+Shift+E</span></div><div class="md-preview">${html}</div>`;
       rewriteRelativeImages(container.querySelector(".md-preview"), filePath);
+      // Same hook as the initial render path — without it an edit→preview
+      // toggle never repaints annotations (and in split mode the context
+      // re-derivation for this pane never fires).
+      if (typeof annotationsOnPreviewRendered === "function") annotationsOnPreviewRendered(container, filePath);
     };
     if (draft && draft.content !== draft.baseline) {
       renderPreview(draft.content, true);

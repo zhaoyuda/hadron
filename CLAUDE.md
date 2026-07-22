@@ -49,7 +49,7 @@ scripts/
   setup-workspace.js  # Interactive workspace initializer
 test/
   unit/               # detectState/nextState fixtures + security HTTP suite (npm test)
-  e2e/                # Playwright browser modules M1-M16 (npm run test:e2e)
+  e2e/                # Playwright browser modules M1-M18 (npm run test:e2e)
 ```
 
 ## Conventions
@@ -121,6 +121,8 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #   + test/e2e/m14-group-case.js (agent groups are case-insensitive: "Workers"/"workers" merge into one deck group; rename re-tags every casing)
 #   + test/e2e/m15-md-links.js (clicking a link in a rendered .md preview opens the target as an artifact tab; external → new tab; missing → flash)
 #   + test/e2e/m16-editor-drafts.js (editor draft model: preview renders draft, reload restores it, agent-write → Save 409s with Compare/Overwrite/Cancel, Discard confirms)
+#   + test/e2e/m17-annotation-ux.js (annotation UX: FAB follows the selection; cross-block/formatted/duplicate/overlapping selections anchor + paint honestly; hover card edit, sent read-only; CLI excerpt for formatted anchors; marks survive auto-reload — runs at a <720px preview so the P0 surfaces stay authoritative)
+#   + test/e2e/m18-comment-rail.js (comment rail: cards permanently visible at ≥720px previews, aligned with highlights; rail composer + in-rail edit/delete; mark↔card two-way linking; orphan + doc sections; annRailBusy edit guard; <720px falls back to the P0 hover card)
 ```
 
 `npm run test:e2e` runs `test/e2e/run-all.js`, which executes every `m*.js`
@@ -129,7 +131,7 @@ module regardless of individual failures and exits non-zero only on an
 runner — it fails identically on main (headless-chromium can't complete the
 `navigator.clipboard.writeText` bridge) so it prints but doesn't gate the suite.
 This replaced the old `m1 && m2 && …` chain, where M10's failure aborted before
-M11–M16 ran (a real regression could hide behind it). Remove M10 from `XFAIL`
+M11–M18 ran (a real regression could hide behind it). Remove M10 from `XFAIL`
 the moment the clipboard bridge is fixed — a stale xfail hides regressions too.
 
 Kept out of `npm test` so the core suite stays fast and dependency-free
@@ -171,7 +173,7 @@ staging first:
    changes.
 2. `npm test` + `npm run test:e2e` in the worktree. The runner reports M10 as
    `XFAIL` (known headless-chromium clipboard issue, fails identically on main)
-   and exits 0 when it's the only failure — so a green run means M1–M9, M11–M16
+   and exits 0 when it's the only failure — so a green run means M1–M9, M11–M18
    all passed. Any `FAIL` (non-xfail) gates the branch.
 3. `scripts/predeploy-check.sh` — live-fire proof on staging that a service
    restart does NOT interrupt running agents (claude PIDs survive, a

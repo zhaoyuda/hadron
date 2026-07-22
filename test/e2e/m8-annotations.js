@@ -122,10 +122,10 @@ try {
   await page.locator(`mark.ann-mark[data-ann-id="${draftA.id}"]`).waitFor({ state: "visible", timeout: 7000 });
   r.ok(true, "matched comment gets a highlight mark in the preview");
 
-  // Whole-doc comment via the toggle-bar 💬, then a second selection comment.
-  await page.locator("#artifact-container .ann-doc-btn").click();
-  await page.locator(".ann-pop-body").fill("overall: too long");
-  await page.locator(".ann-pop-add").click();
+  // Whole-doc comment via the API (the dedicated UI button was removed — doc
+  // anchors remain in the contract as the degradation target and for the CLI),
+  // then a second selection comment.
+  await post("", { path: "report.md", anchor: { type: "doc" }, body: "overall: too long" });
   await commentOnText(PARA_C, "add citations");
   r.ok(await until(async () => (await list("?state=all")).summary.draft === 3), "three drafts (two selections + whole doc) visible over the API");
   const docDraft = (await list()).comments.find((c) => c.anchor.type === "doc");

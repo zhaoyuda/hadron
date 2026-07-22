@@ -12,6 +12,7 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync } from "fs"
 import { tmpdir } from "os";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import { annRailLayout } from "../../client/ann-rail-layout.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Random high port — never 3000 (production), never the other suites' fixed ports.
@@ -67,7 +68,122 @@ function killTmux() {
   } catch {}
 }
 
+// Pure rail layout (client/ann-rail-layout.js, comment-rail-spec R3) — no server needed.
+function railLayoutTests() {
+  console.log("\n[rail layout (pure)]");
+  const gap = 8;
+  {
+    ok(Object.keys(annRailLayout([], null)).length === 0, "empty items → empty layout");
+    const one = annRailLayout([{ id: "a", anchorY: 120, height: 50 }], null);
+    ok(one.a === 120, "single item sits exactly at its anchorY");
+  }
+  {
+    // no-overlap greedy: three cards whose anchors collide → pushed down, order kept
+    const t = annRailLayout([
+      { id: "a", anchorY: 100, height: 40 },
+      { id: "b", anchorY: 110, height: 40 },
+      { id: "c", anchorY: 115, height: 40 },
+    ], null);
+    ok(t.a === 100 && t.b === 148 && t.c === 196, "greedy: overlapping anchors cascade down with the 8px gap");
+    ok(t.a <= t.b && t.b <= t.c, "greedy keeps anchor order");
+    const far = annRailLayout([
+      { id: "a", anchorY: 100, height: 40 },
+      { id: "b", anchorY: 500, height: 40 },
+    ], null);
+    ok(far.a === 100 && far.b === 500, "greedy: non-colliding cards stay at their anchors");
+  }
+  {
+    // all items share one anchorY → stacked with gaps, order preserved
+    const t = annRailLayout([
+      { id: "a", anchorY: 200, height: 30 },
+      { id: "b", anchorY: 200, height: 30 },
+      { id: "c", anchorY: 200, height: 30 },
+    ], null);
+    ok(t.a === 200 && t.b === 238 && t.c === 276, "same-anchor items stack top-down");
+  }
+  {
+    // active exact alignment: middle card at its anchorY, neighbor above pushed UP
+    // (above its own anchor), neighbor below pushed down from the active's bottom
+    const items = [
+      { id: "a", anchorY: 100, height: 40 },
+      { id: "b", anchorY: 110, height: 40 },
+      { id: "c", anchorY: 120, height: 40 },
+    ];
+    const t = annRailLayout(items, "b");
+    ok(t.b === 110, "active card sits EXACTLY at its anchorY");
+    ok(t.a === 110 - gap - 40, "card above pushed up past its own anchor to clear the active");
+    ok(t.c === 110 + 40 + gap, "card below pushed down from the active card's bottom");
+    ok(t.a + 40 + gap <= t.b && t.b + 40 + gap <= t.c, "no overlap around the active card");
+    // active with room on both sides moves nothing else
+    const loose = annRailLayout([
+      { id: "a", anchorY: 0, height: 40 },
+      { id: "b", anchorY: 300, height: 40 },
+      { id: "c", anchorY: 600, height: 40 },
+    ], "b");
+    ok(loose.a === 0 && loose.b === 300 && loose.c === 600, "active with clearance leaves neighbors at their anchors");
+    // unknown activeId degrades to plain greedy
+    const unknown = annRailLayout(items, "nope");
+    ok(unknown.a === 100 && unknown.b === 148 && unknown.c === 196, "unknown activeId falls back to greedy");
+  }
+  {
+    // floor is a hard upper boundary: greedy clamps to it, never above
+    const f = annRailLayout([{ id: "a", anchorY: 0, height: 40 }], null, { floor: 30 });
+    ok(f.a === 30, "first anchor above the floor is clamped down to it");
+    const f2 = annRailLayout([
+      { id: "a", anchorY: 0, height: 40 },
+      { id: "b", anchorY: 5, height: 40 },
+    ], null, { floor: 30 });
+    ok(f2.a === 30 && f2.b === 78, "greedy under a floor stacks from the floor down");
+  }
+  {
+    // dense same-anchor cluster: activate each position in turn
+    const cluster = [
+      { id: "a", anchorY: 100, height: 30 },
+      { id: "b", anchorY: 100, height: 30 },
+      { id: "c", anchorY: 100, height: 30 },
+    ];
+    const ta = annRailLayout(cluster, "a");
+    ok(ta.a === 100 && ta.b === 138 && ta.c === 176, "cluster, first active: exact + below cascade");
+    const tb = annRailLayout(cluster, "b");
+    ok(tb.b === 100 && tb.a === 62 && tb.c === 138, "cluster, middle active: exact; above pushed up, below down");
+    const tc = annRailLayout(cluster, "c");
+    ok(tc.c === 100 && tc.b === 62 && tc.a === 24, "cluster, last active: exact; whole chain above walks up");
+    ok(tc.a >= 0 && tc.a + 30 + gap <= tc.b && tc.b + 30 + gap <= tc.c,
+      "cluster stays at/below the floor with gaps intact");
+  }
+  {
+    // infeasible exact alignment: the cards above can't fit between floor and
+    // the active anchor → active lands at the MINIMAL FEASIBLE Y (spec R3
+    // compromise), never pushing anything past the floor.
+    const t = annRailLayout([
+      { id: "a", anchorY: 10, height: 50 },
+      { id: "b", anchorY: 20, height: 50 },
+    ], "b");
+    ok(t.b === 58, "infeasible exact → active at minimal feasible Y (floor + stack above)");
+    ok(t.a === 0 && t.a + 50 + gap <= t.b, "card above sits at the floor, no overlap");
+    const tf = annRailLayout([
+      { id: "a", anchorY: 10, height: 50 },
+      { id: "b", anchorY: 20, height: 50 },
+    ], "b", { floor: 30 });
+    ok(tf.b === 88 && tf.a === 30, "non-zero floor shifts the minimal feasible Y accordingly");
+  }
+  {
+    // doc cards folded into the layout: items at anchorY = floor, fed first
+    // (stable order on ties) — they occupy the top, and an active anchored
+    // card near the top degrades to the feasible position below them.
+    const withDoc = [
+      { id: "doc1", anchorY: 0, height: 40 },
+      { id: "x", anchorY: 10, height: 40 },
+    ];
+    const plain = annRailLayout(withDoc, null);
+    ok(plain.doc1 === 0 && plain.x === 48, "doc card at the floor, anchored card pushed below it");
+    const act = annRailLayout(withDoc, "x");
+    ok(act.doc1 === 0 && act.x === 48, "active near the top lands at the feasible Y below the doc card");
+  }
+}
+
 async function main() {
+  railLayoutTests();
   server = spawn("node", [join(__dirname, "..", "..", "server", "index.js"), WS], {
     env: { ...process.env, PORT: String(PORT), HADRON_HOST: "127.0.0.1" },
     stdio: ["ignore", "pipe", "pipe"],
@@ -80,6 +196,7 @@ async function main() {
   const B = await createAgent("anno-b"); // batch lifecycle: send / resolve / reopen
   const C = await createAgent("anno-c"); // purge scope + no-draft send
   const D = await createAgent("anno-d"); // dispatch failure + retry
+  const E = await createAgent("anno-e"); // normalized relocation fallback (D5)
 
   console.log("\n[CRUD]");
   let cid;
@@ -143,6 +260,102 @@ async function main() {
     ok(by[idPrefix].anchorStatus === "matched" && by[idPrefix].locationText.includes("(line 5)"), "duplicated exact disambiguated by prefix → matched");
     ok(by[idAmbig].anchorStatus === "ambiguous", "duplicated exact, no context → ambiguous");
     ok(by[idGone].anchorStatus === "orphaned" && by[idGone].locationText === "(original text no longer found)", "removed text → orphaned");
+  }
+
+  console.log("\n[normalized relocation fallback]");
+  {
+    writeFileSync(join(WS, "formatted.md"), [
+      "# Why Hadron?",
+      "",
+      "A **bold** move for agent dashboards.",
+      "",
+      "- item one",
+      "- item two",
+      "",
+      "See the [docs](http://x) for details.",
+      "",
+      "The **fast** path is default.",
+      "Enable it early: the **fast** path is default.",
+    ].join("\n"));
+    const mk = async (anchor) => (await (await POST(annUrl(E), { path: "formatted.md", anchor, body: "b" })).json()).comment;
+    // fast path unchanged: raw substrings still resolve with a raw index
+    const cFast = await mk({ type: "text", exact: "for agent dashboards" });
+    const cGone = await mk({ type: "text", exact: "never rendered anywhere" });
+    // normalized fallback: markers hide these from the raw exact pass
+    const cBold = await mk({ type: "text", exact: "bold move" });
+    const cHead = await mk({ type: "text", exact: "Why Hadron?\n\nA bold move" }); // heading + cross-block
+    const cList = await mk({ type: "text", exact: "item one\nitem two" });         // list markers
+    const cLink = await mk({ type: "text", exact: "the docs for details" });       // link syntax
+    // "fast path is default" appears twice once ** is stripped
+    const cDupCtx = await mk({ type: "text", exact: "fast path is default", rPrefix: "early: the" });
+    const cDupNone = await mk({ type: "text", exact: "fast path is default" });
+    // full rendered-space field set for the round-trip assert
+    const cRt = await mk({ type: "text", exact: "item one", rPrefix: "dashboards.", rSuffix: "item two", rOrdinal: 0 });
+    const list = await GET(annUrl(E, "?path=formatted.md&state=all"));
+    const by = Object.fromEntries(list.comments.map((c) => [c.id, c]));
+    ok(by[cFast.id].anchorStatus === "matched" && by[cFast.id].locationText.includes("(line 3)"), "raw substring still takes the exact fast path (line hint intact)");
+    ok(by[cGone.id].anchorStatus === "orphaned" && by[cGone.id].locationText === "(original text no longer found)", "text absent raw AND normalized → orphaned");
+    ok(by[cBold.id].anchorStatus === "matched", "raw '**bold** move' + exact 'bold move' → matched via normalized pass");
+    ok(by[cBold.id].locationText === '"bold move" (formatted text)', "null-index match → '(formatted text)', no line number");
+    ok(by[cHead.id].anchorStatus === "matched", "heading + cross-block selection → matched");
+    ok(by[cList.id].anchorStatus === "matched", "selection across list markers → matched");
+    ok(by[cLink.id].anchorStatus === "matched", "selection across [link](url) syntax → matched");
+    ok(by[cDupCtx.id].anchorStatus === "matched", "normalized duplicate narrowed by rPrefix → matched");
+    ok(by[cDupNone.id].anchorStatus === "ambiguous", "normalized duplicate without context → ambiguous");
+    const rt = by[cRt.id].anchor;
+    ok(rt.rPrefix === "dashboards." && rt.rSuffix === "item two" && rt.rOrdinal === 0, "rPrefix/rSuffix/rOrdinal round-trip through the sidecar");
+  }
+
+  console.log("\n[raw decoy veto]");
+  {
+    // The user selected the FORMATTED occurrence ("**quick** win" renders "quick
+    // win"); the same rendered text also appears as PLAIN text later. The raw
+    // exact pass sees only the plain decoy (one match) — pre-veto it returned
+    // that occurrence's line. With rendered context the decoy must be rejected
+    // and the normalized pass must pick the formatted occurrence (null index).
+    writeFileSync(join(WS, "decoy.md"), [
+      "Intro paragraph sets the scene.",
+      "",
+      "A **quick** win for the team today.",
+      "",
+      "Later we call it a quick win for morale.",
+    ].join("\n"));
+    const mk = async (anchor) => (await (await POST(annUrl(E), { path: "decoy.md", anchor, body: "b" })).json()).comment;
+    const cDecoy = await mk({ type: "text", exact: "quick win", rPrefix: "sets the scene. A", rSuffix: "for the team today.", rOrdinal: 0 });
+    const cPlain = await mk({ type: "text", exact: "quick win", rPrefix: "we call it a", rSuffix: "for morale.", rOrdinal: 1 });
+    const cLegacy = await mk({ type: "text", exact: "quick win" }); // no rendered ctx → old behavior
+    const list = await GET(annUrl(E, "?path=decoy.md&state=all"));
+    const by = Object.fromEntries(list.comments.map((c) => [c.id, c]));
+    ok(by[cDecoy.id].anchorStatus === "matched" && by[cDecoy.id].locationText === '"quick win" (formatted text)',
+      "raw decoy vetoed by rendered context → normalized pass finds the formatted occurrence");
+    ok(by[cPlain.id].anchorStatus === "matched" && by[cPlain.id].locationText.includes("(line 5)"),
+      "raw match that AGREES with rendered context keeps the fast path + line hint");
+    ok(by[cLegacy.id].anchorStatus === "matched" && by[cLegacy.id].locationText.includes("(line 5)"),
+      "legacy anchor without rendered context: veto never fires (old behavior intact)");
+
+    // Doc-edge decoys: an EMPTY raw window must CONFLICT with a non-empty saved
+    // context ("".endsWith/startsWith("") is vacuously true — the veto must not
+    // accept it). Decoy sits at the very start / very end of the document; the
+    // intended formatted occurrence is elsewhere.
+    writeFileSync(join(WS, "edge-start.md"), [
+      "quick win opens this file.",           // plain decoy at char 0
+      "",
+      "Later a **quick** win lands for the team.",
+    ].join("\n"));
+    writeFileSync(join(WS, "edge-end.md"), [
+      "First a **quick** win lands for the team.",
+      "",
+      "This file closes on a quick win",       // plain decoy at EOF, no suffix after
+    ].join("\n"));
+    const mkAt = async (path, anchor) => (await (await POST(annUrl(E), { path, anchor, body: "b" })).json()).comment;
+    const cStart = await mkAt("edge-start.md", { type: "text", exact: "quick win", rPrefix: "Later a", rOrdinal: 1 });
+    const cEnd = await mkAt("edge-end.md", { type: "text", exact: "quick win", rSuffix: "lands for the team.", rOrdinal: 0 });
+    const l2 = await GET(annUrl(E, "?state=all"));
+    const by2 = Object.fromEntries(l2.comments.map((c) => [c.id, c]));
+    ok(by2[cStart.id].anchorStatus === "matched" && by2[cStart.id].locationText === '"quick win" (formatted text)',
+      "doc-START decoy (empty prefix window vs saved rPrefix) is vetoed → normalized pass");
+    ok(by2[cEnd.id].anchorStatus === "matched" && by2[cEnd.id].locationText === '"quick win" (formatted text)',
+      "doc-END decoy (empty suffix window vs saved rSuffix) is vetoed → normalized pass");
   }
 
   console.log("\n[corrupted sidecar]");

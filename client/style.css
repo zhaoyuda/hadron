@@ -2295,7 +2295,7 @@ html, body {
 
 /* ═══ ANNOTATIONS (v0.8 review loop) ═══ */
 
-/* Highlight marks — 淡黄 on the dark theme; hover shows the body via title */
+/* Highlight marks — 淡黄 on the dark theme; hover/focus opens the comment card */
 mark.ann-mark {
   background: rgba(210, 153, 34, .35);
   color: inherit;
@@ -2305,6 +2305,7 @@ mark.ann-mark {
   padding: 0 1px;
 }
 mark.ann-mark:hover { background: rgba(210, 153, 34, .55); }
+mark.ann-mark:focus { outline: 1px dotted var(--yellow); outline-offset: 1px; }
 
 /* Floating 💬 Comment button near the selection end */
 .ann-fab {
@@ -2374,23 +2375,8 @@ mark.ann-mark:hover { background: rgba(210, 153, 34, .55); }
   cursor: pointer;
 }
 .ann-pop-add:hover, .ann-row-save:hover { background: rgba(88, 166, 255, .15); }
+.ann-pop-degraded { font-size: 10px; color: var(--yellow); margin-bottom: 6px; }
 
-/* Whole-doc 💬 chip in the toggle-bar area (left of Preview/Edit + Copy/Download) */
-.ann-doc-btn {
-  position: absolute;
-  top: 6px;
-  right: 330px; /* clears the Preview/Edit toggle (right:12) + Copy/Download actions (right:172) */
-  z-index: 10;
-  padding: 2px 8px;
-  font-size: 10px;
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  cursor: pointer;
-  user-select: none;
-  transition: border-color .15s;
-}
-.ann-doc-btn:hover { border-color: var(--blue); }
 
 /* Floating bar — sticky pill pinned bottom-right of the scrolling artifact pane */
 .ann-bar-wrap {
@@ -2523,6 +2509,142 @@ mark.ann-mark:hover { background: rgba(210, 153, 34, .55); }
   margin: 12px 0 6px;
 }
 .ann-empty { font-size: 11px; color: var(--text3); padding: 8px 0; }
+
+/* Hover/pinned comment card — the in-context surface replacing title tooltips */
+.ann-card {
+  position: fixed;
+  z-index: 320;
+  min-width: 220px;
+  max-width: 360px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .5);
+}
+.ann-card-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.ann-card-body { font-size: 12px; color: var(--text); white-space: pre-wrap; word-break: break-word; }
+.ann-card-edit {
+  width: 100%;
+  min-height: 60px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+  padding: 6px;
+  resize: vertical;
+  outline: none;
+  box-sizing: border-box;
+}
+.ann-card-edit:focus { border-color: var(--blue); }
+.ann-card-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+.ann-card-actions .ann-pop-hint { margin-right: 0; }
+.ann-card-btn {
+  padding: 2px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text2);
+  cursor: pointer;
+}
+.ann-card-save { color: var(--blue); border-color: var(--blue); }
+.ann-card-save:hover { background: rgba(88, 166, 255, .15); }
+.ann-card-cancel:hover { color: var(--text); border-color: var(--text3); }
+.ann-card-del { color: var(--red); border-color: var(--red); margin-right: auto; }
+.ann-card-del:hover { background: rgba(248, 81, 73, .15); }
+.ann-card-choice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.ann-card-choice:hover { background: var(--bg3); }
+.ann-card-choice-body {
+  font-size: 11px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Comment rail (P1) — GDocs-style margin cards inside the preview scroll box.
+   The gutter is padding on .md-preview so the rail scrolls with content;
+   position:relative makes the preview the containing block for the cards. */
+.md-preview.ann-rail-open {
+  position: relative;
+  /* --ann-rail-w is set inline by annRailBuild (adaptive 190-260px) */
+  padding-right: calc(var(--ann-rail-w, 260px) + 32px);
+}
+.ann-rail { position: absolute; top: 0; right: 16px; width: var(--ann-rail-w, 260px); }
+.ann-rail-abs { position: absolute; left: 0; right: 0; }
+.ann-rail-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .35);
+  cursor: pointer;
+  box-sizing: border-box;
+  transition: border-color .12s ease; /* never `top` — tests and eyes both want honest positions */
+}
+.ann-rail-card.hover { border-color: var(--yellow); }
+.ann-rail-card.active { border-color: var(--yellow); border-left-color: var(--yellow); }
+.ann-rail-composer { border-left-color: var(--yellow); cursor: auto; }
+.ann-rail-head { display: flex; align-items: center; gap: 6px; }
+.ann-rail-act { cursor: pointer; color: var(--text3); font-size: 12px; line-height: 1; flex-shrink: 0; }
+.ann-rail-act:hover { color: var(--text); }
+.ann-rail-edit { margin-left: auto; }
+.ann-rail-body { color: var(--text); margin-top: 5px; white-space: pre-wrap; word-break: break-word; }
+.ann-rail-loc {
+  font-size: 10px;
+  color: var(--text3);
+  font-family: 'JetBrains Mono', monospace;
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* doc cards are layout items pinned at the rail top; no extra styling needed
+   beyond the marker class (see annRailBuild) */
+.ann-rail-orphsec { padding-top: 2px; }
+.ann-rail-orphsec .ann-rail-card { margin-bottom: 8px; }
+.ann-rail-orphhead {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--yellow);
+  margin-bottom: 6px;
+  text-transform: none;
+}
+.ann-rail-editbox {
+  width: 100%;
+  min-height: 48px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+  padding: 5px;
+  margin-top: 6px;
+  resize: vertical;
+  outline: none;
+  box-sizing: border-box;
+}
+.ann-rail-editbox:focus { border-color: var(--blue); }
+/* Two-way linking: card hover lights the marks; card click flashes them */
+mark.ann-mark.ann-mark-hover { background: rgba(210, 153, 34, .55); }
+mark.ann-mark.ann-mark-flash { background: rgba(210, 153, 34, .8); outline: 1px solid var(--yellow); }
+/* While the rail is mounted, shift the floating bar clear of the rail column
+   (16px gutter + adaptive rail width + 32px breathing room) */
+.ann-rail-host > .ann-bar-wrap { padding-right: calc(var(--ann-rail-w, 260px) + 48px); }
 
 /* ── Command palette (⌘K) ── */
 #palette-trigger {

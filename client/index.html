@@ -74,6 +74,9 @@
   <script src="/markdown.js"></script>
   <script src="/data-preview.js"></script>
   <script src="/artifacts.js"></script>
+  <!-- module (needs `export` for the node unit test); exposes window.annRailLayout,
+       which annotations.js only reads at render time — load order doesn't matter -->
+  <script type="module" src="/ann-rail-layout.js"></script>
   <script src="/annotations.js"></script>
   <script src="/terminal.js"></script>
   <script src="/palette.js"></script>
