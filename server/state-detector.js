@@ -148,11 +148,17 @@ export function detectState(rawLines, opts = {}) {
   // "tail": last 15 raw lines, used for background/blocked checks.
   const tail = rawLines.slice(Math.max(0, rawLines.length - 15));
 
-  // Collect non-chrome content lines above the prompt (up to 8 lines).
+  // Collect non-chrome content lines above the prompt (up to 20 lines).
   // If no prompt, collect from the bottom of the pane.
+  // 20, not 8: newer Claude Code inserts content between the live spinner and
+  // the composer — session survey, queued-message notices, todo-HUD lines — and
+  // at 8 those pushed the spinner out of the window entirely, so a hard-working
+  // agent read as at-prompt → done → idle (Yuda's OPTIMIZER screenshot,
+  // 2026-07-23; fixture working-thinking-pushed-out). Stale-spinner false
+  // positives stay guarded by the snap.stale + content-change gate in nextState.
   const above = [];
   const scanStart = hasPrompt ? promptIdx - 1 : rawLines.length - 1;
-  for (let i = scanStart; i >= 0 && above.length < 8; i--) {
+  for (let i = scanStart; i >= 0 && above.length < 20; i--) {
     const line = rawLines[i];
     const trimmed = line.trim();
     if (trimmed.length === 0) continue;

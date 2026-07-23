@@ -35,6 +35,9 @@ const EXPECTED = {
   "working-thinking-high-tokens":  { state: "working", substatus: { type: "thinking", tokens: "12.3k" } },
   "working-thinking-multiword-task": { state: "working", substatus: { type: "thinking" } },
   "working-thinking-multiword-bare": { state: "working", substatus: { type: "thinking" } },
+  // Spinner separated from the composer by survey/queued/todo-HUD lines (the
+  // 8-line window regression — idle-while-Booping, 2026-07-23):
+  "working-thinking-pushed-out":   { state: "working", promptVisible: true, substatus: { type: "thinking", tokens: "2.5k" } },
 
   // ── Thinking with prompt visible (active or stale — _applySnap decides) ──
   "working-thinking-with-survey":            { state: "working", promptVisible: false, substatus: { type: "thinking" } },
