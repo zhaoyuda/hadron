@@ -255,8 +255,14 @@ async function main() {
       if (sub === "add") {
         let paths = positional.slice(1);
         if (flags.auto) {
-          const suggested = await api("GET", `/api/files/suggest?agentId=${encodeURIComponent(me.id)}&cwd=${encodeURIComponent(me.cwd || "")}`);
-          paths = suggested.filter((f) => f.score > 0).map((f) => f.path);
+          // The server derives the scan root from agentId (agent cwd, jailed to the
+          // workspace) and reports it as `base`; paths are relative to that base.
+          const suggested = await api("GET", `/api/files/suggest?agentId=${encodeURIComponent(me.id)}`);
+          // Join with the server's resolved scan root: a bare relative path is
+          // ambiguous when the same filename exists at the workspace root too.
+          const base = suggested.base || "";
+          paths = (suggested.files || []).filter((f) => f.score > 0)
+            .map((f) => (base && !f.path.startsWith("/")) ? `${base}/${f.path}` : f.path);
           if (!paths.length) die("no high-relevance files found to auto-add");
         }
         if (!paths.length) die("usage: hadron artifacts add [--auto | <path...>]");

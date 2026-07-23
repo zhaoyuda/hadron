@@ -6,7 +6,7 @@
 // add-artifact popover, and artifact add/remove against the sessions API.
 // Seam — reads app.js globals (sessions, activeSessionId, activeTab, openTabsPerSession)
 // and helpers (esc, render, renderWorkHeader, switchTab, closeTab, saveSplitNotes,
-// hideAddPopover, onClickOutsidePopover) at call time only — no load-order TDZ.
+// hideAddPopover, armPopoverDismiss, clampPopover) at call time only — no load-order TDZ.
 // Seam — app.js calls in: stashArtifacts/showArtifactInContainer/renderPaneContent/
 // startArtifactMtimePolling (renderWorkContent), stopArtifactServer (closeTab),
 // stopAllArtifactServers (closeSession), reloadCurrentArtifact (Ctrl+Shift+R),
@@ -38,9 +38,25 @@ function getArtifactPool() {
   return pool;
 }
 
+// Tab id → artifact descriptor. `artifact:N` indexes the session's artifacts array;
+// `file:<abs path>` is an ephemeral viewer tab (dir-artifact children) — same
+// rendering pipeline, no artifacts-array entry.
+function artFromTabId(session, tabId) {
+  if (typeof tabId !== "string") return null;
+  if (tabId.startsWith("artifact:")) {
+    const idx = parseInt(tabId.split(":")[1]);
+    return session?.artifacts?.[idx] || null;
+  }
+  if (tabId.startsWith("file:")) return { type: "file", value: tabId.slice(5) };
+  return null;
+}
+
+function isViewerTab(tabId) {
+  return typeof tabId === "string" && (tabId.startsWith("artifact:") || tabId.startsWith("file:"));
+}
+
 async function showArtifactInContainer(container, session, tabId) {
-  const idx = parseInt(tabId.split(":")[1]);
-  const art = session?.artifacts?.[idx];
+  const art = artFromTabId(session, tabId);
   if (!art) return;
 
   const key = `${session.id}:${tabId}`;
@@ -118,7 +134,7 @@ function ensureArtifactCloseButton(container) {
     btn.title = "Close file";
     btn.textContent = "×";
     btn.addEventListener("click", () => {
-      if (typeof activeTab === "string" && activeTab.startsWith("artifact:") && typeof closeTab === "function") {
+      if (isViewerTab(activeTab) && typeof closeTab === "function") {
         closeTab(activeTab);
       }
     });
@@ -128,8 +144,7 @@ function ensureArtifactCloseButton(container) {
 }
 
 function stopArtifactServer(session, tabId) {
-  const idx = parseInt(tabId.split(":")[1]);
-  const art = session?.artifacts?.[idx];
+  const art = artFromTabId(session, tabId);
   if (!art || art.type !== "file") return;
   const path = art.value;
   if (path.endsWith(".py")) {
@@ -166,7 +181,7 @@ function stashArtifacts() {
 }
 
 function reloadCurrentArtifact() {
-  if (!activeTab?.startsWith("artifact:")) return;
+  if (!isViewerTab(activeTab)) return;
   // Don't yank the rug out from under someone mid-edit in the CSV textarea.
   const ae = document.activeElement;
   if (ae && ae.classList && ae.classList.contains("csv-edit-area")) return;
@@ -181,8 +196,7 @@ function reloadCurrentArtifact() {
   // Static HTML file: reload the iframe in-place with a fresh cache-buster
   // (keep the cache entry; just refetch the new mtime and re-point src).
   if (cached?.htmlFile) {
-    const idx = parseInt(activeTab.split(":")[1]);
-    const art = session.artifacts?.[idx];
+    const art = artFromTabId(session, activeTab);
     if (art && cached.el) {
       reloadHTMLPaneFromDisk(cached.el, art.value, (m) => { cached.mtime = m; });
       return;
@@ -214,9 +228,8 @@ function startArtifactMtimePolling() {
   // Tab mode: the active file-based artifact (md/csv/notebooks silently
   // auto-reload; HTML gets an update pill — see the tick below).
   let tabTarget = null;
-  if (activeTab?.startsWith("artifact:")) {
-    const idx = parseInt(activeTab.split(":")[1]);
-    const art = session.artifacts?.[idx];
+  if (isViewerTab(activeTab)) {
+    const art = artFromTabId(session, activeTab);
     const key = `${session.id}:${activeTab}`;
     if (art?.type === "file" && !artifactCache.get(key)?.hasIframe) tabTarget = { art, key };
   }
@@ -300,7 +313,7 @@ function renderPaneContent(pane, tabId, session) {
   if (tabId === "notes") {
     const noteVal = session?.notes || "";
     pane.innerHTML = `<textarea class="split-pane-notes" placeholder="Write notes here..." oninput="saveSplitNotes()">${esc(noteVal)}</textarea>`;
-  } else if (tabId.startsWith("artifact:")) {
+  } else if (isViewerTab(tabId)) {
     // Try cache first for split pane artifacts too (only iframe-based)
     const key = `${session.id}:${tabId}`;
     const cached = artifactCache.get(key);
@@ -309,8 +322,7 @@ function renderPaneContent(pane, tabId, session) {
       cached.el.style.display = "block";
       return;
     }
-    const idx = parseInt(tabId.split(":")[1]);
-    const art = session?.artifacts?.[idx];
+    const art = artFromTabId(session, tabId);
     if (!art) return;
     if (art.type === "url") {
       pane.innerHTML = `<iframe class="artifact-iframe" src="${esc(art.value)}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>`;
@@ -868,13 +880,46 @@ function renderArtifactView(container, artifact, onMeta) {
 }
 
 // ═══ REMOVE ARTIFACT ═══
+// Atomic server-side: DELETE { index, value } under the same per-agent lock as
+// append. 409 means the array drifted since this render (a concurrent CLI append /
+// another tab's remove) — refetch and re-render so the next click operates on fresh
+// indexes. Local state updates only from the 2xx response's returned array. No
+// confirm dialog: this removes a reference, never the file.
 async function removeArtifact(idx) {
-  const s = sessions.find((s) => s.id === activeSessionId);
-  if (!s || !s.artifacts) return;
+  const sessionId = activeSessionId; // capture: completion may race a session switch
+  const s = sessions.find((x) => x.id === sessionId);
+  if (!s || !s.artifacts || !s.artifacts[idx]) return;
+  const removed = s.artifacts[idx];
+  const value = removed.value;
+  let res;
+  try {
+    res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/artifacts`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ index: idx, value }),
+    });
+  } catch { return; }
+  if (res.status === 409) {
+    await fetchSessions();
+    render();
+    return;
+  }
+  if (!res.ok) return;
+  const j = await res.json();
+
+  // ── local cleanup: tabs, splits, cache, mtime watches ──
+  if (removed.type === "dir") {
+    // Forget the group's toggle + listing cache: a future re-add of the same
+    // folder must start from the default (collapsed), not the old override.
+    collapsedArtFolders[sessionId]?.delete(`dirart:${value}`);
+    dirArtCache.delete(`${sessionId}|${value}`);
+  }
   const tabId = `artifact:${idx}`;
-  closeTab(tabId);
-  // Re-index open tabs after removal
-  const open = openTabsPerSession[activeSessionId];
+  // Stop marimo/jupyter for the removed artifact while the OLD array can still
+  // resolve its index, then adopt the server's array as authoritative.
+  stopArtifactServer(s, tabId);
+  s.artifacts = j.artifacts || [];
+  const open = openTabsPerSession[sessionId];
   if (open) {
     const newOpen = new Set();
     open.forEach((t) => {
@@ -884,15 +929,85 @@ async function removeArtifact(idx) {
         else if (ti > idx) newOpen.add(`artifact:${ti - 1}`);
       } else { newOpen.add(t); }
     });
-    openTabsPerSession[activeSessionId] = newOpen;
+    openTabsPerSession[sessionId] = newOpen;
   }
-  s.artifacts.splice(idx, 1);
-  await fetch(`/api/sessions/${encodeURIComponent(activeSessionId)}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ artifacts: s.artifacts }),
-  });
-  render();
+  // Artifact cache keys embed the index — entries at/after the removed slot would
+  // show the wrong artifact after the splice; drop them (they re-render lazily).
+  for (const [key, entry] of [...artifactCache]) {
+    const m = key.match(/^(.+):artifact:(\d+)$/);
+    if (!m || m[1] !== sessionId) continue;
+    if (parseInt(m[2]) >= idx) {
+      if (entry.el?._mtimePoller) clearInterval(entry.el._mtimePoller);
+      if (entry.el?.parentNode) entry.el.parentNode.removeChild(entry.el);
+      artifactCache.delete(key);
+    }
+  }
+  if (sessionId === activeSessionId && typeof activeTab === "string" && activeTab.startsWith("artifact:")) {
+    const ti = parseInt(activeTab.split(":")[1]);
+    if (ti === idx) activeTab = "terminal";
+    else if (ti > idx) activeTab = `artifact:${ti - 1}`;
+  }
+  render(); // rebuilds header/splits and restarts mtime polling for the new layout
+  saveUIState();
+}
+
+// ═══ DIR ARTIFACTS (live folder groups) ═══
+// Children of an EXPANDED dir artifact come from /api/files/browse. The artifacts
+// panel already re-renders on the 3s deck cadence; dirArtChildren piggybacks on
+// that — each render returns the cache and (at most once per cadence, per dir,
+// never with a fetch already in flight) refreshes it, re-rendering the panel only
+// when the listing actually changed. Collapsed groups never fetch.
+const dirArtCache = new Map(); // "sid|dir" -> { entries, at, inflight, error }
+const DIRART_FRESH_MS = 2500; // just under the 3s cadence → one fetch per tick
+
+// Default collapsed unless the artifact carries `open: true`; the user's toggle is
+// an override recorded in the existing collapsedArtFolders mechanism (per session).
+function dirArtIsOpen(sid, art) {
+  const toggled = (collapsedArtFolders[sid] || new Set()).has(`dirart:${art.value}`);
+  return (art.open === true) !== toggled;
+}
+
+function toggleDirArtifact(sid, dir) {
+  const set = (collapsedArtFolders[sid] ||= new Set());
+  const key = `dirart:${dir}`;
+  if (set.has(key)) set.delete(key); else set.add(key);
+  renderRightPanel(); // expanding kicks off the child fetch via dirArtChildren
+}
+
+function dirArtChildren(sid, dir) {
+  const key = `${sid}|${dir}`;
+  let entry = dirArtCache.get(key);
+  if (!entry) { entry = { entries: null, at: 0, inflight: false, error: false }; dirArtCache.set(key, entry); }
+  if (!entry.inflight && Date.now() - entry.at > DIRART_FRESH_MS) {
+    entry.inflight = true;
+    fetch(`/api/files/browse?agentId=${encodeURIComponent(sid)}&path=${encodeURIComponent(wsRelativePath(dir))}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((j) => {
+        const changed = JSON.stringify(j.entries) !== JSON.stringify(entry.entries);
+        entry.entries = j.entries;
+        entry.error = false;
+        if (changed && sid === activeSessionId) renderRightPanel();
+      })
+      .catch(() => {
+        const hadError = entry.error;
+        entry.error = true;
+        entry.entries = null;
+        if (!hadError && sid === activeSessionId) renderRightPanel();
+      })
+      .finally(() => { entry.inflight = false; entry.at = Date.now(); });
+  }
+  return entry;
+}
+
+// Client-side identity of paths is the RESOLVED absolute form the server returns;
+// the browse API wants them workspace-relative.
+function wsRelativePath(p) {
+  if (!p || !p.startsWith("/")) return p || "";
+  if (typeof wsRoot === "string" && wsRoot) {
+    if (p === wsRoot) return "";
+    if (p.startsWith(wsRoot + "/")) return p.slice(wsRoot.length + 1);
+  }
+  return p;
 }
 
 // ═══ MARIMO NOTEBOOK ═══
@@ -1173,13 +1288,19 @@ function showArtifactPopover(e) {
   pop.className = "add-popover add-popover-wide";
 
   const s = sessions.find(x => x.id === activeSessionId);
-  const existingPaths = new Set((s?.artifacts || []).map(a => a.value));
+  // De-dupe against the CANONICAL (resolved) values the server returns — candidates
+  // arrive in other forms (workspace-relative from Browse, scan-root-relative from
+  // Suggested), so each candidate is canonicalized before the comparison. Suggested
+  // paths join against the `base` the server reports (its ACTUAL resolved scan
+  // root), never a client guess from session.cwd.
+  const existingCanon = () => new Set((s?.artifacts || []).map(a => a.value));
+  const canonFromWsRel = (p) => p === "" || p === "." ? wsRoot : (p.startsWith("/") || !wsRoot) ? p : `${wsRoot}/${p}`;
 
   pop.innerHTML = `
     <div class="add-pop-tabs">
-      <span class="add-pop-tab active" data-tab="suggest">Suggested</span>
-      <span class="add-pop-tab" data-tab="browse">Browse</span>
-      <span class="add-pop-tab" data-tab="url">URL</span>
+      <span class="add-pop-tab active" data-tab="suggest" role="button" tabindex="0">Suggested</span>
+      <span class="add-pop-tab" data-tab="browse" role="button" tabindex="0">Browse</span>
+      <span class="add-pop-tab" data-tab="url" role="button" tabindex="0">URL</span>
     </div>
     <div class="add-pop-body" id="art-suggest-body">
       <input class="add-pop-input add-pop-filter" id="art-filter" type="text" placeholder="Filter files..." spellcheck="false" />
@@ -1189,11 +1310,17 @@ function showArtifactPopover(e) {
     </div>
     <div class="add-pop-body" id="art-browse-body" style="display:none">
       <div class="art-browse-breadcrumb" id="art-browse-crumb"></div>
-      <div class="art-browse-list" id="art-browse-list"></div>
+      <div class="art-browse-list" id="art-browse-list" tabindex="0"></div>
+      <div class="art-browse-bar">
+        <label class="art-browse-hidden"><input type="checkbox" id="art-hidden-toggle" /> 显示隐藏文件</label>
+        <span class="art-browse-hint" id="art-hidden-hint"></span>
+      </div>
+      <div class="add-pop-hint">↑↓ move · Enter open/add · Backspace up · Esc close</div>
     </div>
     <div class="add-pop-body" id="art-url-body" style="display:none">
       <input class="add-pop-input" id="art-url-input" type="text" placeholder="https://..." spellcheck="false" />
       <input class="add-pop-input" id="art-url-label" type="text" placeholder="Label (optional)" spellcheck="false" />
+      <div class="art-url-error" id="art-url-error"></div>
       <div class="add-pop-hint">Enter to add · Esc to cancel</div>
     </div>
   `;
@@ -1203,30 +1330,37 @@ function showArtifactPopover(e) {
   pop.style.top = (rect.bottom + 4) + "px";
 
   const bodyIds = { suggest: "art-suggest-body", browse: "art-browse-body", url: "art-url-body" };
-  const focusMap = { suggest: "#art-filter", browse: null, url: "#art-url-input" };
+  const focusMap = { suggest: "#art-filter", browse: "#art-browse-list", url: "#art-url-input" };
 
+  const activateTab = (tab) => {
+    pop.querySelectorAll(".add-pop-tab").forEach(t => t.classList.remove("active"));
+    tab.classList.add("active");
+    for (const [k, id] of Object.entries(bodyIds)) {
+      pop.querySelector(`#${id}`).style.display = k === tab.dataset.tab ? "" : "none";
+    }
+    if (tab.dataset.tab === "browse" && browseRel === null) loadBrowseDir(null);
+    const focusSel = focusMap[tab.dataset.tab];
+    if (focusSel) pop.querySelector(focusSel)?.focus();
+  };
   pop.querySelectorAll(".add-pop-tab").forEach(tab => {
-    tab.addEventListener("click", () => {
-      pop.querySelectorAll(".add-pop-tab").forEach(t => t.classList.remove("active"));
-      tab.classList.add("active");
-      for (const [k, id] of Object.entries(bodyIds)) {
-        pop.querySelector(`#${id}`).style.display = k === tab.dataset.tab ? "" : "none";
-      }
-      const focusSel = focusMap[tab.dataset.tab];
-      if (focusSel) pop.querySelector(focusSel)?.focus();
-      if (tab.dataset.tab === "browse") loadBrowseDir("");
+    tab.addEventListener("click", () => activateTab(tab));
+    tab.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); activateTab(tab); }
     });
   });
 
   // ── Suggested tab ──
-  const cwdParam = s?.cwd ? `cwd=${encodeURIComponent(s.cwd)}&` : "";
+  // The server derives the scan root from agentId (agent cwd, workspace-jailed) —
+  // same ownership model as Browse; no client-supplied cwd.
   const agentParam = s?.id ? `agentId=${encodeURIComponent(s.id)}` : "";
-  fetch(`/api/files/suggest?${cwdParam}${agentParam}`)
+  fetch(`/api/files/suggest?${agentParam}`)
     .then(r => r.json())
-    .then(files => {
+    .then(({ base, files }) => {
       const list = pop.querySelector("#art-suggest-list");
       if (!list) return;
-      const filtered = files.filter(f => !existingPaths.has(f.path));
+      const canonFromSuggest = (p) => (p.startsWith("/") || !base) ? p : `${base}/${p}`;
+      const canonSet = existingCanon();
+      const filtered = (files || []).filter(f => !canonSet.has(canonFromSuggest(f.path)));
       if (!filtered.length) {
         list.innerHTML = '<div class="art-suggest-empty">No new files found</div>';
         return;
@@ -1247,7 +1381,7 @@ function showArtifactPopover(e) {
         item.innerHTML = `<span class="art-suggest-icon">${fileExtIcon(f.name)}</span><span class="art-suggest-path">${esc(f.path)}</span>`;
         item.addEventListener("click", async () => {
           hideAddPopover();
-          await addArtifact("file", f.path, f.name);
+          await addArtifact("file", f.path, f.name, canonFromSuggest(f.path));
         });
         list.appendChild(item);
         allItems.push({ el: item, path: f.path.toLowerCase() });
@@ -1262,7 +1396,6 @@ function showArtifactPopover(e) {
         list.querySelectorAll(".art-suggest-sep").forEach(sep => sep.style.display = q ? "none" : "");
       });
       filterInput.addEventListener("keydown", (ev) => {
-        if (ev.key === "Escape") hideAddPopover();
         if (ev.key === "Enter") {
           const first = list.querySelector(".art-suggest-item:not([style*='display: none'])");
           if (first) first.click();
@@ -1275,77 +1408,184 @@ function showArtifactPopover(e) {
     });
 
   // ── Browse tab ──
-  let browseCwd = "";
-  async function loadBrowseDir(dirPath) {
-    browseCwd = dirPath;
-    const list = pop.querySelector("#art-browse-list");
-    const crumb = pop.querySelector("#art-browse-crumb");
-    if (!list || !crumb) return;
+  // The server owns the jail (workspace root) and the start dir (agent cwd): the
+  // first call omits `path` and the response's `rel` seeds the breadcrumb. All
+  // navigation is by workspace-relative path. Monotonic token: a slow response
+  // that arrives after the user navigated again is dropped, not painted.
+  let browseRel = null; // workspace-relative path of the listed dir (null = not loaded yet)
+  let browseToken = 0;
+  let browseRows = [];
+  let browseActive = -1;
+  const HIDDEN_PREF_KEY = "hadron-browse-hidden";
+  let browseHidden = false;
+  try { browseHidden = localStorage.getItem(HIDDEN_PREF_KEY) === "1"; } catch {}
 
-    const parts = dirPath ? dirPath.split("/").filter(Boolean) : [];
-    let crumbHtml = `<span class="art-browse-crumb-seg" data-path="">./</span>`;
+  const hiddenToggle = pop.querySelector("#art-hidden-toggle");
+  const hiddenHint = pop.querySelector("#art-hidden-hint");
+  const syncHiddenHint = () => { hiddenHint.textContent = browseHidden ? "internal dirs (.git/.hadron) excluded" : ""; };
+  hiddenToggle.checked = browseHidden;
+  syncHiddenHint();
+  hiddenToggle.addEventListener("change", () => {
+    browseHidden = hiddenToggle.checked;
+    try { localStorage.setItem(HIDDEN_PREF_KEY, browseHidden ? "1" : "0"); } catch {}
+    syncHiddenHint();
+    loadBrowseDir(browseRel);
+  });
+
+  const browseUp = () => {
+    if (!browseRel) return;
+    loadBrowseDir(browseRel.includes("/") ? browseRel.slice(0, browseRel.lastIndexOf("/")) : "");
+  };
+
+  async function addDirArtifact(rel) {
+    hideAddPopover();
+    await addArtifact("dir", rel === "" ? "." : rel, null, canonFromWsRel(rel));
+  }
+
+  async function loadBrowseDir(rel) {
+    const token = ++browseToken;
+    const list = pop.querySelector("#art-browse-list");
+    if (!list) return;
+    list.innerHTML = '<div class="art-suggest-loading">Loading...</div>';
+    const params = new URLSearchParams();
+    if (s?.id) params.set("agentId", s.id);
+    if (rel !== null && rel !== undefined) params.set("path", rel);
+    if (browseHidden) params.set("hidden", "1");
+    let payload = null, errMsg = null;
+    try {
+      const r = await fetch(`/api/files/browse?${params}`);
+      if (r.ok) payload = await r.json();
+      else {
+        try { errMsg = (await r.json()).error || `HTTP ${r.status}`; } catch { errMsg = `HTTP ${r.status}`; }
+      }
+    } catch { errMsg = "network error"; }
+    if (token !== browseToken || !pop.isConnected) return; // stale response — drop
+    if (errMsg) {
+      list.innerHTML = `<div class="art-suggest-empty">Could not list directory: ${esc(errMsg)}</div>`;
+      browseRows = []; browseActive = -1;
+      return;
+    }
+    browseRel = payload.rel || "";
+    renderBrowseCrumb();
+    renderBrowseList(payload.entries || []);
+  }
+
+  function renderBrowseCrumb() {
+    const crumb = pop.querySelector("#art-browse-crumb");
+    if (!crumb) return;
+    const parts = browseRel ? browseRel.split("/").filter(Boolean) : [];
+    let html = `<span class="art-browse-crumb-seg" data-path="">./</span>`;
     let acc = "";
     parts.forEach(p => {
       acc += (acc ? "/" : "") + p;
-      crumbHtml += `<span class="art-browse-crumb-seg" data-path="${esc(acc)}">${esc(p)}/</span>`;
+      html += `<span class="art-browse-crumb-seg" data-path="${esc(acc)}">${esc(p)}/</span>`;
     });
-    crumb.innerHTML = crumbHtml;
+    html += `<span class="art-browse-addcur" id="art-browse-addcur" role="button" tabindex="0" title="把当前文件夹添加为 artifact">+ 添加此文件夹</span>`;
+    crumb.innerHTML = html;
     crumb.querySelectorAll(".art-browse-crumb-seg").forEach(seg => {
       seg.addEventListener("click", () => loadBrowseDir(seg.dataset.path));
     });
+    crumb.querySelector("#art-browse-addcur").addEventListener("click", () => addDirArtifact(browseRel));
+  }
 
-    list.innerHTML = '<div class="art-suggest-loading">Loading...</div>';
-    try {
-      const cwdQ = s?.cwd ? `cwd=${encodeURIComponent(s.cwd)}&` : "";
-      const entries = await (await fetch(`/api/files/browse?${cwdQ}path=${encodeURIComponent(dirPath)}`)).json();
-      list.innerHTML = "";
-      if (dirPath) {
-        const up = document.createElement("div");
-        up.className = "art-browse-item art-browse-dir";
-        up.innerHTML = `<span class="art-browse-icon">..</span>`;
-        up.addEventListener("click", () => {
-          const parent = dirPath.includes("/") ? dirPath.slice(0, dirPath.lastIndexOf("/")) : "";
-          loadBrowseDir(parent);
+  function renderBrowseList(entries) {
+    const list = pop.querySelector("#art-browse-list");
+    if (!list) return;
+    list.innerHTML = "";
+    browseRows = [];
+    browseActive = -1;
+    if (browseRel) {
+      const up = document.createElement("div");
+      up.className = "art-browse-item art-browse-dir";
+      up.innerHTML = `<span class="art-browse-icon">..</span>`;
+      up.addEventListener("click", browseUp);
+      list.appendChild(up);
+      browseRows.push({ el: up, activate: browseUp });
+    }
+    const canonSet = existingCanon();
+    entries.forEach(entry => {
+      const item = document.createElement("div");
+      const entryRel = browseRel ? `${browseRel}/${entry.name}` : entry.name;
+      if (entry.type === "dir") {
+        item.className = "art-browse-item art-browse-dir";
+        item.innerHTML = `<span class="art-browse-icon">${folderIcon(false, 15)}</span><span class="art-browse-name">${esc(entry.name)}</span><span class="art-browse-adddir" role="button" title="添加文件夹为 artifact">+ 添加文件夹</span>`;
+        const descend = () => loadBrowseDir(entryRel);
+        item.addEventListener("click", (ev) => {
+          if (ev.target.closest(".art-browse-adddir")) return; // the add affordance is separate from descend
+          descend();
         });
-        list.appendChild(up);
-      }
-      entries.forEach(entry => {
-        const item = document.createElement("div");
-        const entryPath = dirPath ? `${dirPath}/${entry.name}` : entry.name;
-        if (entry.type === "dir") {
-          item.className = "art-browse-item art-browse-dir";
-          item.innerHTML = `<span class="art-browse-icon">${folderIcon(15)}</span><span class="art-browse-name">${esc(entry.name)}</span>`;
-          item.addEventListener("click", () => loadBrowseDir(entryPath));
+        item.querySelector(".art-browse-adddir").addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          addDirArtifact(entryRel);
+        });
+        browseRows.push({ el: item, activate: descend });
+      } else {
+        const already = canonSet.has(canonFromWsRel(entryRel));
+        item.className = `art-browse-item art-browse-file${already ? " art-browse-exists" : ""}`;
+        item.innerHTML = `<span class="art-browse-icon">${fileExtIcon(entry.name)}</span><span class="art-browse-name">${esc(entry.name)}</span>${already ? '<span class="art-browse-added">added</span>' : ""}`;
+        if (!already) {
+          const addIt = async () => {
+            hideAddPopover();
+            await addArtifact("file", entryRel, entry.name, canonFromWsRel(entryRel));
+          };
+          item.addEventListener("click", addIt);
+          browseRows.push({ el: item, activate: addIt });
         } else {
-          const already = existingPaths.has(entryPath);
-          item.className = `art-browse-item art-browse-file${already ? " art-browse-exists" : ""}`;
-          item.innerHTML = `<span class="art-browse-icon">${fileExtIcon(entry.name)}</span><span class="art-browse-name">${esc(entry.name)}</span>${already ? '<span class="art-browse-added">added</span>' : ""}`;
-          if (!already) {
-            item.addEventListener("click", async () => {
-              hideAddPopover();
-              await addArtifact("file", entryPath, entry.name);
-            });
-          }
+          browseRows.push({ el: item, activate: () => {} });
         }
-        list.appendChild(item);
-      });
-      if (!entries.length) list.innerHTML = '<div class="art-suggest-empty">Empty directory</div>';
-    } catch {
-      list.innerHTML = '<div class="art-suggest-empty">Could not list directory</div>';
+      }
+      list.appendChild(item);
+    });
+    if (!entries.length) {
+      const empty = document.createElement("div");
+      empty.className = "art-suggest-empty";
+      empty.textContent = "Empty directory";
+      list.appendChild(empty);
     }
   }
+
+  // Keyboard nav on the (focusable) list — Escape is handled at the popover level.
+  const browseListEl = pop.querySelector("#art-browse-list");
+  browseListEl.addEventListener("keydown", (ev) => {
+    if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+      ev.preventDefault();
+      if (!browseRows.length) return;
+      browseActive = ev.key === "ArrowDown"
+        ? Math.min(browseRows.length - 1, browseActive + 1)
+        : Math.max(0, browseActive - 1);
+      browseRows.forEach((row, i) => row.el.classList.toggle("kb-active", i === browseActive));
+      browseRows[browseActive].el.scrollIntoView({ block: "nearest" });
+    } else if (ev.key === "Enter") {
+      ev.preventDefault();
+      if (browseActive >= 0 && browseRows[browseActive]) browseRows[browseActive].activate();
+    } else if (ev.key === "Backspace") {
+      ev.preventDefault();
+      browseUp();
+    }
+  });
 
   // ── URL tab ──
   const urlInput = pop.querySelector("#art-url-input");
   const urlLabel = pop.querySelector("#art-url-label");
+  const urlErr = pop.querySelector("#art-url-error");
   const handleUrlKey = async (ev) => {
-    if (ev.key === "Escape") { hideAddPopover(); return; }
-    if (ev.key === "Enter") {
-      const value = urlInput.value.trim();
-      if (!value) return;
-      hideAddPopover();
-      await addArtifact("url", value, urlLabel.value.trim());
+    if (ev.key !== "Enter") return;
+    const value = urlInput.value.trim();
+    if (!value) return;
+    let u = null;
+    try { u = new URL(value); } catch {}
+    if (!u || (u.protocol !== "http:" && u.protocol !== "https:")) {
+      urlErr.textContent = "Enter a valid http(s) URL";
+      return;
     }
+    urlErr.textContent = "";
+    const out = await addArtifact("url", value, urlLabel.value.trim());
+    if (!pop.isConnected) return; // popover already dismissed some other way
+    if (out && out.ok === false) {
+      urlErr.textContent = out.error || "Could not add URL";
+      return;
+    }
+    hideAddPopover();
   };
   urlInput.addEventListener("keydown", handleUrlKey);
   urlLabel.addEventListener("keydown", handleUrlKey);
@@ -1353,31 +1593,57 @@ function showArtifactPopover(e) {
   const filterInput = pop.querySelector("#art-filter");
   if (filterInput) filterInput.focus();
 
-  setTimeout(() => {
-    document.addEventListener("click", onClickOutsidePopover);
-  }, 0);
+  clampPopover(pop, rect);
+  armPopoverDismiss(btn);
 }
 
-async function addArtifact(type, value, label) {
-  const s = sessions.find((s) => s.id === activeSessionId);
-  if (!s) return;
-  if (!s.artifacts) s.artifacts = [];
-  // De-dupe by value: the same file/URL should never be added twice. This client
-  // PATCHes the whole array (bypassing the server's appendAgentField dedup), so the
-  // guard has to live here. If it's already an artifact, just focus its tab.
-  const existing = s.artifacts.findIndex((a) => a.value === value);
+// Add via the atomic append endpoint (the same one the CLI uses) — never a
+// whole-array PATCH that can clobber a concurrent CLI append. The server response
+// (the whole session, artifact values resolved) is authoritative for local state.
+// The session is captured at gesture time: if the user switched agents before the
+// POST landed, that session's data still updates but no tab steals focus.
+// `canonValue` is the caller's canonical (resolved) form of `value` when it knows a
+// better one than the default guess — used for de-dupe and to find the new tab.
+// Returns { ok, error? } so popover callers can surface inline errors.
+async function addArtifact(type, value, label, canonValue) {
+  const sessionId = activeSessionId;
+  const s = sessions.find((x) => x.id === sessionId);
+  if (!s) return { ok: false, error: "no active session" };
+  const canon = canonValue
+    || (type !== "url" && value && !value.startsWith("/") && !value.startsWith("~") && wsRoot
+      ? `${wsRoot}/${value}` : value);
+  // Already an artifact (compare canonical forms): just focus its tab.
+  const existing = (s.artifacts || []).findIndex((a) => a.value === value || a.value === canon);
   if (existing !== -1) {
-    switchTab(`artifact:${existing}`);
-    return;
+    if (type !== "dir" && sessionId === activeSessionId) switchTab(`artifact:${existing}`);
+    return { ok: true };
   }
-  const artifact = { type, value };
-  if (label) artifact.label = label;
-  s.artifacts.push(artifact);
-  await fetch(`/api/sessions/${encodeURIComponent(activeSessionId)}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ artifacts: s.artifacts }),
-  });
+  let res;
+  try {
+    // Submit the CANONICAL value, not the display-relative one: a bare relative
+    // path is ambiguous server-side when the same filename exists at both the
+    // workspace root and the agent cwd (codex round-3) — the client knows the
+    // exact base it browsed/suggested from, so it must say so.
+    res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/artifacts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type, value: canon, ...(label ? { label } : {}) }),
+    });
+  } catch {
+    return { ok: false, error: "network error" };
+  }
+  if (!res.ok) {
+    let msg = `add failed (${res.status})`;
+    try { msg = (await res.json()).error || msg; } catch {}
+    return { ok: false, error: msg };
+  }
+  const updated = await res.json();
+  s.artifacts = updated.artifacts || [];
   render();
-  switchTab(`artifact:${s.artifacts.length - 1}`);
+  // Dir artifacts have no tab — the sidebar group is the result.
+  if (type !== "dir" && sessionId === activeSessionId) {
+    const idx = s.artifacts.findIndex((a) => a.value === canon || a.value === value);
+    if (idx !== -1) switchTab(`artifact:${idx}`);
+  }
+  return { ok: true };
 }

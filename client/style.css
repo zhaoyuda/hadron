@@ -454,6 +454,11 @@ html, body {
   border-radius: 3px;
   transition: all .1s;
   user-select: none;
+  /* icon + label + × layout is shared by all closable tabs; wh-tab-art is
+     reserved for artifact semantics (context menu, dirty dot lookups) */
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 .wh-tab:hover { color: var(--text); background: var(--bg3); }
 .wh-tab.active { color: var(--white); background: var(--bg3); }
@@ -694,12 +699,7 @@ html, body {
 }
 .artifact-file-error { color: var(--red); }
 
-/* ── Artifact tab with close ── */
-.wh-tab-art {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
+/* ── Tab close button + icons (all closable tabs) ── */
 .wh-tab-i {
   display: inline-flex;
   align-items: center;
@@ -719,7 +719,7 @@ html, body {
   color: var(--text3);
   line-height: 1;
 }
-.wh-tab-art:hover .wh-tab-x { opacity: 1; }
+.wh-tab:hover .wh-tab-x { opacity: 1; }
 .wh-tab-x:hover { color: var(--red); }
 
 /* ── Artifact row remove button ── */
@@ -833,6 +833,39 @@ html, body {
 }
 .art-browse-crumb-seg { cursor: pointer; color: var(--blue); }
 .art-browse-crumb-seg:hover { text-decoration: underline; }
+
+/* ── Browse tab: hidden-files toggle, keyboard focus, folder-add affordances ── */
+.art-browse-bar { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 10px; color: var(--text3); }
+.art-browse-hidden { display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none; }
+.art-browse-hidden input { margin: 0; }
+.art-browse-hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.art-browse-list:focus { outline: 1px solid var(--blue); outline-offset: -1px; }
+.art-browse-item.kb-active { background: rgba(88,166,255,.18); color: var(--white); }
+.art-browse-adddir {
+  margin-left: auto; flex-shrink: 0; font-size: 9px; color: var(--text3);
+  border: 1px solid rgba(48,54,61,.8); border-radius: 3px; padding: 0 4px;
+  opacity: 0; transition: opacity .1s;
+}
+.art-browse-item:hover .art-browse-adddir, .art-browse-item.kb-active .art-browse-adddir { opacity: 1; }
+.art-browse-adddir:hover { color: var(--blue); border-color: var(--blue); }
+.art-browse-addcur {
+  margin-left: auto; flex-shrink: 0; cursor: pointer; font-size: 9px; color: var(--text3);
+  border: 1px solid rgba(48,54,61,.8); border-radius: 3px; padding: 0 4px;
+}
+.art-browse-addcur:hover { color: var(--blue); border-color: var(--blue); }
+.art-url-error { font-size: 10px; color: var(--red); min-height: 12px; margin-top: 4px; }
+
+/* ── Dir artifacts (live folder groups) ── */
+.af-group-hdr .af-rm { opacity: 0; margin-left: 4px; }
+.af-group-hdr:hover .af-rm { opacity: 1; }
+.af-count {
+  margin-left: auto; flex-shrink: 0; font-size: 9px; color: var(--text3);
+  background: rgba(110,118,129,.2); border-radius: 8px; padding: 0 6px;
+}
+.af-group-hdr .af-count { margin-left: 4px; }
+.af-dir-sub { opacity: .45; cursor: default; }
+.af-dir-sub:hover { background: none; }
+.af-dir-empty { padding: 4px 10px 6px 28px; font-size: 10px; color: var(--text3); font-style: italic; }
 
 /* ═══ CLOSE BUTTON (Work Header) ═══ */
 .wh-close {

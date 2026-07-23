@@ -78,7 +78,10 @@ export function isSelfWrite(id) {
   return t !== undefined && Date.now() - t < SELF_WRITE_WINDOW_MS;
 }
 
-function withAgentLock(id, fn) {
+// Exported as a store primitive: index.js routes build on it indirectly (append/
+// remove/saveAgentLocked), and the unit suite uses it directly to prove FIFO
+// serialization (hold the lock, queue mutations behind it, assert the order).
+export function withAgentLock(id, fn) {
   const prev = writeLocks.get(id) || Promise.resolve();
   const next = prev.then(fn, fn);
   writeLocks.set(id, next.catch(() => {}));
@@ -110,6 +113,14 @@ export function saveAgent(agent) {
   writeAgentFile(id, data);
 }
 
+// Persist a full agent snapshot under the same per-agent lock as the field
+// mutations (appendAgentField / removeAgentArtifact), so a whole-object save
+// (e.g. the artifacts-array PATCH) serializes with their read-modify-write
+// cycles instead of racing them.
+export function saveAgentLocked(agent) {
+  return withAgentLock(agent.id, () => saveAgent(agent));
+}
+
 // Atomically append one item to an array field (artifacts | relatedAgents), under the
 // per-agent lock: reload from disk → append → dedupe → write. Returns the updated data.
 export function appendAgentField(id, field, item) {
@@ -130,6 +141,32 @@ export function appendAgentField(id, field, item) {
     data.updatedAt = new Date().toISOString();
     writeAgentFile(id, data);
     return data;
+  });
+}
+
+// Atomically remove one artifact by (index, value), under the same per-agent lock as
+// append: reload from disk → verify the pair still matches → splice → write. The
+// index+value guard is the transitional substitute for stable artifact ids: if the
+// array drifted since the caller rendered (concurrent append/remove), the value at
+// that index no longer matches → { conflict: true }, nothing changes, caller 409s.
+// `matches(stored, given)` lets the caller compare canonical forms (clients see
+// resolved paths while the file stores workspace-relative ones).
+export function removeAgentArtifact(id, index, value, matches = (a, b) => a === b) {
+  return withAgentLock(id, () => {
+    let data;
+    try {
+      data = JSON.parse(readFileSync(join(AGENTS_DIR, `${id}.json`), "utf-8"));
+    } catch {
+      return null;
+    }
+    const arr = Array.isArray(data.artifacts) ? data.artifacts : [];
+    const at = arr[index];
+    if (!at || !matches(at.value, value)) return { conflict: true };
+    arr.splice(index, 1);
+    data.artifacts = arr;
+    data.updatedAt = new Date().toISOString();
+    writeAgentFile(id, data);
+    return { data };
   });
 }
 

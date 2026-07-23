@@ -53,9 +53,11 @@ try {
 
   // ── script: cwd-relative artifact paths normalize at add time ──
   // Relative paths are workspace-relative by convention, but agents add files
-  // relative to their own cwd; the server rewrites those to absolute when the
-  // file only exists under the cwd (regression: "could not load file" for
-  // design-notes/x.md added from a repo nested inside the workspace).
+  // relative to their own cwd; the server resolves those against the cwd when the
+  // file only exists there (regression: "could not load file" for
+  // design-notes/x.md added from a repo nested inside the workspace), then stores
+  // the ONE canonical form: workspace-relative for anything under the workspace
+  // (artifacts-ux spec A6).
   const { mkdirSync, writeFileSync, readFileSync } = await import("fs");
   mkdirSync(join(env.ws, "subrepo", "notes"), { recursive: true });
   writeFileSync(join(env.ws, "subrepo", "notes", "deep.md"), "# deep\n");
@@ -70,8 +72,8 @@ try {
   }
   // Assert the STORED values (the API resolves workspace-relative on the way out).
   const stored = JSON.parse(readFileSync(join(env.ws, ".hadron", "agents", "deep.json"), "utf-8")).artifacts;
-  r.ok(stored[0]?.value === join(env.ws, "subrepo", "notes", "deep.md"),
-    "cwd-relative artifact path normalized to the agent's cwd at add time");
+  r.ok(stored[0]?.value === "subrepo/notes/deep.md",
+    "cwd-relative artifact path resolved via the agent cwd, stored workspace-relative (canonical)");
   r.ok(stored[1]?.value === "root.md",
     "workspace-relative path that exists at the root is stored untouched");
 
