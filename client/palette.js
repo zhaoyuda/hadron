@@ -11,7 +11,8 @@
 let paletteOpen = false;
 let paletteSel = 0;        // index into the flat list of selectable rows
 let paletteItems = [];     // [{ icon, label, sub, action }]
-let paletteFiles = [];     // last /api/files/suggest result (relative paths)
+let paletteFiles = [];     // last /api/files/suggest result (paths relative to its base)
+let paletteSuggestBase = ""; // the resolved scan root the server used for paletteFiles
 let paletteFileSeq = 0;    // guards against out-of-order fetch responses
 let paletteFileTimer = null;
 
@@ -91,9 +92,10 @@ function scheduleFileFetch(query) {
     try {
       const r = await fetch(`/api/files/suggest?agentId=${encodeURIComponent(activeSessionId || "")}`);
       if (!r.ok) return;
-      const files = await r.json();
+      const { base, files } = await r.json();
       if (seq !== paletteFileSeq || !paletteOpen) return; // stale / closed
-      paletteFiles = files;
+      paletteFiles = files || [];
+      paletteSuggestBase = base || "";
       const input = document.getElementById("palette-input");
       renderPalette(input ? input.value.trim() : "");
     } catch {}
@@ -127,6 +129,7 @@ function buildPaletteItems(query) {
       const name = a.label || (a.value ? a.value.split("/").pop() : a.value) || "";
       return { a, idx, name, score: fuzzyScore(query, name) };
     })
+    .filter((x) => x.a.type !== "dir") // dir artifacts have no tab — they live in the sidebar
     .filter((x) => x.score >= 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, 8)
@@ -139,9 +142,13 @@ function buildPaletteItems(query) {
     }));
 
   // ── Workspace files (server suggest) → add as artifact (de-dupes) ──
+  // Artifact values arrive resolved (canonical); suggest paths are relative to the
+  // `base` the server REPORTED with them (its actual resolved scan root — a guess
+  // from session.cwd disagrees for symlinked/clamped cwds). Compare resolved forms.
   const existing = new Set(arts.map((a) => a.value));
+  const canonOf = (p) => (p.startsWith("/") || !paletteSuggestBase) ? p : `${paletteSuggestBase}/${p}`;
   const fileRows = (query ? paletteFiles : [])
-    .filter((f) => !existing.has(f.path))
+    .filter((f) => !existing.has(f.path) && !existing.has(canonOf(f.path)))
     .map((f) => ({ f, score: fuzzyScore(query, f.path) }))
     .filter((x) => x.score >= 0)
     .sort((a, b) => b.score - a.score || b.f.score - a.f.score)
@@ -151,7 +158,7 @@ function buildPaletteItems(query) {
       icon: fileIcon(f.name, 14),
       label: f.name,
       sub: f.path,
-      action: () => { closeCommandPalette(); addArtifact("file", f.path); },
+      action: () => { closeCommandPalette(); addArtifact("file", f.path, undefined, canonOf(f.path)); },
     }));
 
   return items.concat(agentRows, artRows, fileRows);

@@ -6,7 +6,7 @@ import { spawn } from "node-pty";
 import { fileURLToPath } from "url";
 import { dirname, join, basename } from "path";
 import { execSync, execFileSync, spawn as cpSpawn } from "child_process";
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, watch as fsWatch, chmodSync, unlinkSync, mkdtempSync, mkdirSync, rmSync, renameSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, watch as fsWatch, chmodSync, unlinkSync, mkdtempSync, mkdirSync, rmSync, renameSync, realpathSync } from "fs";
 import { connect as netConnect } from "net";
 import { networkInterfaces, hostname, tmpdir } from "os";
 import { URL } from "url";
@@ -14,7 +14,7 @@ import { randomBytes } from "crypto";
 import { StateDetector } from "./state-detector.js";
 import { probeClaudeCaps, RuntimeTracker, performResume } from "./resume.js";
 import { randomUUID } from "crypto";
-import { loadAgents, loadAgent, saveAgent, archiveAgent, deleteAgent, initWorkspace, getWorkspaceDir, appendAgentField, isSelfWrite } from "./agent-store.js";
+import { loadAgents, loadAgent, saveAgent, saveAgentLocked, archiveAgent, deleteAgent, initWorkspace, getWorkspaceDir, appendAgentField, removeAgentArtifact, isSelfWrite } from "./agent-store.js";
 import { resolve } from "path";
 import { tmux, tmuxSafe, isValidId } from "./tmux.js";
 import { syncSkills } from "./skills.js";
@@ -420,15 +420,23 @@ app.get("/api/sessions", (req, res) => {
     if (aSort !== bSort) return aSort - bSort;
     return a.id.localeCompare(b.id);
   });
-  const resolved = sorted.map(s => ({
+  res.json(sorted.map(resolvedSession));
+});
+
+// The wire form of a session: stored artifact values are canonical (workspace-
+// relative when under the workspace — see canonicalArtifactPath), the client always
+// sees them resolved to absolute. Every endpoint that hands a session (or its
+// artifacts) to the client goes through this, so the client-side identity of an
+// artifact is ONE form.
+function resolvedSession(s) {
+  return {
     ...s,
     artifacts: (s.artifacts || []).map(a => ({
       ...a,
       value: a.value ? resolveFilePath(a.value) : a.value
     }))
-  }));
-  res.json(resolved);
-});
+  };
+}
 
 // Server-owned identity resolution: the CLI passes its tmux session name (or pane id)
 // and the server — which authoritatively knows TMUX_PREFIX — maps it to an agent.
@@ -562,6 +570,19 @@ app.post("/api/sessions", (req, res) => {
   const cwdResult = validateCwd(cwd);
   if (cwdResult.error) return res.status(400).json({ error: cwdResult.error });
 
+  // Seeded artifacts go through the same per-entry validation + canonicalization
+  // as every other artifact write path — session creation is not a bypass.
+  let seedArtifacts;
+  if (artifacts !== undefined) {
+    if (!Array.isArray(artifacts)) return res.status(400).json({ error: "artifacts must be an array" });
+    seedArtifacts = [];
+    for (const a of artifacts) {
+      const out = validateAndCanonicalizeArtifact(a, cwdResult.cwd);
+      if (out.error) return res.status(400).json({ error: `artifacts[${seedArtifacts.length}]: ${out.error}` });
+      seedArtifacts.push(out.item);
+    }
+  }
+
   const existing = loadAgent(id);
   const session = existing
     ? { ...existing, state: "idle", blockReason: undefined }
@@ -583,7 +604,7 @@ app.post("/api/sessions", (req, res) => {
   if (cwdResult.cwd !== undefined) session.cwd = cwdResult.cwd;
   if (launchCommand) session.launchCommand = launchCommand;
   if (!existing) {
-    if (Array.isArray(artifacts)) session.artifacts = artifacts;
+    if (seedArtifacts) session.artifacts = seedArtifacts;
     if (Array.isArray(relatedAgents)) session.relatedAgents = relatedAgents;
     if (task !== undefined) session.task = task || null;
   }
@@ -595,15 +616,31 @@ app.post("/api/sessions", (req, res) => {
   ensureTmuxSession(id, resolveAgentCwd(session));
   startMonitor(id);
   if (autostart) autostartAgent(id, launchCommand, session.task);
-  res.status(201).json(session);
+  res.status(201).json(resolvedSession(session));
 });
 
-app.patch("/api/sessions/:id", (req, res) => {
+app.patch("/api/sessions/:id", async (req, res) => {
   const { id } = req.params;
   if (!sessions.has(id)) {
     return res.status(404).json({ error: "session not found" });
   }
   const session = sessions.get(id);
+  // The whole-array artifacts PATCH stays reachable (CLI / back-compat), so it must
+  // be exactly as safe as the dedicated append/delete endpoints: every entry goes
+  // through the same validation + canonicalization BEFORE anything mutates, and the
+  // write below runs under the same per-agent lock. A garbage url value would
+  // otherwise land in an iframe src / tab label forever, and an unlocked save
+  // could interleave with append/delete's read-modify-write.
+  let patchedArtifacts;
+  if (req.body.artifacts !== undefined) {
+    if (!Array.isArray(req.body.artifacts)) return res.status(400).json({ error: "artifacts must be an array" });
+    patchedArtifacts = [];
+    for (const a of req.body.artifacts) {
+      const out = validateAndCanonicalizeArtifact(a, session.cwd);
+      if (out.error) return res.status(400).json({ error: `artifacts[${patchedArtifacts.length}]: ${out.error}` });
+      patchedArtifacts.push(out.item);
+    }
+  }
   const { state, blockReason, name, task } = req.body;
   if (state !== undefined) {
     const prevState = session.state;
@@ -622,13 +659,13 @@ app.patch("/api/sessions/:id", (req, res) => {
   if (group !== undefined) session.group = group;
   if (icon !== undefined) session.icon = icon || null;
   if (notes !== undefined) session.notes = notes;
-  if (artifacts !== undefined) session.artifacts = artifacts;
+  if (artifacts !== undefined) session.artifacts = patchedArtifacts;
   if (relatedAgents !== undefined) session.relatedAgents = relatedAgents;
   if (sortOrder !== undefined) session.sortOrder = sortOrder;
   if (deletable !== undefined) session.deletable = deletable;
   const shouldSave = [name, task, notes, artifacts, relatedAgents, group, icon, sortOrder, deletable].some(v => v !== undefined);
-  if (shouldSave) saveAgent(session);
-  res.json(session);
+  if (shouldSave) await saveAgentLocked(session); // same lock as append/delete — no interleaved read-modify-write
+  res.json(resolvedSession(session));
 });
 
 // Low-level pane-write primitive. Types `keys` literally (no shell) and optionally Enter.
@@ -796,28 +833,126 @@ app.post("/api/sessions/:id/annotations/retry-dispatch", (req, res) => {
   sendAnnotationResult(res, retryDispatch(id, () => dispatchReviewTrigger(id)));
 });
 
+// Canonicalize a possibly-not-yet-existing absolute path: realpath the nearest
+// existing ancestor and rejoin the remainder, so symlinked components resolve even
+// when the leaf itself doesn't exist. Falls back to the lexical path when nothing
+// on it exists.
+function canonicalRealpath(abs) {
+  let base = abs;
+  const rest = [];
+  for (;;) {
+    try { return join(realpathSync(base), ...rest); } catch {}
+    const parent = dirname(base);
+    if (parent === base) return abs;
+    rest.unshift(basename(base));
+    base = parent;
+  }
+}
+
+// ONE canonical stored form for file/dir artifact paths, applied unconditionally at
+// write time: workspace-relative when the path lives under the workspace root,
+// absolute otherwise — with "under" decided CANONICALLY (realpath), so a file
+// reached through an in-workspace symlink to an outside target stores as its real
+// absolute path, not a misleading workspace-relative one. Relative inputs that
+// don't exist under the workspace but do under the agent's cwd resolve there first
+// (people add files relative to where the agent runs). Stored paths stay
+// unambiguous forever after; resolvedSession maps them back to absolute for the
+// client, so client-side identity is the resolved form.
+function canonicalArtifactPath(value, agentCwd) {
+  if (/^https?:/.test(value)) return value;
+  let abs;
+  if (value.startsWith("~")) abs = resolve(value.replace(/^~/, process.env.HOME || ""));
+  else if (value.startsWith("/")) abs = resolve(value);
+  else {
+    abs = resolve(WORKSPACE, value);
+    if (agentCwd && !existsSync(abs) && existsSync(resolve(agentCwd, value))) {
+      abs = resolve(agentCwd, value);
+    }
+  }
+  const rootCanon = canonicalRealpath(resolve(WORKSPACE));
+  const canonical = canonicalRealpath(abs);
+  if (canonical === rootCanon) return ".";
+  if (canonical.startsWith(rootCanon + "/")) return canonical.slice(rootCanon.length + 1);
+  return canonical;
+}
+
+// Shared per-entry validation + canonicalization for EVERY artifact write path —
+// the append endpoint, the whole-array PATCH, and the session-create seed all go
+// through here, so none of them is a validation bypass. Returns { item } or
+// { error }.
+function validateAndCanonicalizeArtifact(entry, agentCwd) {
+  if (!entry || typeof entry !== "object") return { error: "artifact must be an object" };
+  const { type = "file", value, label } = entry;
+  if (!value || typeof value !== "string") return { error: "value (string) required" };
+  if (type !== "file" && type !== "url" && type !== "dir") {
+    return { error: "type must be file, url or dir" };
+  }
+  if (type === "url" && !isValidHttpUrl(value)) {
+    return { error: "url artifact value must be a valid http(s) URL" };
+  }
+  const item = { type, value };
+  if (type !== "url") item.value = canonicalArtifactPath(value, agentCwd);
+  if (type === "dir") {
+    // A dir artifact is a live listing of a real directory INSIDE the workspace jail
+    // (agent cwds are validated inside it too). Canonical containment on the real
+    // path — same symlink-safe check as /api/files/browse.
+    let canonical;
+    try { canonical = realpathSync(resolveFilePath(item.value)); } catch {
+      return { error: "dir artifact must point to an existing directory" };
+    }
+    let root;
+    try { root = realpathSync(WORKSPACE); } catch { return { error: "workspace root unavailable" }; }
+    if (canonical !== root && !canonical.startsWith(root + "/")) {
+      return { error: "dir artifact must be inside the workspace" };
+    }
+    try {
+      if (!statSync(canonical).isDirectory()) return { error: "dir artifact must point to a directory" };
+    } catch { return { error: "dir artifact must point to an existing directory" }; }
+    if (entry.open === true) item.open = true; // default absent = collapsed
+  }
+  if (label) item.label = label;
+  return { item };
+}
+
+function isValidHttpUrl(value) {
+  if (!value || typeof value !== "string") return false;
+  try {
+    const u = new URL(value);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch { return false; }
+}
+
 // Append one artifact without clobbering the array (atomic, under per-agent lock).
 app.post("/api/sessions/:id/artifacts", async (req, res) => {
   const { id } = req.params;
   if (!isValidId(id)) return res.status(400).json({ error: "invalid id" });
   if (!sessions.has(id)) return res.status(404).json({ error: "session not found" });
-  const { type = "file", value, label } = req.body;
-  if (!value || typeof value !== "string") return res.status(400).json({ error: "value (string) required" });
-  const item = { type, value };
-  // Relative paths are workspace-relative by convention, but people add files
-  // relative to the agent's cwd. If the path doesn't exist under the workspace
-  // root and does exist under the agent's cwd, normalize at add time — stored
-  // paths stay unambiguous forever after.
-  if (type === "file" && !/^(\/|~|https?:)/.test(value)) {
-    const agentCwd = sessions.get(id).cwd;
-    if (agentCwd && !existsSync(resolve(WORKSPACE, value)) && existsSync(resolve(agentCwd, value))) {
-      item.value = resolve(agentCwd, value);
-    }
-  }
-  if (label) item.label = label;
-  const updated = await appendAgentField(id, "artifacts", item);
+  const out = validateAndCanonicalizeArtifact(req.body, sessions.get(id).cwd);
+  if (out.error) return res.status(400).json({ error: out.error });
+  const updated = await appendAgentField(id, "artifacts", out.item);
   if (updated) sessions.get(id).artifacts = updated.artifacts;
-  res.json(sessions.get(id));
+  res.json(resolvedSession(sessions.get(id)));
+});
+
+// Remove one artifact atomically (same per-agent lock as append). Body { index,
+// value }: the pair must still match server-side — a mismatch means the array
+// drifted since the client rendered (a concurrent CLI append / another tab's
+// remove) → 409, the client refetches and re-renders. Never touches real files.
+app.delete("/api/sessions/:id/artifacts", async (req, res) => {
+  const { id } = req.params;
+  if (!isValidId(id)) return res.status(400).json({ error: "invalid id" });
+  if (!sessions.has(id)) return res.status(404).json({ error: "session not found" });
+  const { index, value } = req.body || {};
+  if (!Number.isInteger(index) || index < 0) return res.status(400).json({ error: "index (non-negative integer) required" });
+  if (!value || typeof value !== "string") return res.status(400).json({ error: "value (string) required" });
+  // The client sees resolved values, the file stores canonical ones — compare both raw
+  // and resolved so either form matches its own artifact and nothing else.
+  const matches = (stored, given) => stored === given || resolveFilePath(stored) === resolveFilePath(given);
+  const out = await removeAgentArtifact(id, index, value, matches);
+  if (!out) return res.status(404).json({ error: "agent file not found" });
+  if (out.conflict) return res.status(409).json({ error: "artifact index/value mismatch — refetch and retry" });
+  sessions.get(id).artifacts = out.data.artifacts;
+  res.json({ ok: true, artifacts: resolvedSession(sessions.get(id)).artifacts });
 });
 
 // Append one related-agent id without clobbering the array.
@@ -981,8 +1116,18 @@ app.post("/api/file", (req, res) => {
 });
 
 app.get("/api/files/suggest", (req, res) => {
-  const cwd = resolveFilePath(req.query.cwd) || WORKSPACE;
-  const agentId = (req.query.agentId || "").toLowerCase();
+  // Same jail contract as /api/files/browse: the SERVER owns the start dir — the
+  // agent's cwd (via agentId), else the workspace root. The old client-supplied
+  // `cwd` param is gone: it let any caller point recursive enumeration at an
+  // arbitrary directory. Canonical (realpath) containment in the workspace root;
+  // anything outside clamps to the root.
+  const rawAgentId = String(req.query.agentId || "");
+  let root;
+  try { root = realpathSync(WORKSPACE); } catch { return res.status(500).json({ error: "workspace root unavailable" }); }
+  let cwd = resolveAgentCwd(rawAgentId && isValidId(rawAgentId) ? sessions.get(rawAgentId) : null);
+  try { cwd = realpathSync(cwd); } catch { cwd = root; }
+  if (cwd !== root && !cwd.startsWith(root + "/")) cwd = root;
+  const agentId = rawAgentId.toLowerCase();
   const PATTERNS = /\.(md|py|ipynb|csv|sql|js|ts|jsx|tsx|yaml|yml|json|sh|go|rs|rb|java|toml|html|css|txt)$/i;
   const IGNORE = /^(node_modules|\.git|__pycache__|\.venv|\.env|\.hadron|\.cache|\.next|dist|build|\.tox)$/;
   const HUMAN_EXT = /\.(md|html|htm|csv|ipynb)$/i;
@@ -993,24 +1138,38 @@ app.get("/api/files/suggest", (req, res) => {
   const MAX_FILES = 80;
   const results = [];
 
+  // Jail contract at EVERY level (check → read → recheck), not just the root: a
+  // real subdir can be swapped for an external symlink between the parent readdir
+  // and the recursive descent. Each scan() requires its dir to still BE the
+  // canonical jail-contained path it was derived as (the parent chain starts at
+  // the realpathed scan root, so `realpath(dir) === dir` implies both identity and
+  // containment), reads via that canonical path, and re-verifies after the read —
+  // a mismatch discards that subtree only. Symlinked dirs are never followed:
+  // Dirent.isDirectory() is false for symlinks — keep it that way.
   function scan(dir, depth) {
     if (depth > 3 || results.length >= MAX_FILES) return;
+    let canon;
+    try { canon = realpathSync(dir); } catch { return; }
+    if (canon !== dir) return; // a component was swapped since the parent read
+    if (canon !== root && !canon.startsWith(root + "/")) return;
     let entries;
-    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    try { entries = readdirSync(canon, { withFileTypes: true }); } catch { return; }
+    // recheck: discard the subtree if the dir was swapped during the read.
+    try { if (realpathSync(dir) !== canon) return; } catch { return; }
     for (const entry of entries) {
       if (results.length >= MAX_FILES) break;
       if (IGNORE.test(entry.name)) continue;
-      const fullPath = join(dir, entry.name);
-      if (entry.isDirectory()) {
+      const fullPath = join(canon, entry.name); // canonical child path
+      if (entry.isDirectory()) { // false for symlinks — never descends a symlinked dir
         scan(fullPath, depth + 1);
       } else if (PATTERNS.test(entry.name)) {
-        const relPath = fullPath.slice(resolve(cwd).length + 1);
+        const relPath = fullPath.slice(cwd.length + 1);
         results.push({ path: relPath, name: entry.name });
       }
     }
   }
 
-  scan(resolve(cwd), 0);
+  scan(cwd, 0);
 
   const scored = results.map(f => {
     let score = 0;
@@ -1028,16 +1187,40 @@ app.get("/api/files/suggest", (req, res) => {
 
   const filtered = scored.filter(f => f.score > -15);
   filtered.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
-  res.json(filtered);
+  // `base` = the resolved scan root the server ACTUALLY used (realpathed, possibly
+  // clamped). Clients must join/de-dupe result paths against it — guessing from the
+  // lexical session.cwd disagrees with it for symlinked or clamped cwds.
+  res.json({ base: cwd, files: filtered });
 });
 
+// Directory listing for the add-artifact popover and dir-artifact groups. The jail
+// is the WORKSPACE root (server-owned — the client never supplies a base dir), and
+// containment is checked on CANONICAL paths (realpathSync of both sides) so a
+// symlink inside the workspace pointing outside can't escape it — a textual
+// startsWith on the raw path could. The client sends agentId + a workspace-relative
+// `path`; omitting `path` entirely means "the agent's start dir" (resolveAgentCwd),
+// whose workspace-relative prefix comes back as `rel` so the breadcrumb can show
+// where browsing started. ".." navigation works up to the root, never above.
+// `hidden=1` adds dotfiles; the bulky-dir IGNORE list (which includes .git and
+// .hadron — always hidden) applies in BOTH modes.
 app.get("/api/files/browse", (req, res) => {
-  const relPath = req.query.path || "";
-  const baseCwd = resolveFilePath(req.query.cwd) || WORKSPACE;
-  const target = relPath ? resolve(baseCwd, relPath) : resolve(baseCwd);
   const IGNORE = /^(node_modules|\.git|__pycache__|\.venv|\.env|\.hadron|\.cache|\.next|dist|build|\.tox)$/;
+  const showHidden = req.query.hidden === "1";
 
-  if (!target.startsWith(resolve(baseCwd))) return res.status(403).json({ error: "path outside workspace" });
+  let root;
+  try { root = realpathSync(WORKSPACE); } catch { return res.status(500).json({ error: "workspace root unavailable" }); }
+
+  let target;
+  if (req.query.path === undefined) {
+    const agent = req.query.agentId && isValidId(req.query.agentId) ? sessions.get(req.query.agentId) : null;
+    target = resolveAgentCwd(agent); // falls back to WORKSPACE
+  } else {
+    target = resolve(root, String(req.query.path));
+  }
+  try { target = realpathSync(target); } catch { return res.status(404).json({ error: "directory not found" }); }
+  if (target !== root && !target.startsWith(root + "/")) {
+    return res.status(403).json({ error: "path outside workspace" });
+  }
 
   let entries;
   try { entries = readdirSync(target, { withFileTypes: true }); } catch { return res.status(404).json({ error: "directory not found" }); }
@@ -1045,13 +1228,41 @@ app.get("/api/files/browse", (req, res) => {
   const dirs = [];
   const files = [];
   for (const entry of entries) {
-    if (IGNORE.test(entry.name) || entry.name.startsWith(".")) continue;
-    if (entry.isDirectory()) dirs.push({ name: entry.name, type: "dir" });
-    else files.push({ name: entry.name, type: "file" });
+    if (IGNORE.test(entry.name)) continue;
+    if (!showHidden && entry.name.startsWith(".")) continue;
+    if (entry.isDirectory()) {
+      // Non-recursive child count: dir-artifact groups show subdirs as inert rows
+      // with a count instead of recursing (v1). The count read gets its OWN
+      // check → read → recheck: the child can be swapped for an external symlink
+      // after the Dirent snapshot, and rechecking only `target` wouldn't catch it —
+      // the count would leak an outside dir's entry count. Any escape, swap or
+      // ENOENT just omits the count (null); one racy child never fails the listing.
+      let count = null;
+      try {
+        const childPath = join(target, entry.name);
+        const canon = realpathSync(childPath);
+        if (canon === root || canon.startsWith(root + "/")) {
+          const n = readdirSync(canon).length;
+          if (realpathSync(childPath) === canon) count = n;
+        }
+      } catch {}
+      dirs.push({ name: entry.name, type: "dir", count });
+    } else {
+      files.push({ name: entry.name, type: "file" });
+    }
   }
+  // Jail contract: check → read → recheck. `target` was canonical and contained
+  // before the reads, but a path component can be swapped for a symlink between the
+  // containment check and the readdir calls (realpath-to-use race). Re-canonicalize
+  // after ALL reads and discard the listing unless the path still resolves to the
+  // same jailed target. (Portable revalidate-around-use — no /proc fd tricks.)
+  try {
+    if (realpathSync(target) !== target) return res.status(403).json({ error: "path outside workspace" });
+  } catch { return res.status(404).json({ error: "directory not found" }); }
+
   dirs.sort((a, b) => a.name.localeCompare(b.name));
   files.sort((a, b) => a.name.localeCompare(b.name));
-  res.json([...dirs, ...files]);
+  res.json({ entries: [...dirs, ...files], rel: target === root ? "" : target.slice(root.length + 1) });
 });
 
 // ═══ TERMINAL PATH RESOLUTION ═══

@@ -42,6 +42,7 @@ let notifyLevel = "all"; // "all" (sound+banner+flash), "banner" (banner+flash),
 let titleFlashInterval = null;
 let pendingAlerts = new Set();
 let wsName = "Hadron";
+let wsRoot = ""; // workspace root dir (absolute) — canonical base for artifact path identity
 
 // ═══ UI STATE PERSISTENCE ═══ — extracted to ui-sync.js (loaded before this file).
 // broadcastUIState/saveUIState/restoreUIState + the BroadcastChannel live there;
@@ -77,6 +78,7 @@ async function fetchWorkspace() {
     const el = document.querySelector(".proj-name");
     const displayName = config.cwd ? config.cwd.replace(/^\/home\/[^/]+/, "~") : (config.name || "workspace");
     if (el) el.textContent = displayName;
+    wsRoot = config.cwd || "";
     wsName = config.name || "Hadron";
     document.title = `${wsName} — Hadron`;
     if (config.groups) workspaceGroups = config.groups;
@@ -267,7 +269,13 @@ function renderWorkHeader() {
         if (fname) iconHtml = `<span class="wh-tab-i">${fileIcon(fname, 14)}</span>`;
       }
       const hasDraft = tab.type !== "url" && tab.value && typeof hasDirtyDraft === "function" && hasDirtyDraft(tab.value) ? " wh-tab-hasdraft" : "";
-      tabsHtml += `<div class="wh-tab wh-tab-art${isActive}${hasDraft}" data-tab="${tab.id}" data-art-type="${esc(tab.type || 'file')}" data-art-value="${esc(tab.value || '')}" title="${esc(tab.label)}">${iconHtml}<span class="wh-tab-label">${esc(tab.label)}</span><span class="wh-tab-x" data-close-tab="${tab.id}">×</span></div>`;
+      // wh-tab-art (and the artifact context menu / data-art-* attrs it keys) is
+      // for `artifact:` tabs ONLY — shell/notes/file: tabs are not artifacts and
+      // must not expose artifact actions for values outside the artifacts array.
+      const isArtifact = tab.id.startsWith("artifact:");
+      const artCls = isArtifact ? " wh-tab-art" : "";
+      const artData = isArtifact ? ` data-art-type="${esc(tab.type || 'file')}" data-art-value="${esc(tab.value || '')}"` : "";
+      tabsHtml += `<div class="wh-tab${artCls}${isActive}${hasDraft}" data-tab="${tab.id}"${artData} title="${esc(tab.label)}">${iconHtml}<span class="wh-tab-label">${esc(tab.label)}</span><span class="wh-tab-x" data-close-tab="${tab.id}">×</span></div>`;
     });
   }
 
@@ -465,7 +473,7 @@ function renderWorkContent() {
     } else if (activeTab === "notes") {
       notesContainer.classList.add("active");
       loadNotes();
-    } else if (activeTab.startsWith("artifact:")) {
+    } else if (activeTab.startsWith("artifact:") || activeTab.startsWith("file:")) {
       showArtifactInContainer(artContainer, s, activeTab);
     } else if (activeTab.startsWith("shell:")) {
       const key = `${activeSessionId}:${activeTab}`;
@@ -642,10 +650,31 @@ function getOpenTabs(session) {
   artifacts.forEach((a, i) => {
     const tabId = `artifact:${i}`;
     if (open.has(tabId) || activeTab === tabId) {
-      const label = a.label || (a.type === "url" ? new URL(a.value).hostname : a.value.split("/").pop());
+      let label = a.label;
+      if (!label) {
+        if (a.type === "url") {
+          // Guard new URL(): one legacy bad value must not break every render.
+          try { label = new URL(a.value).hostname; } catch { label = a.value; }
+        } else {
+          label = (a.value || "").split("/").pop();
+        }
+      }
       tabs.push({ id: tabId, label, type: a.type, value: a.value });
     }
   });
+
+  // Ephemeral file tabs (`file:<abs path>`): viewing a dir-artifact child without
+  // creating an artifact. Label = basename; renders via the same file pipeline.
+  const fileTab = (tabId) => {
+    const p = tabId.slice(5);
+    return { id: tabId, label: p.split("/").pop() || p, type: "file", value: p };
+  };
+  for (const tabId of open) {
+    if (tabId.startsWith("file:")) tabs.push(fileTab(tabId));
+  }
+  if (activeTab && activeTab.startsWith("file:") && !open.has(activeTab)) {
+    tabs.push(fileTab(activeTab));
+  }
 
   return tabs;
 }
@@ -660,7 +689,7 @@ function closeTab(tabId) {
     closeShellTab(tabId);
     return;
   }
-  if (tabId.startsWith("artifact:")) {
+  if (tabId.startsWith("artifact:") || tabId.startsWith("file:")) {
     const session = sessions.find(s => s.id === activeSessionId);
     if (session) stopArtifactServer(session, tabId);
   }
@@ -1086,6 +1115,14 @@ function renderRightPanel() {
   el.querySelectorAll(".af-group-hdr").forEach((hdr) => {
     hdr.addEventListener("click", () => {
       const group = hdr.parentElement;
+      // Dir artifact group: toggle goes through the dir-artifact state (default
+      // from the artifact's `open` flag) and re-renders — expanding is what starts
+      // the child fetch. The × inside the header stops propagation before this.
+      const dirArt = group.dataset.afDirart;
+      if (dirArt !== undefined) {
+        toggleDirArtifact(activeSession.id, dirArt);
+        return;
+      }
       const isOpen = group.classList.toggle("open");
       const dirIcon = hdr.querySelector(".af-dir-icon");
       if (dirIcon) dirIcon.innerHTML = folderIcon(isOpen, 15);
@@ -1096,6 +1133,11 @@ function renderRightPanel() {
         if (isOpen) set.delete(dir); else set.add(dir);
       }
     });
+  });
+
+  // Ephemeral children of a dir artifact: open as a `file:` tab, never an artifact.
+  el.querySelectorAll(".af[data-file-path]").forEach((row) => {
+    row.addEventListener("click", () => switchTab(`file:${row.dataset.filePath}`));
   });
 
   const addBtn = document.getElementById("af-add-btn");
@@ -1182,10 +1224,72 @@ function buildArtifactsSection(activeSession) {
   let html = `<div class="rp-hdr">Artifacts</div>`;
   const artifacts = activeSession.artifacts || [];
 
-  // Group artifacts by directory
+  // ── Dir artifacts (type "dir"): live folder groups ──
+  // Collapsed by default (artifact `open: true` flips the default; the user's toggle
+  // persists in collapsedArtFolders). When EXPANDED, children come from the browse
+  // API on the deck cadence (dirArtChildren in artifacts.js caches + refreshes);
+  // collapsed groups cost zero fetches. A file artifact directly under an expanded
+  // dir renders once — inside the group — so it's claimed away from the classic
+  // display-grouping below.
+  const claimed = new Set(); // artifact indexes rendered inside an expanded dir group
+  artifacts.forEach((a, idx) => {
+    if (a.type !== "dir") return;
+    const dirPath = a.value || "";
+    const open = dirArtIsOpen(activeSession.id, a);
+    const dirName = a.label || dirPath.split("/").pop() || dirPath;
+    // File artifacts living directly under this dir (non-recursive).
+    const inside = [];
+    artifacts.forEach((fa, fi) => {
+      if (fa.type !== "file" || !fa.value) return;
+      const li = fa.value.lastIndexOf("/");
+      if (li > 0 && fa.value.slice(0, li) === dirPath) inside.push({ art: fa, idx: fi, filename: fa.value.slice(li + 1) });
+    });
+
+    let bodyHtml = "";
+    let badge = "";
+    if (open) {
+      inside.forEach(({ idx: fi }) => claimed.add(fi));
+      const entry = dirArtChildren(activeSession.id, dirPath);
+      if (entry.entries) {
+        const fileCount = entry.entries.filter((c) => c.type === "file").length;
+        badge = `<span class="af-count">${fileCount}</span>`;
+        const artByPath = new Map(inside.map((x) => [x.filename, x]));
+        entry.entries.forEach((child) => {
+          if (child.type === "dir") {
+            // v1: subdirs are inert rows with a count — no recursion.
+            bodyHtml += `<div class="af af-dir-sub"><span class="af-i">${folderIcon(false, 15)}</span><span class="af-label">${esc(child.name)}</span><span class="af-count">${child.count ?? ""}</span></div>`;
+            return;
+          }
+          const hit = artByPath.get(child.name);
+          if (hit) {
+            // Also an individual artifact → render as the artifact row (once).
+            bodyHtml += `<div class="af" data-art-idx="${hit.idx}"><span class="af-i">${fileIcon(child.name, 15)}</span><span class="af-label">${esc(hit.art.label || child.name)}</span><span class="af-rm" data-art-rm="${hit.idx}" title="Remove">×</span></div>`;
+          } else {
+            // Plain child file → ephemeral `file:` tab on click, no artifact created.
+            bodyHtml += `<div class="af af-file-eph" data-file-path="${esc(dirPath + "/" + child.name)}"><span class="af-i">${fileIcon(child.name, 15)}</span><span class="af-label">${esc(child.name)}</span></div>`;
+          }
+        });
+        if (!entry.entries.length) bodyHtml += `<div class="af-dir-empty">empty</div>`;
+      } else {
+        // Listing not here yet (first fetch in flight, or failed) — still show the
+        // file artifacts we already know live in this dir, plus a status line.
+        inside.forEach(({ art: fa, idx: fi, filename }) => {
+          bodyHtml += `<div class="af" data-art-idx="${fi}"><span class="af-i">${fileIcon(filename, 15)}</span><span class="af-label">${esc(fa.label || filename)}</span><span class="af-rm" data-art-rm="${fi}" title="Remove">×</span></div>`;
+        });
+        bodyHtml += `<div class="af-dir-empty">${entry.error ? "could not list folder" : "loading…"}</div>`;
+      }
+    }
+
+    html += `<div class="af-group af-dirart${open ? " open" : ""}" data-af-dirart="${esc(dirPath)}">`;
+    html += `<div class="af-group-hdr"><span class="af-arrow">&#9654;</span><span class="af-dir-icon">${folderIcon(open, 15)}</span> <span class="af-label">${esc(dirName)}</span>${badge}<span class="af-rm" data-art-rm="${idx}" title="Remove folder (files untouched)">×</span></div>`;
+    html += `<div class="af-group-body">${bodyHtml}</div></div>`;
+  });
+
+  // ── Classic display-grouping of individually added files ──
   const groups = new Map(); // dir -> [{art, idx}]
   const topLevel = []; // artifacts with no dir or single segment
   artifacts.forEach((a, i) => {
+    if (a.type === "dir" || claimed.has(i)) return;
     if (a.type === "url") { topLevel.push({ art: a, idx: i }); return; }
     const parts = (a.value || "").split("/");
     if (parts.length <= 1) { topLevel.push({ art: a, idx: i }); return; }
@@ -1220,11 +1324,12 @@ function buildArtifactsSection(activeSession) {
     const icon = art.type === "url"
       ? `<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.5" stroke="#58a6ff" stroke-width="1"/><ellipse cx="8" cy="8" rx="3" ry="6.5" stroke="#58a6ff" stroke-width="0.8"/><line x1="1.5" y1="8" x2="14.5" y2="8" stroke="#58a6ff" stroke-width="0.8"/></svg>`
       : fileIcon(name, 15);
-    const label = art.type === "url" ? (art.label || art.value) : esc(art.label || name);
+    // esc() BOTH branches — url labels/values are user/agent input like any other.
+    const label = art.type === "url" ? esc(art.label || art.value) : esc(art.label || name);
     html += `<div class="af" data-art-idx="${idx}"><span class="af-i">${icon}</span><span class="af-label">${label}</span><span class="af-rm" data-art-rm="${idx}" title="Remove">×</span></div>`;
   });
 
-  html += `<div class="af-add" id="af-add-btn">+ add artifact</div>`;
+  html += `<div class="af-add" id="af-add-btn" tabindex="0">+ add artifact</div>`;
 
 
   // Related agents section
@@ -1252,7 +1357,7 @@ function buildArtifactsSection(activeSession) {
       html += `</div>`;
     }
   });
-  html += `<div class="af-add" id="ra-add-btn">+ add related agent</div>`;
+  html += `<div class="af-add" id="ra-add-btn" tabindex="0">+ add related agent</div>`;
 
   return html;
 }
@@ -1426,9 +1531,8 @@ function showAddPopover(e, group) {
     input.addEventListener("keydown", handleKey);
   }
 
-  setTimeout(() => {
-    document.addEventListener("click", onClickOutsidePopover);
-  }, 0);
+  clampPopover(pop, rect);
+  armPopoverDismiss(btn);
 }
 
 async function createEmptyGroup(groupName) {
@@ -1449,15 +1553,81 @@ async function deleteGroup(groupName) {
   render();
 }
 
-function onClickOutsidePopover(e) {
+// ═══ POPOVER DISMISS MODEL ═══
+// One capture-phase pointerdown listener decides "outside". At pointerdown time the
+// pressed node is still attached to the DOM, so a row handler that rebuilds the list
+// via innerHTML (Browse dir descend) can no longer detach the target before the
+// outside check runs — the old bubble-phase "click" listener saw a detached node,
+// pop.contains() said false, and the popover closed on every folder click. The close
+// decision is made from where the gesture STARTED. Escape closes from any focused
+// child; dismissal restores focus to the trigger that opened the popover.
+let popoverTrigger = null; // element that opened the current popover (focus restore + reclamp anchor)
+
+function onPopoverPointerDown(e) {
   const pop = document.getElementById("add-popover");
   if (pop && !pop.contains(e.target)) hideAddPopover();
+}
+
+function onPopoverKeydown(e) {
+  if (e.key === "Escape" && document.getElementById("add-popover")) {
+    e.stopPropagation();
+    hideAddPopover();
+  }
+}
+
+function onPopoverResize() {
+  const pop = document.getElementById("add-popover");
+  if (pop && popoverTrigger?.isConnected) clampPopover(pop, popoverTrigger.getBoundingClientRect());
+}
+
+// Every popover that used the old onClickOutsidePopover wiring arms this instead.
+let popoverResizeObserver = null;
+function armPopoverDismiss(trigger) {
+  popoverTrigger = trigger && trigger.getBoundingClientRect ? trigger : null;
+  document.addEventListener("pointerdown", onPopoverPointerDown, true);
+  document.addEventListener("keydown", onPopoverKeydown, true);
+  window.addEventListener("resize", onPopoverResize);
+  // The popover grows when async content lands (Suggested scan, Browse listing) —
+  // re-clamp on its own size changes, not just window resizes.
+  const pop = document.getElementById("add-popover");
+  if (pop && typeof ResizeObserver !== "undefined") {
+    popoverResizeObserver = new ResizeObserver(() => onPopoverResize());
+    popoverResizeObserver.observe(pop);
+  }
+}
+
+// Keep the popover fully on-screen: clamp to the viewport with an 8px margin, flip
+// above the trigger when there's no room below. Re-run on window resize.
+function clampPopover(pop, rect) {
+  const margin = 8;
+  const pw = pop.offsetWidth, ph = pop.offsetHeight;
+  let left = parseFloat(pop.style.left);
+  if (isNaN(left)) left = rect.left;
+  left = Math.max(margin, Math.min(left, window.innerWidth - pw - margin));
+  let top = rect.bottom + 4;
+  if (top + ph + margin > window.innerHeight && rect.top - ph - 4 >= margin) {
+    top = rect.top - ph - 4; // flip above the trigger
+  }
+  top = Math.max(margin, Math.min(top, window.innerHeight - ph - margin));
+  pop.style.left = left + "px";
+  pop.style.top = top + "px";
 }
 
 function hideAddPopover() {
   const pop = document.getElementById("add-popover");
   if (pop) pop.remove();
-  document.removeEventListener("click", onClickOutsidePopover);
+  document.removeEventListener("pointerdown", onPopoverPointerDown, true);
+  document.removeEventListener("keydown", onPopoverKeydown, true);
+  window.removeEventListener("resize", onPopoverResize);
+  if (popoverResizeObserver) { popoverResizeObserver.disconnect(); popoverResizeObserver = null; }
+  if (pop) {
+    // Restore focus to the trigger; the 3s panel refresh may have replaced the
+    // node, so fall back to its id (e.g. #af-add-btn is re-created each render).
+    let t = popoverTrigger;
+    if (t && !t.isConnected && t.id) t = document.getElementById(t.id);
+    if (t && t.isConnected) { try { t.focus(); } catch {} }
+  }
+  popoverTrigger = null;
 }
 
 async function createAgent(name, group) {
@@ -1505,7 +1675,8 @@ function showRelatedAgentPopover(e) {
     document.body.appendChild(pop);
     pop.style.left = Math.max(8, rect.left - 80) + "px";
     pop.style.top = (rect.bottom + 4) + "px";
-    setTimeout(() => { document.addEventListener("click", onClickOutsidePopover); }, 0);
+    clampPopover(pop, rect);
+    armPopoverDismiss(btn);
     return;
   }
 
@@ -1527,7 +1698,8 @@ function showRelatedAgentPopover(e) {
     });
   });
 
-  setTimeout(() => { document.addEventListener("click", onClickOutsidePopover); }, 0);
+  clampPopover(pop, rect);
+  armPopoverDismiss(btn);
 }
 
 async function addRelatedAgent(agentId) {
