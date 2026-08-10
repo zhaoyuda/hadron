@@ -166,7 +166,10 @@ async function main() {
     const outside = mkdtempSync(join(tmpdir(), "hadron-outside-"));
     writeFileSync(join(outside, "ext.md"), "# ext");
     r = await fetch(`${BASE}/api/sessions/arty/artifacts`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ type: "file", value: join(outside, "ext.md") }) });
-    ok(agentJson("arty").artifacts.some((a) => a.value === join(outside, "ext.md")), "absolute path outside the workspace stored absolute");
+    // realpath the expectation: on macOS tmpdir() is /var/... but the server
+    // canonicalizes to /private/var/... (Linux /tmp is not a symlink, so only
+    // macOS exposed the mismatch).
+    ok(agentJson("arty").artifacts.some((a) => a.value === join(realpathSync(outside), "ext.md")), "absolute path outside the workspace stored absolute (canonical)");
     // Same file added in two forms de-dupes to one entry.
     const before = agentJson("arty").artifacts.length;
     r = await fetch(`${BASE}/api/sessions/arty/artifacts`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ type: "file", value: "sub/a.md" }) });

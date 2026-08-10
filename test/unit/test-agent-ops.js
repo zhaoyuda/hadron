@@ -14,7 +14,7 @@
  * Requires: tmux on PATH.
  */
 import { spawn, execFileSync } from "child_process";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync, symlinkSync } from "fs";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync, symlinkSync, mkdirSync } from "fs";
 import { tmpdir } from "os";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -291,6 +291,34 @@ async function main() {
     const back = hadron(["restore", "Bulk One", "Bulk Two"]);
     ok((back.match(/restored /g) || []).length === 2, "bulk restore brings both back");
     ok((await liveList()).filter((s) => [G, H].includes(s.id)).length === 2, "both live again");
+  }
+
+  console.log("\n[CLI: kernels show/set — merge semantics + env validation]");
+  {
+    ok(hadron(["kernels", "show"]).includes("no kernels configured"), "empty config → 'no kernels configured'");
+    const mkEnv = (name) => {
+      const env = join(WS, name);
+      mkdirSync(join(env, "bin"), { recursive: true });
+      writeFileSync(join(env, "bin", "python3"), "");
+      return env;
+    };
+    const env1 = mkEnv("venv1"), env2 = mkEnv("venv2");
+    hadron(["kernels", "set", "--marimo", env1]);
+    ok(JSON.parse(hadron(["kernels", "show", "--json"])).marimo === env1, "set --marimo persists");
+    hadron(["kernels", "set", "--jupyter", env2]);
+    const k = JSON.parse(hadron(["kernels", "show", "--json"]));
+    ok(k.marimo === env1 && k.jupyter === env2, "setting jupyter KEEPS marimo (merge — PUT alone would drop it)");
+    const bad = hadronFails(["kernels", "set", "--marimo", join(WS, "not-a-venv")]);
+    ok(bad !== null && /bin\/python3/.test(bad.stderr), "path without bin/python3 rejected before any request");
+    ok(JSON.parse(hadron(["kernels", "show", "--json"])).marimo === env1, "rejected set left config untouched");
+
+    // PATCH is the atomic-merge primitive the CLI rides on: a partial body must
+    // merge server-side (PUT would replace and drop marimo).
+    const rP = await req("PATCH", "/api/kernels", { jupyter: env1 });
+    const merged = await rP.json();
+    ok(rP.status === 200 && merged.marimo === env1 && merged.jupyter === env1, "PATCH /api/kernels merges partial bodies atomically");
+    const rPut = await req("PUT", "/api/kernels", { marimo: env1 });
+    ok((await rPut.json()).jupyter === undefined, "PUT still replaces wholesale (back-compat contract intact)");
   }
 
   console.log("\n[/api/file cannot write .hadron internals (launcher-definition boundary)]");

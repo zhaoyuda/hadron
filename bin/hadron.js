@@ -373,6 +373,37 @@ async function main() {
       die("usage: hadron artifacts <ls|add>");
       break;
     }
+    case "kernels": {
+      const sub = positional[0] || "show";
+      if (sub === "show") {
+        const k = await api("GET", "/api/kernels");
+        if (flags.json) { console.log(JSON.stringify(k, null, 2)); break; }
+        const entries = Object.entries(k);
+        if (!entries.length) { console.log("no kernels configured"); break; }
+        for (const [rt, p] of entries) console.log(`${rt}: ${p}`);
+        break;
+      }
+      if (sub === "set") {
+        const updates = {};
+        for (const rt of ["marimo", "jupyter"]) {
+          if (flags[rt] === undefined) continue;
+          if (typeof flags[rt] !== "string") die(`--${rt} needs a path`);
+          const p = flags[rt].replace(/^~/, process.env.HOME || "");
+          // Validate HERE: a path without bin/python3 makes the server resolve
+          // the kernel to null and silently fall back to .venv/ — hard to debug.
+          if (!existsSync(join(p, "bin", "python3"))) die(`${p} has no bin/python3 — not a usable environment`);
+          updates[rt] = p;
+        }
+        if (!Object.keys(updates).length) die("usage: hadron kernels set [--marimo PATH] [--jupyter PATH]");
+        // PATCH sends ONLY the updates; the server merges atomically. A client-side
+        // GET→merge→PUT would lose a concurrent caller's runtime.
+        const saved = await api("PATCH", "/api/kernels", updates);
+        for (const [rt, p] of Object.entries(saved)) console.log(`${rt}: ${p}`);
+        break;
+      }
+      die("usage: hadron kernels [show [--json] | set [--marimo PATH] [--jupyter PATH]]");
+      break;
+    }
     case "notes": {
       const sub = positional[0] || "show";
       const me = await whoami();
@@ -435,6 +466,9 @@ Commands:
   hadron artifacts add [--auto | <path...>]  attach files to the current agent
   hadron artifacts ls                      list the current agent's artifacts
   hadron notes [show|set "..."|append "..."]
+  hadron kernels [show [--json]]           show notebook kernel envs (marimo/jupyter)
+  hadron kernels set --marimo PATH         set a kernel env (merges — the other runtime is
+       [--jupyter PATH]                    kept; path must contain bin/python3)
   hadron annotations ls [--json]           list pending review comments for the current agent
   hadron annotations resolve <id>          mark a review comment done
   hadron skills install                    symlink operation skills into ~/.claude/skills/ (additive)

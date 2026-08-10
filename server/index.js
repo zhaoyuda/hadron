@@ -1385,6 +1385,18 @@ app.put("/api/kernels", (req, res) => {
   res.json(config.kernels);
 });
 
+// PATCH = atomic partial update. A client-side GET→merge→PUT loses updates when
+// two callers race (each PUTs its own stale snapshot); merging HERE — inside one
+// synchronous handler on node's single thread — cannot interleave.
+app.patch("/api/kernels", (req, res) => {
+  const configPath = join(getWorkspaceDir(), ".hadron", "config.json");
+  let config;
+  try { config = JSON.parse(readFileSync(configPath, "utf-8")); } catch { config = { name: "workspace" }; }
+  config.kernels = { ...(config.kernels || {}), ...req.body };
+  writeFileSync(configPath, JSON.stringify(config, null, 2));
+  res.json(config.kernels);
+});
+
 function resolveKernelEnv(runtime) {
   const kernels = getKernelConfig();
   const envPath = kernels[runtime];

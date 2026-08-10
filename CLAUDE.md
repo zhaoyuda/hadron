@@ -101,7 +101,9 @@ npm test
 #                            incl. symlink escapes, DELETE 409, store-level lock FIFO barrier)
 #   + test-agent-ops.js     (agent ops: pinned strict-boolean PATCH + absent-unless-true persistence,
 #                            archive/restore lifecycle over HTTP, CLI pin/unpin/close/restore/ls --archived
-#                            with name→id resolution — ambiguous names exit 1 with candidates)
+#                            with name→id resolution — ambiguous names exit 1 with candidates; custom
+#                            launchers incl. argv quoting; Bearer alias; bulk close; kernels CLI with
+#                            atomic PATCH merge; /api/file .hadron write jail; restart persistence)
 #   + test-terminal-ws.js   (terminal pty lifecycle — the macOS ptmx-exhaustion class: normal close
 #                            releases the master fd (kill+destroy), ws heartbeat reaps half-open
 #                            connections' ptys, /api/health livePtys count, no fd accumulation)
