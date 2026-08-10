@@ -15,6 +15,11 @@ This file controls the workspace name, group ordering, group-level attributes, a
   },
   "kernels": {
     "marimo": "/home/user/work/.venv"
+  },
+  "launchCommand": "claude",
+  "launchers": {
+    "cc-kimi": { "argv": ["cc-kimi"], "kind": "claude" },
+    "aider": { "argv": ["aider", "--no-auto-commits"] }
   }
 }
 ```
@@ -25,6 +30,25 @@ This file controls the workspace name, group ordering, group-level attributes, a
 | `groups` | string[] | Ordered list of group names. Controls left-to-right display order in the deck. |
 | `groupConfig` | object | Per-group attribute overrides (see below) |
 | `kernels` | object | Python environment paths for notebook runtimes (see [Kernel Config](#kernel-config)) |
+| `launchCommand` | string | Default launcher name for new agents (builtin or from `launchers`). Default `claude`. |
+| `launchers` | object | Custom launcher definitions (see below) |
+
+**Custom launchers** (`launchers.<name>`): registers extra `launchCommand` names
+beyond the builtins (`claude`, `codex`, `shell`) — e.g. a wrapper script that
+starts Claude Code against a different model provider. The API and CLI only ever
+accept a launcher *name*; the command itself lives in this file, so defining one
+requires filesystem access to the workspace (an agent cannot inject a command
+through the API).
+
+| Attribute | Required | Description |
+|---|---|---|
+| `argv` | yes | Command as an argv array of non-empty strings, e.g. `["cc-kimi"]` or `["aider", "--no-auto-commits"]`. Typed into the agent's tmux pane on autostart. |
+| `kind` | no | Set to `"claude"` when the command is Claude Code underneath (a wrapper like `cc-kimi`): it then gets the claude-specific autostart treatment (`--session-id` injection for auto-resume). Omit for anything else. |
+
+Launcher names must match `[a-zA-Z0-9][a-zA-Z0-9._-]{0,31}`; invalid names or
+malformed `argv` entries are ignored. A custom launcher may override a builtin
+name (e.g. redefine `claude` to add flags). Config is re-read on every spawn —
+no server restart needed after editing.
 
 **Group attributes** (set inside `groupConfig.<GroupName>`):
 

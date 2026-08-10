@@ -167,6 +167,19 @@ async function main() {
     clearPrompt(A);
   }
 
+  console.log("\n[endpoint is attribution-agnostic]");
+  {
+    // Sender attribution is composed CLIENT-side by `hadron message` (agent-ops
+    // spec M2) — the route itself must deliver text VERBATIM, never prefix it.
+    const r = await POST(`/api/sessions/${A}/message`, { text: "verbatim-attr-probe", enter: false });
+    ok(r.status === 200, "plain POST → 200");
+    await sleep(400);
+    const pane = capturePane(A);
+    ok(pane.includes("verbatim-attr-probe"), "text arrived verbatim");
+    ok(!pane.includes("[hadron message from"), "no attribution prefix added by the server");
+    clearPrompt(A);
+  }
+
   console.log("\n[no leaks]");
   {
     ok(!listBuffers().includes("hadron-msg-"), "no hadron-msg-* tmux buffers left behind (-d reclaimed them)");

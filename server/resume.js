@@ -25,7 +25,7 @@ import { readdirSync, statSync, openSync, readSync, closeSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { randomUUID } from "crypto";
-import { tmuxSafe } from "./tmux.js";
+import { tmuxSafe, shellQuoteArgv } from "./tmux.js";
 
 const UUID_RE = /^[0-9a-fA-F][0-9a-fA-F-]{7,63}$/; // strict enough to be shell-inert
 export const RESUME_TTL_MS = 7 * 24 * 3600 * 1000;
@@ -217,7 +217,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // deliver: (tmuxName, text, enter) => void — the server's bracketed-paste
 // message path, injected so this module stays free of buffer bookkeeping.
-export async function performResume(session, tmuxName, { deliver, save, generation = BOOT_GENERATION, log = console.log }) {
+export async function performResume(session, tmuxName, { deliver, save, generation = BOOT_GENERATION, log = console.log, launchArgv = ["claude"] }) {
   const rt = session.runtime;
   const decision = decideResume(rt, { generation });
   if (!decision.resume) return decision;
@@ -227,7 +227,11 @@ export async function performResume(session, tmuxName, { deliver, save, generati
   log(`[resume] ${session.id}: resuming session ${decision.sessionId}`);
 
   await sleep(1500); // fresh pane: let the shell finish initializing
-  deliver(tmuxName, `claude --resume ${decision.sessionId}`, true);
+  // launchArgv: the agent's claude-kind launcher (a cc-* wrapper resumes through
+  // the same wrapper, not bare claude — the provider config lives in it).
+  // shellQuoteArgv: the line is re-parsed by the pane's shell, so argv boundaries
+  // must be quoted through it. sessionId is UUID-validated by decideResume.
+  deliver(tmuxName, `${shellQuoteArgv(launchArgv)} --resume ${decision.sessionId}`, true);
 
   // Wait for the TUI to own the pane before declaring ready (and before any
   // resumeCommand — pasting into a bash prompt would be shell execution).

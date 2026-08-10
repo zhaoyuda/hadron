@@ -159,6 +159,8 @@ html, body {
 .deck-group-label[data-status="working"] { color: var(--blue); }
 .deck-group-label[data-status="idle"] { color: var(--text3); }
 .deck-group-status .deck-group-label { cursor: default; }
+/* Pinned section: display-only header (no rename/drop affordances). */
+.deck-group-pinned .deck-group-label { cursor: default; color: var(--yellow, #d29922); }
 .deck-group-edit {
   font-size: 10px;
   font-weight: 600;
@@ -263,6 +265,11 @@ html, body {
   font-weight: 600;
   color: var(--white);
   white-space: nowrap;
+}
+.dk .dk-pin {
+  font-size: 9px;
+  margin-left: 4px;
+  vertical-align: 1px;
 }
 .dk .dk-sub {
   font-size: 10px;

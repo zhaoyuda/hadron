@@ -10,7 +10,7 @@
  *
  * Run: node test/unit/test-resume.js
  */
-import { decideResume, scrapeSessionId, validateSessionFile, claudeProjectDir, RuntimeTracker } from "../../server/resume.js";
+import { decideResume, scrapeSessionId, validateSessionFile, claudeProjectDir, RuntimeTracker, performResume } from "../../server/resume.js";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -105,6 +105,26 @@ console.log("\n[RuntimeTracker — shared-cwd scrape guard]");
   const trX = new RuntimeTracker({ id: "b", cwd }, { save: () => {} });
   ok(typeof trX.cwdShared === "function" && trX.cwdShared() === false, "cwdShared defaults to exclusive when not provided");
   rmSync(root, { recursive: true, force: true });
+}
+
+console.log("\n[performResume — resumes through the agent's launcher argv]");
+{
+  // deliver mock throws after recording: aborts before the 60s TUI poll loop,
+  // which is not under test here.
+  const run = async (launchArgv) => {
+    const sess = { id: "x", runtime: { ...base, lastObservedAt: new Date(Date.now() - 60_000).toISOString() } };
+    const calls = [];
+    await performResume(sess, "tmux-x", {
+      deliver: (t, text) => { calls.push(text); throw new Error("abort-after-deliver"); },
+      save: () => {}, generation: "boot-pr-test", log: () => {},
+      ...(launchArgv ? { launchArgv } : {}),
+    }).catch(() => {});
+    return calls;
+  };
+  ok((await run(["cc-kimi"]))[0] === `cc-kimi --resume ${SID}`, "claude-kind wrapper argv resumes through the wrapper, not bare claude");
+  ok((await run(null))[0] === `claude --resume ${SID}`, "default launchArgv stays bare claude");
+  ok((await run(["cc-kimi", "--profile", "two words"]))[0] === `cc-kimi --profile 'two words' --resume ${SID}`,
+    "argv boundaries survive resume (spaced element single-quoted)");
 }
 
 console.log(`\n${failed === 0 ? "PASS" : "FAIL"}: ${passed} passed, ${failed} failed`);

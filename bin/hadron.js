@@ -7,7 +7,7 @@
  * by asking the SERVER to resolve its tmux session — it never reverse-engineers ids.
  */
 import { execFileSync } from "child_process";
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, existsSync, writeSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { syncSkills, removeSkills, skillsStatus, userSkillsDir } from "../server/skills.js";
@@ -104,6 +104,47 @@ async function whoami() {
   return api("GET", `/api/whoami?tmuxSession=${encodeURIComponent(sess)}`);
 }
 
+// Non-fatal identity probe: null when not inside a hadron agent session (plain
+// shell, foreign tmux, server can't map it). Verbs that merely ADAPT to being an
+// agent (message attribution, close-self notice) use this; verbs that REQUIRE
+// self-identity (no-target pin/close) keep the fatal whoami().
+async function whoamiSoft() {
+  const sess = currentTmuxSession();
+  if (!sess) return null;
+  try {
+    const res = await fetch(`${BASE}/api/whoami?tmuxSession=${encodeURIComponent(sess)}`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+// Name→id resolution for every verb that takes a target. Exact id wins; else
+// case-insensitive exact name match. Ambiguous or unknown → exit 1 with the
+// candidates — never partial/fuzzy matching (a wrong guess messages/kills the
+// wrong agent).
+async function resolveTarget(arg, { archived = false } = {}) {
+  const list = await api("GET", archived ? "/api/sessions/archived" : "/api/sessions");
+  const byId = list.find((a) => a.id === arg);
+  if (byId) return byId;
+  const wanted = String(arg).toLowerCase();
+  const byName = list.filter((a) => (a.name || "").toLowerCase() === wanted);
+  if (byName.length === 1) return byName[0];
+  const kind = archived ? "archived agent" : "agent";
+  if (byName.length > 1) {
+    die(`"${arg}" is ambiguous — ${byName.length} ${kind}s share that name:\n${byName.map((a) => `  ${a.id}  ${a.name}`).join("\n")}`);
+  }
+  const known = list.map((a) => `  ${a.id}  ${a.name}`).join("\n");
+  die(`no ${kind} matches "${arg}"${list.length ? ` — known ${kind}s:\n${known}` : ""}`);
+}
+
+// Target arg → agent; no arg → self (must be inside a hadron agent session).
+async function resolveTargetOrSelf(arg, opts) {
+  if (arg !== undefined) return resolveTarget(arg, opts);
+  return whoami();
+}
+
 // ── skills linking (shared logic in ../server/skills.js) ──
 // The skill SET is scanned from the repo, so adding a new skill needs no code change.
 // `install` is additive (create missing); `sync` also prunes our own dead links.
@@ -138,6 +179,9 @@ function printSkillsStatus() {
 }
 
 // ── flag parsing ──
+// Presence-only flags must be declared here or they swallow the next positional
+// (`hadron message --raw "Beta Two" hi` would resolve "hi" as the target).
+const BOOLEAN_FLAGS = new Set(["json", "archived", "raw", "no-enter", "start", "auto"]);
 function parseFlags(args) {
   const flags = {};
   const positional = [];
@@ -146,7 +190,7 @@ function parseFlags(args) {
     if (a.startsWith("--")) {
       const key = a.slice(2);
       const next = args[i + 1];
-      if (next === undefined || next.startsWith("--")) { flags[key] = true; }
+      if (BOOLEAN_FLAGS.has(key) || next === undefined || next.startsWith("--")) { flags[key] = true; }
       else { flags[key] = next; i++; }
     } else positional.push(a);
   }
@@ -168,6 +212,13 @@ async function main() {
 
   switch (cmd) {
     case "ls": {
+      if (flags.archived) {
+        const list = await api("GET", "/api/sessions/archived");
+        if (flags.json) { console.log(JSON.stringify(list, null, 2)); break; }
+        if (!list.length) { console.log("no archived agents"); break; }
+        for (const a of list) console.log(`${a.id}  ${a.name}  [${a.group}]  archived ${a.archivedAt || "?"}`);
+        break;
+      }
       const list = await api("GET", "/api/sessions");
       if (flags.json) { console.log(JSON.stringify(list, null, 2)); break; }
       for (const a of list) printAgent(a);
@@ -223,26 +274,75 @@ async function main() {
       break;
     }
     case "send": {
-      const id = positional[0];
+      const target = positional[0];
       const keys = positional[1];
-      if (!id || keys === undefined) die("usage: hadron send <id> \"keys\"");
-      await api("POST", `/api/sessions/${id}/send-keys`, { keys });
+      if (!target || keys === undefined) die("usage: hadron send <name|id> \"keys\"");
+      const agent = await resolveTarget(target);
+      await api("POST", `/api/sessions/${agent.id}/send-keys`, { keys });
       console.log("sent");
       break;
     }
     case "message": {
-      const id = positional[0];
+      const target = positional[0];
       let text = positional[1];
       // `-` (or no positional) + piped stdin → read the whole prompt from stdin,
       // so `cat brief.md | hadron message t009` just works.
       if ((text === undefined || text === "-") && !process.stdin.isTTY) {
         text = readFileSync(0, "utf-8");
       }
-      if (!id || text === undefined || text === "-") {
-        die("usage: hadron message <id> \"text\" [--no-enter]   (or: cat brief.md | hadron message <id> -)");
+      if (!target || text === undefined || text === "-") {
+        die("usage: hadron message <name|id> \"text\" [--no-enter] [--raw]   (or: cat brief.md | hadron message <name|id> -)");
       }
-      const out = await api("POST", `/api/sessions/${id}/message`, { text, enter: !flags["no-enter"] });
+      const agent = await resolveTarget(target);
+      // Sender attribution: composed CLIENT-side, only when this CLI runs inside a
+      // hadron agent session — a human at a plain shell delivers text unprefixed.
+      // --raw suppresses it explicitly. The server endpoint stays untouched.
+      if (!flags.raw) {
+        const me = await whoamiSoft();
+        if (me) text = `[hadron message from ${me.name} (${me.id})]\n${text}`;
+      }
+      const out = await api("POST", `/api/sessions/${agent.id}/message`, { text, enter: !flags["no-enter"] });
       console.log(`delivered ${out.bytes} bytes${flags["no-enter"] ? " (no Enter)" : ""}`);
+      break;
+    }
+    case "pin":
+    case "unpin": {
+      const agent = await resolveTargetOrSelf(positional[0]);
+      const pinned = cmd === "pin";
+      await api("PATCH", `/api/sessions/${agent.id}`, { pinned });
+      console.log(`${pinned ? "pinned" : "unpinned"} ${agent.name} (${agent.id})`);
+      break;
+    }
+    case "close": {
+      // Multiple targets allowed (bulk cleanup is the common real-world case).
+      // Resolve ALL before archiving ANY — one ambiguous name must not leave the
+      // batch half-done. De-dupe by id so "close twin twin" archives once.
+      const agents = positional.length
+        ? await Promise.all(positional.map((t) => resolveTarget(t)))
+        : [await whoami()];
+      const unique = [...new Map(agents.map((a) => [a.id, a])).values()];
+      const me = await whoamiSoft();
+      // Self goes LAST: archiving self kills the tmux session this CLI lives in,
+      // which would abandon the rest of the batch.
+      unique.sort((a, b) => (me && a.id === me.id ? 1 : 0) - (me && b.id === me.id ? 1 : 0));
+      for (const agent of unique) {
+        if (me && me.id === agent.id) {
+          // The response may never make it back once tmux dies — say what's
+          // happening BEFORE the request, with a synchronous write.
+          writeSync(1, `archiving this agent (${agent.id}) — its tmux session will die now\n`);
+        }
+        await api("DELETE", `/api/sessions/${agent.id}`);
+        console.log(`archived ${agent.name} (${agent.id}) — restore with: hadron restore ${agent.id}`);
+      }
+      break;
+    }
+    case "restore": {
+      if (!positional.length) die("usage: hadron restore <name|id> [more...]");
+      const agents = await Promise.all(positional.map((t) => resolveTarget(t, { archived: true })));
+      for (const agent of [...new Map(agents.map((a) => [a.id, a])).values()]) {
+        await api("POST", `/api/sessions/${agent.id}/restore`);
+        console.log(`restored ${agent.name} (${agent.id})`);
+      }
       break;
     }
     case "artifacts": {
@@ -321,11 +421,17 @@ async function main() {
       console.log(`hadron — manage Hadron agents from the terminal
 
 Commands:
-  hadron ls [--json]                       list all agents
+  hadron ls [--json] [--archived]          list all agents (--archived: the archive instead)
   hadron whoami [--json]                   show the current agent (resolved by the server)
   hadron spawn <name> [flags]              create an agent
        --group G  --task "..."  --cwd path
-       --launch claude|codex|shell  --start  --related a,b  --artifact p
+       --launch claude|codex|shell|<custom>  --start  --related a,b  --artifact p
+       (custom launchers are defined in .hadron/config.json "launchers" — see docs/CONFIGURATION.md)
+  hadron pin [name|id]                     pin an agent to the deck's 📌 Pinned section (no arg = self)
+  hadron unpin [name|id]                   unpin (no arg = self)
+  hadron close [name|id ...]               archive agent(s): tmux dies, JSON kept (no arg = self;
+                                           several targets allowed — self is archived last)
+  hadron restore <name|id ...>             bring archived agent(s) back (searches the archive)
   hadron artifacts add [--auto | <path...>]  attach files to the current agent
   hadron artifacts ls                      list the current agent's artifacts
   hadron notes [show|set "..."|append "..."]
@@ -334,10 +440,17 @@ Commands:
   hadron skills install                    symlink operation skills into ~/.claude/skills/ (additive)
   hadron skills sync                       like install, but also prune our own dead links
   hadron skills [status|uninstall]
-  hadron message <id> "text" [--no-enter]  deliver a prompt to a running agent — reliable for
+  hadron message <name|id> "text" [--no-enter] [--raw]
+                                           deliver a prompt to a running agent — reliable for
                                            multiline/special chars (tmux buffer paste); `-` or
-                                           piped stdin reads the text from stdin
-  hadron send <id> "keys"                  low-level: type raw keys into a pane (single short line)
+                                           piped stdin reads the text from stdin. Sent from inside
+                                           a hadron agent session, the text is prefixed with a
+                                           sender-attribution line (--raw suppresses it)
+  hadron send <name|id> "keys"             low-level: type raw keys into a pane (single short line)
+
+Targets accept an agent id or its exact name (case-insensitive); ambiguous
+names list the candidates and exit. Permanent deletion is deliberately not a
+CLI verb — use the dashboard (Agents → Delete Agent).
 
 Env: HADRON_PORT / HADRON_TOKEN override; otherwise both are read from the
 nearest .hadron/ (runtime.json + token) walking up from cwd; port defaults to 3000.`);

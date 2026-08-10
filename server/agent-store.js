@@ -95,9 +95,10 @@ function writeAgentFile(id, data) {
 }
 
 export function saveAgent(agent) {
-  const { id, name, group, task, icon, tmuxSession, artifacts, relatedAgents, notes, sortOrder, archived, archivedAt, deletable, cwd, launchCommand, autostartedAt } = agent;
+  const { id, name, group, task, icon, tmuxSession, artifacts, relatedAgents, notes, sortOrder, archived, archivedAt, deletable, cwd, launchCommand, autostartedAt, pinned } = agent;
   const data = { id, name, group: group || "Workers", task, tmuxSession: tmuxSession || `hadron-${id}`, artifacts: artifacts || [], relatedAgents: relatedAgents || [], notes: notes || "" };
   if (icon) data.icon = icon;
+  if (pinned) data.pinned = true;
   if (sortOrder !== undefined && sortOrder !== null) data.sortOrder = sortOrder;
   if (archived) data.archived = true;
   if (archived && archivedAt) data.archivedAt = archivedAt;

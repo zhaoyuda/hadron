@@ -203,10 +203,36 @@ function getStatusBuckets() {
     .map((b) => ({ label: b.label, items: map[b.key], status: b.key }));
 }
 
+// Pinned agents surface FIRST in both deck modes, moved out of their normal
+// section (not duplicated). Fixed order: state urgency → sortOrder → id.
+function getPinnedSection() {
+  const STATE_PRIORITY = { blocked: 0, done: 1, working: 2, idle: 3 };
+  const items = sessions.filter((s) => s.pinned);
+  if (!items.length) return null;
+  items.sort((a, b) => {
+    const ap = STATE_PRIORITY[a.state || "idle"] ?? 3;
+    const bp = STATE_PRIORITY[b.state || "idle"] ?? 3;
+    if (ap !== bp) return ap - bp;
+    const aSort = a.sortOrder ?? Infinity;
+    const bSort = b.sortOrder ?? Infinity;
+    if (aSort !== bSort) return aSort - bSort;
+    return a.id.localeCompare(b.id);
+  });
+  return { label: "📌 Pinned", pinnedSection: true, items };
+}
+
 // Rendering/nav layer: either semantic groups or status buckets. Persistence and
 // group-list bookkeeping keep using getSessionGroups() (always the group axis).
 function getDeckSections() {
-  return deckGroupBy === "status" ? getStatusBuckets() : getSessionGroups();
+  const statusMode = deckGroupBy === "status";
+  let base = statusMode ? getStatusBuckets() : getSessionGroups();
+  const pinnedSection = getPinnedSection();
+  if (!pinnedSection) return base;
+  base = base.map((g) => ({ ...g, items: g.items.filter((s) => !s.pinned) }));
+  // Status buckets never render empty; group sections keep rendering empty
+  // (they own the add/delete affordances).
+  if (statusMode) base = base.filter((g) => g.items.length > 0);
+  return [pinnedSection, ...base];
 }
 
 function getDisplayOrder() {
@@ -774,6 +800,20 @@ function renderDeck() {
     if (gi > 0 && html) html += '<div class="deck-sep"></div>';
 
     const groupKey = g.label.toLowerCase();
+    // The pinned section is display-only: not editable, not a drop target, no
+    // add/delete affordances — omit data-group-name AND data-group so neither
+    // the rename handlers nor handleDrop can treat "📌 Pinned" as a real group.
+    if (g.pinnedSection) {
+      html += `<div class="deck-group deck-group-pinned">`;
+      html += `<div class="deck-group-label">${esc(g.label)}</div>`;
+      html += `<div class="deck-cards">`;
+      g.items.forEach((s) => {
+        idx++;
+        html += mkDeckCard(s, idx, false);
+      });
+      html += `</div></div>`;
+      return;
+    }
     // In status mode the header is a state label (not editable / not a drop target);
     // omit data-group-name so the rename/contextmenu handlers don't bind to it.
     const labelAttrs = statusMode
@@ -793,8 +833,11 @@ function renderDeck() {
       if (gc.expandable !== false) {
         html += `<div class="dk-add dk-add-sm" title="Add agent to ${esc(g.label)}" data-add-group="${esc(g.label)}">+</div>`;
       }
-      // Empty, non-protected group → offer a visible delete button (no right-click needed)
-      if (g.items.length === 0 && gc.expandable !== false) {
+      // Empty, non-protected group → offer a visible delete button (no right-click
+      // needed). A group whose only members are pinned (moved to the pinned
+      // section) is NOT empty — deleteGroup would no-op on it anyway.
+      const hasPinnedMember = sessions.some((s) => s.pinned && (s.group || "Workers").toLowerCase() === groupKey);
+      if (g.items.length === 0 && !hasPinnedMember && gc.expandable !== false) {
         html += `<div class="dk-del dk-add-sm" title="Delete empty group "${esc(g.label)}"" data-del-group="${esc(g.label)}">×</div>`;
       }
     }
@@ -926,7 +969,8 @@ function mkDeckCard(s, idx, allowDrag = true) {
   else { sub = "idle"; subClass = "dk-sub-idle"; }
 
   const draggable = allowDrag ? ` draggable="true"` : "";
-  return `<div class="dk${stateClass}${activeClass}" data-sid="${s.id}"${draggable} oncontextmenu="showCtxMenu(event,'${s.id}')">${avatar}<div class="dk-info"><div class="dk-name">${esc(name)}</div><div class="dk-sub ${subClass}">${sub}</div></div></div>`;
+  const pin = s.pinned ? `<span class="dk-pin" title="Pinned">📌</span>` : "";
+  return `<div class="dk${stateClass}${activeClass}" data-sid="${s.id}"${draggable} oncontextmenu="showCtxMenu(event,'${s.id}')">${avatar}<div class="dk-info"><div class="dk-name">${esc(name)}${pin}</div><div class="dk-sub ${subClass}">${sub}</div></div></div>`;
 }
 
 // ═══ DRAG AND DROP ═══
@@ -1746,6 +1790,7 @@ function showCtxMenu(e, sessionId) {
   const menu = document.getElementById("ctx-menu");
   menu.innerHTML = `
     <div class="cm-item" data-action="focus" data-sid="${sessionId}">Focus ${esc(s.name.toUpperCase())}</div>
+    <div class="cm-item" data-action="pin" data-sid="${sessionId}">${s.pinned ? "Unpin" : "Pin"} ${esc(s.name.toUpperCase())}</div>
     ${canClose ? `<div class="cm-sep"></div><div class="cm-item danger" data-action="close" data-sid="${sessionId}">Close ${esc(s.name.toUpperCase())}</div>` : ""}
   `;
   menu.style.display = "block";
@@ -1758,9 +1803,29 @@ function showCtxMenu(e, sessionId) {
       const sid = item.dataset.sid;
       hideCtxMenu();
       if (action === "focus") switchSession(sid);
+      else if (action === "pin") togglePin(sid);
       else if (action === "close") closeSession(sid);
     });
   });
+}
+
+async function togglePin(sessionId) {
+  const s = sessions.find((x) => x.id === sessionId);
+  if (!s) return;
+  const pinned = !s.pinned;
+  try {
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pinned }),
+    });
+    if (!res.ok) return;
+    if (pinned) s.pinned = true;
+    else delete s.pinned;
+    renderDeck();
+  } catch (e) {
+    console.error("Failed to toggle pin:", e);
+  }
 }
 
 function hideCtxMenu() {

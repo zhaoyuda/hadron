@@ -27,3 +27,10 @@ const ID_RE = /^[a-z0-9-]+$/;
 export function isValidId(id) {
   return typeof id === "string" && id.length > 0 && id.length <= 100 && ID_RE.test(id);
 }
+
+// argv → a shell-safe command line. Launcher argv is TYPED into a pane (the
+// shell re-parses it), so a bare join(" ") would dissolve argument boundaries —
+// each element that isn't plainly safe is single-quoted with '\'' escaping.
+export function shellQuoteArgv(argv) {
+  return argv.map((a) => (/^[A-Za-z0-9_.,:/@%^+=-]+$/.test(a) ? a : `'${a.replace(/'/g, `'\\''`)}'`)).join(" ");
+}

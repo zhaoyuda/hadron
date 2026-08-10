@@ -49,7 +49,7 @@ scripts/
   setup-workspace.js  # Interactive workspace initializer
 test/
   unit/               # detectState/nextState fixtures + security HTTP suite (npm test)
-  e2e/                # Playwright browser modules M1-M19 (npm run test:e2e)
+  e2e/                # Playwright browser modules M1-M20 (npm run test:e2e)
 ```
 
 ## Conventions
@@ -99,6 +99,12 @@ npm test
 #                            client cwd, suggest { base, files } contract), artifact validation on EVERY
 #                            write path (append, PATCH, session-create seed) + canonical path contract
 #                            incl. symlink escapes, DELETE 409, store-level lock FIFO barrier)
+#   + test-agent-ops.js     (agent ops: pinned strict-boolean PATCH + absent-unless-true persistence,
+#                            archive/restore lifecycle over HTTP, CLI pin/unpin/close/restore/ls --archived
+#                            with name→id resolution — ambiguous names exit 1 with candidates)
+#   + test-terminal-ws.js   (terminal pty lifecycle — the macOS ptmx-exhaustion class: normal close
+#                            releases the master fd (kill+destroy), ws heartbeat reaps half-open
+#                            connections' ptys, /api/health livePtys count, no fd accumulation)
 ```
 
 Individual suites can be run directly, e.g. `node test/unit/test-state-eval.js`.
@@ -128,6 +134,7 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #   + test/e2e/m17-annotation-ux.js (annotation UX: FAB follows the selection; cross-block/formatted/duplicate/overlapping selections anchor + paint honestly; hover card edit, sent read-only; CLI excerpt for formatted anchors; marks survive auto-reload — runs at a <560px preview so the P0 surfaces stay authoritative)
 #   + test/e2e/m18-comment-rail.js (comment rail: cards permanently visible at ≥560px previews (width-adaptive 190-260px — split panes qualify), aligned with highlights; rail composer + in-rail edit/delete; mark↔card two-way linking; orphan + doc sections; annRailBusy edit guard; split-layout context derivation; <560px falls back to the P0 hover card)
 #   + test/e2e/m19-artifacts-ux.js (artifacts add/remove UX: Browse popover survives folder clicks (pointerdown close model) + keyboard nav + hidden-files toggle; atomic add with canonical de-dupe; URL validation + escaped labels; remove with 409 drift recovery; dir artifacts — live folder groups where new on-disk files appear automatically; ephemeral file: tabs; add concurrency; viewport clamp)
+#   + test/e2e/m20-agent-ops.js  (agent ops: context-menu Pin → "📌 Pinned" section first in BOTH deck modes, card moved not duplicated, survives 3s refresh + reload; `hadron pin <name>`; `hadron close <name>` → tmux dead + JSON archived + ls --archived + restore; in-pane `hadron message` sender attribution + --raw; ambiguous names exit 1, nothing delivered)
 ```
 
 `npm run test:e2e` runs `test/e2e/run-all.js`, which executes every `m*.js`
@@ -136,7 +143,7 @@ module regardless of individual failures and exits non-zero only on an
 runner — it fails identically on main (headless-chromium can't complete the
 `navigator.clipboard.writeText` bridge) so it prints but doesn't gate the suite.
 This replaced the old `m1 && m2 && …` chain, where M10's failure aborted before
-M11–M19 ran (a real regression could hide behind it). Remove M10 from `XFAIL`
+M11–M20 ran (a real regression could hide behind it). Remove M10 from `XFAIL`
 the moment the clipboard bridge is fixed — a stale xfail hides regressions too.
 
 Kept out of `npm test` so the core suite stays fast and dependency-free
@@ -178,7 +185,7 @@ staging first:
    changes.
 2. `npm test` + `npm run test:e2e` in the worktree. The runner reports M10 as
    `XFAIL` (known headless-chromium clipboard issue, fails identically on main)
-   and exits 0 when it's the only failure — so a green run means M1–M9, M11–M19
+   and exits 0 when it's the only failure — so a green run means M1–M9, M11–M20
    all passed. Any `FAIL` (non-xfail) gates the branch.
 3. `scripts/predeploy-check.sh` — live-fire proof on staging that a service
    restart does NOT interrupt running agents (claude PIDs survive, a

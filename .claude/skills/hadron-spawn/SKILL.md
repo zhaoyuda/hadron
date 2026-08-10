@@ -36,9 +36,9 @@ hadron spawn "Auth Refactor" \
 1. Confirm it appears: `hadron ls`.
 2. Tell the user the agent name + id and that it's running.
 3. If this agent and the new one should coordinate, the link is mutual context — mention it.
-4. To deliver a longer brief or follow-up prompt to an agent that's already running, use `hadron message <id> "..."` (or `cat brief.md | hadron message <id> -`) — it's the reliable way to paste multiline text into a live session.
+4. To deliver a longer brief or follow-up prompt to an agent that's already running, use `hadron message <id> "..."` (or `cat brief.md | hadron message <id> -`) — it's the reliable way to paste multiline text into a live session. For ongoing coordination with siblings (message/pin/close/restore), see the `hadron-agents` skill.
 
 ## Notes
 
-- `--launch` is an enum (`claude|codex|shell`) — you can't pass an arbitrary command. The task is delivered as keystrokes, never glued into a shell string, so any task text is safe.
+- `--launch` takes a launcher NAME — builtin `claude|codex|shell`, or a custom launcher defined in the workspace's `.hadron/config.json` `launchers` table (e.g. a `cc-kimi` wrapper; see docs/CONFIGURATION.md). You can't pass an arbitrary command through the API. The task is delivered as keystrokes, never glued into a shell string, so any task text is safe.
 - Spawning the same name twice is rejected (409) — names are unique among live agents. A previously archived name can be reused; its old flags are cleared on respawn.

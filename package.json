@@ -11,7 +11,7 @@
     "start": "node server/index.js",
     "postinstall": "node scripts/fix-pty-perms.js",
     "setup:check": "node scripts/setup-check.js",
-    "test": "node test/unit/test-state-eval.js && node test/unit/test-state-machine.js && node test/unit/test-security.js && node test/unit/test-annotations.js && node test/unit/test-message.js && node test/unit/test-upload.js && node test/unit/test-resume.js && node test/unit/test-file-revision.js && node test/unit/test-artifacts.js",
+    "test": "node test/unit/test-state-eval.js && node test/unit/test-state-machine.js && node test/unit/test-security.js && node test/unit/test-annotations.js && node test/unit/test-message.js && node test/unit/test-upload.js && node test/unit/test-resume.js && node test/unit/test-file-revision.js && node test/unit/test-artifacts.js && node test/unit/test-agent-ops.js && node test/unit/test-terminal-ws.js",
     "test:e2e": "node test/e2e/run-all.js"
   },
   "dependencies": {

@@ -16,7 +16,7 @@ import { probeClaudeCaps, RuntimeTracker, performResume } from "./resume.js";
 import { randomUUID } from "crypto";
 import { loadAgents, loadAgent, saveAgent, saveAgentLocked, archiveAgent, deleteAgent, initWorkspace, getWorkspaceDir, appendAgentField, removeAgentArtifact, isSelfWrite } from "./agent-store.js";
 import { resolve } from "path";
-import { tmux, tmuxSafe, isValidId } from "./tmux.js";
+import { tmux, tmuxSafe, isValidId, shellQuoteArgv } from "./tmux.js";
 import { syncSkills } from "./skills.js";
 import {
   listAnnotations, createAnnotation, updateAnnotation, deleteAnnotation,
@@ -207,7 +207,11 @@ function requireAuth(req, res, next) {
   if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return next();
   if (!isAllowedHost(req.headers.host)) return res.status(403).json({ error: "host not allowed" });
   if (!isAllowedOrigin(req.headers.origin)) return res.status(403).json({ error: "origin not allowed" });
-  const token = req.headers["x-hadron-token"] || req.query.token;
+  // `Authorization: Bearer <token>` accepted as an alias: it's the first header
+  // every hand-written client tries, and rejecting it costs a debugging session
+  // (same token, same check — no security delta).
+  const bearer = (req.headers.authorization || "").match(/^Bearer\s+(.+)$/i)?.[1];
+  const token = req.headers["x-hadron-token"] || bearer || req.query.token;
   if (!AUTH_TOKEN || token !== AUTH_TOKEN) return res.status(401).json({ error: "invalid or missing token" });
   next();
 }
@@ -217,9 +221,32 @@ app.use("/api", requireAuth);
 
 const sessions = new Map();
 
-// Autostart launch commands are a known enum, NOT a free-form string — a string would
-// be a shell footgun (and agent-supplied via the API). "shell" means no autostart.
-const LAUNCH_COMMANDS = { claude: ["claude"], codex: ["codex"], shell: null };
+// Autostart launch commands are a known table, NOT a free-form string — a string
+// would be a shell footgun (and agent-supplied via the API). "shell" means no
+// autostart. Custom launchers (e.g. a `cc-kimi` wrapper) come from
+// .hadron/config.json `launchers` — filesystem-owned, so defining a command
+// already requires workspace write access; the API only ever accepts a NAME.
+// `kind: "claude"` marks a wrapper that IS Claude Code underneath, opting it
+// into the claude-specific autostart path (--session-id injection / resume).
+const BUILTIN_LAUNCHERS = {
+  claude: { argv: ["claude"], kind: "claude" },
+  codex: { argv: ["codex"] },
+  shell: null,
+};
+
+function getLaunchers() {
+  const table = { ...BUILTIN_LAUNCHERS };
+  try {
+    const config = JSON.parse(readFileSync(join(getWorkspaceDir(), ".hadron", "config.json"), "utf-8"));
+    for (const [name, def] of Object.entries(config.launchers || {})) {
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,31}$/.test(name)) continue;
+      if (!def || !Array.isArray(def.argv) || def.argv.length === 0) continue;
+      if (!def.argv.every((a) => typeof a === "string" && a.length > 0)) continue;
+      table[name] = { argv: def.argv, kind: def.kind === "claude" ? "claude" : undefined };
+    }
+  } catch {}
+  return table;
+}
 const launchLocks = new Set(); // ids currently autostarting (TOCTOU guard)
 
 function tmuxSessionName(id) {
@@ -229,7 +256,7 @@ function tmuxSessionName(id) {
 function getDefaultLaunchCommand() {
   try {
     const config = JSON.parse(readFileSync(join(getWorkspaceDir(), ".hadron", "config.json"), "utf-8"));
-    if (config.launchCommand && LAUNCH_COMMANDS[config.launchCommand] !== undefined) return config.launchCommand;
+    if (config.launchCommand && getLaunchers()[config.launchCommand] !== undefined) return config.launchCommand;
   } catch {}
   return "claude";
 }
@@ -244,8 +271,8 @@ function sanitizeForKeystrokes(s) {
 // SEPARATE literal step — type the task into the prompt. The task is never glued into a
 // command string (no `claude "<task>"`), so quotes/newlines/$() in it stay inert data.
 function autostartAgent(id, launchCommand, task) {
-  const argv = LAUNCH_COMMANDS[launchCommand];
-  if (!argv) return; // shell → nothing to launch
+  const launcher = getLaunchers()[launchCommand];
+  if (!launcher) return; // shell → nothing to launch
   if (launchLocks.has(id)) return;
   const session = sessions.get(id);
   if (session && session.autostartedAt) return; // once per creation
@@ -253,11 +280,11 @@ function autostartAgent(id, launchCommand, task) {
   const tmuxName = tmuxSessionName(id);
   (async () => {
     try {
-      let cmdLine = argv.join(" ");
-      // Claude launches get a Hadron-chosen session id — the authoritative
+      let cmdLine = shellQuoteArgv(launcher.argv); // preserves argv boundaries through the pane's shell
+      // Claude-kind launches get a Hadron-chosen session id — the authoritative
       // source for later auto-resume (see resume.js). Server-generated UUID,
       // never user input, so gluing it into the command line is inert.
-      if (launchCommand === "claude" && (await probeClaudeCaps()).sessionId) {
+      if (launcher.kind === "claude" && (await probeClaudeCaps()).sessionId) {
         const sid = randomUUID();
         cmdLine += ` --session-id ${sid}`;
         runtimeTrackers.get(id)?.recordSpawnedSession(sid);
@@ -387,6 +414,13 @@ function ensureDefaults() {
 }
 
 // ═══ REST API ═══
+
+// Ops visibility: live pty count is the early-warning signal for the macOS
+// ptmx-exhaustion incident class (system cap 511 — the user finds out from
+// iTerm failing to open unless we surface it first).
+app.get("/api/health", (req, res) => {
+  res.json({ ok: true, livePtys: livePtys.size, liveSessions: sessions.size, wsClients: wss.clients.size });
+});
 
 app.get("/api/workspace", (req, res) => {
   const configPath = join(getWorkspaceDir(), ".hadron", "config.json");
@@ -559,10 +593,12 @@ app.post("/api/sessions", (req, res) => {
     return res.status(409).json({ error: "session already exists" });
   }
 
-  // launchCommand is enum-only and never an arbitrary command string from the API.
+  // launchCommand is a table NAME (builtin or config-defined launcher), never an
+  // arbitrary command string from the API.
   let launchCommand = req.body.launchCommand;
-  if (launchCommand !== undefined && LAUNCH_COMMANDS[launchCommand] === undefined) {
-    return res.status(400).json({ error: `launchCommand must be one of: ${Object.keys(LAUNCH_COMMANDS).join(", ")}` });
+  const launchers = getLaunchers();
+  if (launchCommand !== undefined && launchers[launchCommand] === undefined) {
+    return res.status(400).json({ error: `launchCommand must be one of: ${Object.keys(launchers).join(", ")}` });
   }
   if (launchCommand === undefined) launchCommand = getDefaultLaunchCommand();
 
@@ -641,6 +677,12 @@ app.patch("/api/sessions/:id", async (req, res) => {
       patchedArtifacts.push(out.item);
     }
   }
+  // pinned is a strict boolean — anything else would leak into the deck's
+  // section logic (truthy strings) and the persisted JSON.
+  const { pinned } = req.body;
+  if (pinned !== undefined && typeof pinned !== "boolean") {
+    return res.status(400).json({ error: "pinned must be a boolean" });
+  }
   const { state, blockReason, name, task } = req.body;
   if (state !== undefined) {
     const prevState = session.state;
@@ -663,7 +705,11 @@ app.patch("/api/sessions/:id", async (req, res) => {
   if (relatedAgents !== undefined) session.relatedAgents = relatedAgents;
   if (sortOrder !== undefined) session.sortOrder = sortOrder;
   if (deletable !== undefined) session.deletable = deletable;
-  const shouldSave = [name, task, notes, artifacts, relatedAgents, group, icon, sortOrder, deletable].some(v => v !== undefined);
+  if (pinned !== undefined) {
+    if (pinned) session.pinned = true;
+    else delete session.pinned; // stored form: absent unless true (like icon/sortOrder)
+  }
+  const shouldSave = [name, task, notes, artifacts, relatedAgents, group, icon, sortOrder, deletable, pinned].some(v => v !== undefined);
   if (shouldSave) await saveAgentLocked(session); // same lock as append/delete — no interleaved read-modify-write
   res.json(resolvedSession(session));
 });
@@ -1093,6 +1139,16 @@ app.post("/api/file", (req, res) => {
   let stat;
   try { stat = statSync(filePath); } catch { return res.status(404).json({ error: "file not found" }); }
   if (!stat.isFile()) return res.status(400).json({ error: "not a regular file" });
+  // .hadron internals are control surfaces, not documents: config.json defines
+  // launcher argv (command execution), agents/*.json and token gate auth. A write
+  // there via this endpoint would let any authenticated API caller cross the
+  // "launchers are filesystem-defined" boundary. Canonical path, so a symlinked
+  // detour into .hadron is caught too.
+  let canonical;
+  try { canonical = realpathSync(filePath); } catch { return res.status(404).json({ error: "file not found" }); }
+  if (canonical.split("/").includes(".hadron")) {
+    return res.status(403).json({ error: ".hadron internals cannot be edited through the file API" });
+  }
   if (baseRevision !== undefined && fileRevision(stat) !== baseRevision) {
     let currentContent = null;
     try { currentContent = readFileSync(filePath, "utf-8"); } catch {}
@@ -1579,7 +1635,11 @@ function startMonitor(sessionId) {
 
   console.log(`Monitor started for session: ${sessionId}`);
   if (created) {
-    performResume(session, tmuxSessionName(sessionId), { deliver: deliverToPane, save: (s) => saveAgent(s) })
+    // Resume through the agent's own claude-kind launcher (cc-* wrappers carry
+    // the provider config); non-claude/unknown launchers fall back to bare claude.
+    const launcher = getLaunchers()[session.launchCommand];
+    const launchArgv = launcher?.kind === "claude" ? launcher.argv : ["claude"];
+    performResume(session, tmuxSessionName(sessionId), { deliver: deliverToPane, save: (s) => saveAgent(s), launchArgv })
       .then((r) => { if (r.reason) console.log(`[resume] ${sessionId}: skip — ${r.reason}`); })
       .catch((e) => console.error(`[resume] ${sessionId}: ${e.message}`));
   }
@@ -1598,6 +1658,36 @@ function stopMonitor(sessionId) {
 
 // ═══ WebSocket server ═══
 const wss = new WebSocketServer({ noServer: true });
+
+// Every live terminal pty, tracked module-level: the only other reference is a
+// connection-closure local, so an orphaned pty would otherwise be unreachable
+// for the rest of the process lifetime (the macOS ptmx exhaustion incident —
+// kern.tty.ptmx_max is 511 system-wide and not adjustable at runtime).
+const livePtys = new Set();
+const PTY_WARN_THRESHOLD = 128; // well under macOS's 511 cap; Linux default is 4096
+
+// node-pty's kill() only SIGHUPs the child — it never touches the master fd.
+// destroy() is what actually releases it, and must run even when kill throws,
+// otherwise a child that survives SIGHUP (or is already unkillable) leaks the
+// fd permanently.
+function reapPty(pty) {
+  if (!livePtys.delete(pty)) return; // already reaped (close + onExit both call this)
+  try { pty.kill(); } catch {}
+  try { pty.destroy(); } catch {}
+}
+
+// Heartbeat: without ping/pong a half-open socket (laptop sleep, network drop)
+// never fires "close", so its pty lives forever — while the client side happily
+// reconnects every second and spawns a fresh pty each time (~6/min measured).
+const WS_HEARTBEAT_MS = Number(process.env.HADRON_WS_HEARTBEAT_MS) || 30_000; // env: tests shrink it to exercise the half-open path
+const wsHeartbeat = setInterval(() => {
+  for (const ws of wss.clients) {
+    if (ws.isAlive === false) { ws.terminate(); continue; } // terminate → "close" → reapPty
+    ws.isAlive = false;
+    try { ws.ping(); } catch {}
+  }
+}, WS_HEARTBEAT_MS);
+wsHeartbeat.unref();
 
 server.on("upgrade", (request, socket, head) => {
   const url = new URL(request.url, `http://${request.headers.host}`);
@@ -1672,6 +1762,8 @@ server.on("upgrade", (request, socket, head) => {
 });
 
 wss.on("connection", (ws) => {
+  ws.isAlive = true;
+  ws.on("pong", () => { ws.isAlive = true; });
   const sessionId = ws.sessionId || "planner";
   const shellName = ws.shellName || null;
   const isShell = !!shellName;
@@ -1735,9 +1827,12 @@ wss.on("connection", (ws) => {
     return;
   }
 
-  // Only start state monitor for primary sessions, not shells
-  if (!isShell) {
-    startMonitor(sessionId);
+  // Track + register the cleanup handlers BEFORE anything else that can throw
+  // (startMonitor below) — a pty with no reachable reference and no handlers is
+  // a guaranteed fd leak.
+  livePtys.add(pty);
+  if (livePtys.size >= PTY_WARN_THRESHOLD) {
+    console.warn(`[pty] ${livePtys.size} live ptys — approaching the OS pty cap (macOS ptmx_max=511); check for leaked/half-open terminal connections`);
   }
 
   pty.onData((data) => {
@@ -1748,6 +1843,7 @@ wss.on("connection", (ws) => {
 
   pty.onExit(({ exitCode }) => {
     console.log(`PTY exited for session ${sessionId}${isShell ? ` (shell: ${shellName})` : ""} with code ${exitCode}`);
+    reapPty(pty); // exit alone doesn't free the master fd — destroy() does
     if (ws.readyState === ws.OPEN) {
       ws.close();
     }
@@ -1771,7 +1867,7 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("close", () => {
-    pty.kill();
+    reapPty(pty);
     // vim editor shells never reconnect (each open is a fresh vim-<ts>), so a
     // closed WS means the editor is gone — kill its tmux session to avoid an
     // orphan from reload/tab-close/crash. Main terminal + persistent shells are
@@ -1785,6 +1881,13 @@ wss.on("connection", (ws) => {
       );
     }
   });
+
+  // State monitor last, and never fatal to this connection: it runs shell
+  // commands (ensureTmuxSession/execFileSync) that can throw, and before this
+  // ordering a throw here orphaned a handler-less pty.
+  if (!isShell) {
+    try { startMonitor(sessionId); } catch (e) { console.error(`startMonitor failed for ${sessionId}: ${e.message}`); }
+  }
 });
 
 const PORT = process.env.PORT || 3000;
@@ -1891,6 +1994,7 @@ server.listen(PORT, HADRON_HOST, () => {
 });
 
 function cleanupSubprocesses() {
+  for (const pty of [...livePtys]) reapPty(pty); // release every master fd on shutdown
   for (const [, entry] of marimoProcesses) {
     try { entry.process.kill(); } catch {}
   }
