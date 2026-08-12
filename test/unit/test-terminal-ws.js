@@ -8,7 +8,9 @@
  *     heartbeat and its pty reaped — pre-fix this leaked one pty per reconnect
  *   - /api/health exposes the live pty count
  *
- * fd accounting reads /proc/<serverpid>/fd (Linux-only; skips cleanly elsewhere).
+ * fd accounting asserts the OS-level truth (Linux: /proc/<pid>/fd; macOS: lsof;
+ * skips cleanly elsewhere) — livePtys alone proved blind to the node-pty 1.1.0
+ * native leak.
  *
  * Run: node test/unit/test-terminal-ws.js
  * Requires: tmux on PATH.
@@ -38,13 +40,27 @@ let server, TOKEN;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function ptmxCount() {
-  if (platform() !== "linux") return -1;
-  try {
-    const dir = `/proc/${server.pid}/fd`;
-    return readdirSync(dir).filter((f) => {
-      try { return readlinkSync(join(dir, f)) === "/dev/ptmx"; } catch { return false; }
-    }).length;
-  } catch { return -1; }
+  // OS-level truth, not the server's own Set: the second leak (node-pty 1.1.0
+  // pty_posix_spawn off-by-one, macOS-only) was invisible to livePtys — the
+  // bookkeeping was right while the fds piled up. -1 = unsupported platform,
+  // assertions self-skip.
+  if (platform() === "linux") {
+    try {
+      const dir = `/proc/${server.pid}/fd`;
+      return readdirSync(dir).filter((f) => {
+        try { return readlinkSync(join(dir, f)) === "/dev/ptmx"; } catch { return false; }
+      }).length;
+    } catch { return -1; }
+  }
+  if (platform() === "darwin") {
+    try {
+      const out = execFileSync("lsof", ["-p", String(server.pid)], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] });
+      // Match the NAME column (row-final), not the whole row — a cwd or command
+      // containing "ptmx" must not count as a descriptor.
+      return out.split("\n").filter((l) => l.trimEnd().endsWith("/dev/ptmx")).length;
+    } catch { return -1; }
+  }
+  return -1;
 }
 
 const health = async () => (await (await fetch(`${BASE}/api/health`)).json());
