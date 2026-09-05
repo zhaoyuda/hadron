@@ -12,7 +12,7 @@ import { networkInterfaces, hostname, tmpdir } from "os";
 import { URL } from "url";
 import { randomBytes } from "crypto";
 import { StateDetector, isShellCmd } from "./state-detector.js";
-import { probeClaudeCaps, RuntimeTracker, performResume, BOOT } from "./resume.js";
+import { probeClaudeCaps, RuntimeTracker, performResume, BOOT, isClaudeCmd, decideResume } from "./resume.js";
 import { randomUUID } from "crypto";
 import { loadAgents, loadAgent, saveAgent, saveAgentLocked, archiveAgent, deleteAgent, initWorkspace, getWorkspaceDir, appendAgentField, removeAgentArtifact, isSelfWrite } from "./agent-store.js";
 import { resolve } from "path";
@@ -425,6 +425,202 @@ function ensureDefaults() {
 let PROVENANCE = null;
 app.get("/api/health", (req, res) => {
   res.json({ ok: true, livePtys: livePtys.size, liveSessions: sessions.size, wsClients: wss.clients.size, ...(PROVENANCE || {}) });
+});
+
+// GET but AUTHENTICATED: requireAuth waves GET through, and this returns per-agent
+// operational internals (cwds, pane state, resume health), so it enforces the token
+// itself. The CLI's api() helper sends the token on this GET. The response carries
+// NO session ids and NO tokens — only names, cwd, pane command, and derived findings.
+function tokenPresent(req) {
+  const bearer = (req.headers.authorization || "").match(/^Bearer\s+(.+)$/i)?.[1];
+  const token = req.headers["x-hadron-token"] || bearer || req.query.token;
+  return !!AUTH_TOKEN && token === AUTH_TOKEN;
+}
+
+// Checkpoint durability threshold: a healthy live agent's checkpoint is rewritten
+// every RUNTIME_SAVE_INTERVAL_MS at most; add two state-detector polls (1s each)
+// and 5s slack. Older than this = the durable write is not keeping up (or never
+// happened) — a reboot right now would lose the session.
+const RUNTIME_SAVE_INTERVAL_MS = 30000; // checkpoint save throttle (see saveRuntimeCheckpoint)
+const STATE_POLL_MS = 1000;
+const CHECKPOINT_PERSIST_THRESHOLD_MS = RUNTIME_SAVE_INTERVAL_MS + 2 * STATE_POLL_MS + 5000;
+// A generation value that can never equal a real boot id (those are `boot-*`).
+// Doctor evaluates decideResume against this to SIMULATE the next boot, so the
+// per-boot "already attempted this boot" guard cannot mask a checkpoint that a
+// real reboot would refuse (e.g. "attempts exhausted"). See the cross-check.
+const DOCTOR_SIM_GENERATION = `doctor-sim-reboot-${randomUUID()}`;
+// Untrusted on-disk checkpoint strings. Doctor is a read-only safety report over
+// exactly the kind of corrupted/old checkpoint that could carry an arbitrary
+// value — even a session id or token — in one of these fields. It must never
+// echo a raw checkpoint string into its payload, the CLI, or a refusal message,
+// so every free-string checkpoint field is allowlisted to its known set here;
+// anything else collapses to the literal "invalid" (which also keeps such a
+// checkpoint out of the "green" verdict — "invalid" is below every resume policy).
+const CONFIDENCE_VALUES = new Set(["authoritative", "correlated", "ambiguous"]);
+const RUNTIME_VALUES = new Set(["claude", "shell"]);
+const RESTORE_STATES = new Set(["started", "ready", "failed"]);
+const allowlist = (set) => (v) => (v == null || v === "" ? null : set.has(v) ? v : "invalid");
+const safeConfidence = allowlist(CONFIDENCE_VALUES);
+const safeRuntime = allowlist(RUNTIME_VALUES);
+const safeRestoreState = allowlist(RESTORE_STATES);
+// Untrusted on-disk timestamp strings. A corrupted checkpoint could place a
+// token in one, or a materially-future value that defeats every "is it fresh /
+// durable?" check (now - future < 0 passes both the durability threshold and
+// decideResume's staleness). Parse, reject the unparseable AND anything more
+// than a clock-skew tolerance into the future, and return a NORMALIZED ISO
+// string (never the raw input) or null. Doctor uses this for both the emitted
+// fields (no leak) and the freshness decisions (no future-timestamp bypass).
+const CLOCK_SKEW_MS = 5 * 60 * 1000;
+function safeTimestamp(v, now) {
+  if (v == null || v === "") return null;
+  const t = Date.parse(v);
+  if (Number.isNaN(t)) return null;
+  if (t > (now ?? Date.now()) + CLOCK_SKEW_MS) return null; // materially future — corrupt or clock-skewed
+  return new Date(t).toISOString();
+}
+
+function tmuxSessionPathEnv(tmuxName) {
+  // What a FRESH shell in this pane starts with (a shell rc file can rewrite it
+  // afterwards — the CLI label says so). Never types into the pane. tmux does
+  // not track PATH in the per-SESSION environment (show-environment -t returns
+  // "unknown variable"), so a new pane inherits it from the server's GLOBAL
+  // environment — check the session override first, then fall back to global.
+  for (const args of [["show-environment", "-t", tmuxName, "PATH"], ["show-environment", "-g", "PATH"]]) {
+    const out = tmuxSafe(args);
+    if (out) { const m = out.match(/^PATH=(.*)$/m); if (m) return m[1]; }
+  }
+  return null;
+}
+function resolveClaudeInPath(pathStr) {
+  if (!pathStr) return null;
+  for (const dir of pathStr.split(":")) {
+    if (!dir) continue;
+    for (const name of ["claude", "claude.exe"]) {
+      const full = join(dir, name);
+      try { const st = statSync(full); if (st.isFile() && (st.mode & 0o111)) return full; } catch {}
+    }
+  }
+  return null;
+}
+
+// The classifier — the row-classification table from the reliability plan. Order
+// matters: earlier rows win. decideResume() is only a cross-check on green rows.
+function classifyAgentHealth(session, { paneExists, paneCmd, cwdShared, now }) {
+  const rt = session.runtime || {};
+  if (!paneExists) return { level: "red", message: "no pane — tmux session missing" };
+  const looksClaude = /^claude/i.test((paneCmd || "").trim());
+  if (looksClaude) {
+    if (rt.observedRuntime !== "claude") {
+      return { level: "red", message: "running but untracked — pane looks like claude, Hadron never recognised it (auto-resume off)" };
+    }
+    // safeTimestamp rejects unparseable AND materially-future values, so a
+    // corrupt/future lastPersistedAt cannot make `now - persisted` negative and
+    // silently pass the durability threshold.
+    const persistedIso = safeTimestamp(rt.lastPersistedAt, now);
+    const persisted = persistedIso ? Date.parse(persistedIso) : NaN;
+    if (!persisted || now - persisted > CHECKPOINT_PERSIST_THRESHOLD_MS) {
+      return { level: "red", message: "checkpoint not persisted — no durable write within threshold (a reboot would lose it)" };
+    }
+    if (!rt.sessionId) {
+      return cwdShared
+        ? { level: "red", message: "no session id (shared cwd — give it its own cwd or launch through Hadron)" }
+        : { level: "red", message: "no session id (scrape found nothing)" };
+    }
+    if (rt.restoreAttempt && rt.restoreAttempt.state === "failed") {
+      return { level: "red", message: "last resume failed — claude TUI did not come up" };
+    }
+    return { level: "green", message: `resumes as ${safeConfidence(rt.confidence) || "ambiguous"}` };
+  }
+  // pane is a bare shell (or some other non-claude command)
+  // safeTimestamp gates the clean-exit tombstone too: a corrupt token (or a
+  // materially-future value) in cleanExitAt must not be trusted as a genuine
+  // clean exit and silently downgrade a "claude gone" agent to n/a.
+  if (safeTimestamp(rt.cleanExitAt, now)) return { level: "na", message: "exited cleanly" };
+  if (rt.desiredRuntime === "claude") return { level: "yellow", message: "claude gone, no clean exit recorded" };
+  return { level: "na", message: "not a claude session" };
+}
+
+app.get("/api/doctor", async (req, res) => {
+  if (!tokenPresent(req)) return res.status(401).json({ error: "invalid or missing token" });
+  ensureDefaults();
+  const now = Date.now();
+  const live = [...sessions.values()].filter((s) => !s.archived);
+  const cwdCounts = new Map();
+  for (const s of live) if (s.cwd) cwdCounts.set(s.cwd, (cwdCounts.get(s.cwd) || 0) + 1);
+
+  const agents = live.map((session) => {
+    const tmuxName = tmuxSessionName(session.id);
+    const paneExists = tmuxSafe(["has-session", "-t", tmuxName]) !== null;
+    const paneCmd = paneExists ? (tmuxSafe(["display-message", "-t", tmuxName, "-p", "#{pane_current_command}"]) || "").trim() : null;
+    const paneCurrentPath = paneExists ? (tmuxSafe(["display-message", "-t", tmuxName, "-p", "#{pane_current_path}"]) || null) : null;
+    const cwdShared = !!session.cwd && (cwdCounts.get(session.cwd) || 0) > 1;
+    const pathEnv = paneExists ? tmuxSessionPathEnv(tmuxName) : null;
+    const finding = classifyAgentHealth(session, { paneExists, paneCmd, cwdShared, now });
+    const rt = session.runtime || {};
+    // Cross-check: a green row MUST also satisfy decideResume — it is the code
+    // that actually fires on reboot. Doctor asks "if the machine reboots NOW,
+    // does this come back?", so it evaluates decideResume against a SIMULATED
+    // NEXT boot (DOCTOR_SIM_GENERATION, guaranteed ≠ any real boot id), never
+    // the current one. That is the whole point: passing BOOT.id would let an
+    // agent that already resumed this boot (restoreAttempt.generation === BOOT.id)
+    // short-circuit on the per-boot "already attempted this boot" guard and mask
+    // a checkpoint that, after a real reboot (new generation), would be refused
+    // as "attempts exhausted" — reporting green for an agent that would NOT come
+    // back. Under the simulated next boot that guard is unreachable, so ANY
+    // refusal is a genuine post-reboot failure (malformed id, confidence below
+    // policy, stale lastObservedAt, attempts exhausted): demote green → red so
+    // the row and the CLI exit code tell the truth. These states are reachable
+    // from a corrupted/old on-disk checkpoint loaded on restart — the live
+    // scrape/spawn paths never produce them.
+    if (finding.level === "green") {
+      // Pass sanitized fields so decideResume can neither echo a raw
+      // (id/token-bearing) confidence in its reason nor treat a materially-future
+      // lastObservedAt as fresh (which would report green indefinitely).
+      const d = decideResume({
+        ...rt,
+        confidence: safeConfidence(rt.confidence) ?? undefined,
+        lastObservedAt: safeTimestamp(rt.lastObservedAt, now) ?? undefined,
+      }, { generation: DOCTOR_SIM_GENERATION });
+      if (!d.resume) {
+        finding.level = "red";
+        finding.message = `would not resume — ${d.reason}`;
+      }
+    }
+    return {
+      id: session.id,
+      name: session.name,
+      group: session.group || null,
+      cwd: session.cwd || null,
+      cwdShared,
+      paneExists,
+      paneCommand: paneCmd,
+      paneCurrentPath,
+      pathResolvesClaudeTo: resolveClaudeInPath(pathEnv),
+      observedRuntime: safeRuntime(rt.observedRuntime),
+      desiredRuntime: safeRuntime(rt.desiredRuntime),
+      hasCheckpointId: !!rt.sessionId,  // boolean only — never the id itself (no "sessionId" key)
+      confidence: safeConfidence(rt.confidence),
+      cleanExitAt: safeTimestamp(rt.cleanExitAt, now),
+      restoreState: safeRestoreState(rt.restoreAttempt ? rt.restoreAttempt.state : null),
+      lastObservedAt: safeTimestamp(rt.lastObservedAt, now),
+      lastPersistedAt: safeTimestamp(rt.lastPersistedAt, now),
+      finding,
+    };
+  });
+
+  let caps = { probed: false, resume: false, sessionId: false };
+  try { caps = await probeClaudeCaps(); } catch {}
+
+  res.json({
+    ok: true,
+    bootGeneration: BOOT.id,
+    bootIdSource: BOOT.source,
+    // Remap caps.sessionId → supportsSessionId so the doctor payload carries NO
+    // key named "sessionId" anywhere (a grep-for-leaks invariant the test holds).
+    claudeCaps: { probed: caps.probed, resume: caps.resume, supportsSessionId: caps.sessionId },
+    checkpointPersistThresholdMs: CHECKPOINT_PERSIST_THRESHOLD_MS,
+    agents,
+  });
 });
 
 app.get("/api/workspace", (req, res) => {
@@ -1637,18 +1833,26 @@ const runtimeTrackers = new Map();
 // Throttled checkpoint persistence: transitions (tombstone, new session id)
 // flush immediately; heartbeat-only refreshes ride a 30s trailing write.
 const runtimeSaveTimers = new Map();
+// The one place a checkpoint reaches disk. Stamps lastPersistedAt so `hadron
+// doctor` can tell a live-but-throttled checkpoint (fine) from one whose durable
+// write never happened (a reboot would lose it). Durability, not just liveness.
+// (RUNTIME_SAVE_INTERVAL_MS is defined earlier, beside the doctor threshold.)
+function persistCheckpoint(session) {
+  if (session.runtime) session.runtime.lastPersistedAt = new Date().toISOString();
+  saveAgent(session);
+}
 function saveRuntimeCheckpoint(session, urgent) {
   if (urgent) {
     clearTimeout(runtimeSaveTimers.get(session.id));
     runtimeSaveTimers.delete(session.id);
-    saveAgent(session);
+    persistCheckpoint(session);
     return;
   }
   if (runtimeSaveTimers.has(session.id)) return;
   runtimeSaveTimers.set(session.id, setTimeout(() => {
     runtimeSaveTimers.delete(session.id);
-    saveAgent(session);
-  }, 30000));
+    persistCheckpoint(session);
+  }, RUNTIME_SAVE_INTERVAL_MS));
 }
 
 function startMonitor(sessionId) {

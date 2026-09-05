@@ -461,6 +461,95 @@ async function main() {
       die("usage: hadron annotations <ls [--json] | resolve <id>>");
       break;
     }
+    case "doctor": {
+      // "If this machine reboots now, what comes back?" Read-only. The CLI does
+      // the local checks itself (they must run even when the server is down);
+      // per-agent findings come from the authenticated GET /api/doctor.
+      const icon = { green: "✓", yellow: "⚠", red: "✗", na: "·" };
+      const local = []; // { level, message }
+      const cli = { version: packageVersion(REPO), repoRoot: REPO, ...gitInfo(REPO) };
+
+      // 1. server reachable (unreachable = first finding, the rest still runs)
+      let health = null, reachable = false;
+      try {
+        const r = await fetch(`${BASE}/api/health`, { signal: AbortSignal.timeout(5000) });
+        if (r.ok) { health = await r.json().catch(() => null); reachable = !!(health && health.ok); }
+      } catch {}
+      if (!reachable) local.push({ level: "red", message: `server unreachable on :${PORT} (set HADRON_PORT to change) — nothing can be checked live` });
+
+      // 2. runtime.json present + parseable
+      if (HADRON_DIR) {
+        const rtPath = join(HADRON_DIR, "runtime.json");
+        if (!existsSync(rtPath)) local.push({ level: reachable ? "yellow" : "na", message: "runtime.json absent (clean shutdown, or server never wrote it)" });
+        else { try { JSON.parse(readFileSync(rtPath, "utf-8")); local.push({ level: "green", message: "runtime.json present and parseable" }); } catch { local.push({ level: "red", message: "runtime.json is corrupt (not JSON) — the CLI cannot discover the port" }); } }
+      } else {
+        local.push({ level: "yellow", message: "no .hadron/ found walking up from cwd — using defaults" });
+      }
+
+      // 3. provenance: server code vs this working tree
+      if (reachable) {
+        if (health.commit && cli.commit) {
+          if (health.commit !== cli.commit) local.push({ level: "red", message: `server is running ${short(health.commit)} (started ${ago(health.startedAt)}), working tree is ${short(cli.commit)} — restart it` });
+          else local.push({ level: "green", message: `server matches the working tree (${short(cli.commit)})` });
+        } else local.push({ level: "yellow", message: "no git metadata to compare server vs working tree" });
+        if (health.dirty) local.push({ level: "yellow", message: "server was started from a dirty tree — what runs is not any commit" });
+        if (cli.dirty) local.push({ level: "yellow", message: "working tree has uncommitted changes" });
+        // 4. managedBy: hand-started will not come back
+        if (health.managedBy === "systemd") local.push({ level: "green", message: "server is managed by systemd (boot-restarts)" });
+        else local.push({ level: "red", message: `server is ${health.managedBy || "hand-started"} — it will NOT restart after a reboot (run it under systemd)` });
+      }
+
+      // per-agent findings + caps (authenticated GET — send the token on this GET)
+      let doctor = null;
+      if (reachable) {
+        try {
+          const headers = TOKEN ? { "x-hadron-token": TOKEN } : {};
+          const r = await fetch(`${BASE}/api/doctor`, { headers, signal: AbortSignal.timeout(8000) });
+          if (r.status === 401) local.push({ level: "red", message: "GET /api/doctor rejected the token (401) — check .hadron/token" });
+          else if (!r.ok) local.push({ level: "red", message: `GET /api/doctor failed (${r.status})` });
+          else doctor = await r.json();
+        } catch (e) { local.push({ level: "red", message: `GET /api/doctor errored — ${e.message}` }); }
+      }
+
+      const agents = (doctor && doctor.agents) || [];
+      const reds = local.filter((f) => f.level === "red").length + agents.filter((a) => a.finding.level === "red").length;
+      const yellows = local.filter((f) => f.level === "yellow").length + agents.filter((a) => a.finding.level === "yellow").length;
+
+      if (flags.json) {
+        console.log(JSON.stringify({ cli, server: health, local, doctor }, null, 2));
+        process.exit(reds ? 1 : 0);
+      }
+
+      console.log("hadron doctor — if this machine reboots now, what comes back?\n");
+      if (reachable) {
+        const st = health.dirty ? " (dirty)" : health.commit ? " (clean)" : "";
+        console.log(`server   ${short(health.commit)}${st}  pid ${health.pid}  ${health.managedBy || "hand-started"}  started ${ago(health.startedAt)}`);
+      } else {
+        console.log(`server   unreachable on :${PORT}`);
+      }
+      if (doctor && doctor.claudeCaps) {
+        const c = doctor.claudeCaps;
+        console.log(`caps     ${c.probed ? `claude --session-id: ${c.supportsSessionId ? "yes" : "no"}  --resume: ${c.resume ? "yes" : "no"}` : "claude not found on the server's PATH"}   (server-side probe)`);
+        console.log(`boot     ${doctor.bootGeneration} (source: ${doctor.bootIdSource})`);
+      }
+
+      console.log("\nLocal:");
+      for (const f of local) console.log(`  ${icon[f.level]} ${f.message}`);
+
+      console.log(`\nAgents (${agents.length} live):`);
+      if (!agents.length) console.log("  (none)");
+      for (const a of agents) {
+        console.log(`  ${icon[a.finding.level]} ${a.name}${a.group ? ` [${a.group}]` : ""}  ${a.paneCommand || "(no pane)"}  — ${a.finding.message}${a.finding.crossCheck ? `  [${a.finding.crossCheck}]` : ""}`);
+        if (/^claude/i.test(a.paneCommand || "")) {
+          console.log(`      tmux session PATH resolves claude to: ${a.pathResolvesClaudeTo || "(not on the fresh-shell PATH)"}   (a shell rc file may change it)`);
+        }
+      }
+
+      const verdict = reds ? "FAIL" : yellows ? "OK (with warnings)" : "OK";
+      console.log(`\n${reds} red, ${yellows} yellow  →  ${verdict}`);
+      if (reds) process.exit(1);
+      break;
+    }
     case "version":
     case "--version":
     case "-v": {
@@ -528,6 +617,9 @@ Commands:
        [--jupyter PATH]                    kept; path must contain bin/python3)
   hadron annotations ls [--json]           list pending review comments for the current agent
   hadron annotations resolve <id>          mark a review comment done
+  hadron doctor [--json]                   "if this machine reboots now, what comes back?" —
+                                           server provenance/managedBy + per-agent resume health;
+                                           exit 1 on any red row or red summary item
   hadron version [--json]                  CLI vs server provenance (commit/dirty/managedBy);
                                            exit 1 when the server is stale, a tree is dirty, or
                                            the server could not be verified (down/timeout/older)

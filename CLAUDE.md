@@ -122,6 +122,22 @@ npm test
 #                            exit 1 on stale server (HADRON_TEST_COMMIT), dirty tree, or whenever the
 #                            server can't be verified — down, stalled (5s timeout), HTTP error,
 #                            malformed, older build; falls back to package versions without git)
+#   + test-doctor.js        (`hadron doctor` at the REAL boundary — reuses test-resume-live's fixture:
+#                            shell agent (n/a), seeded claude (green "resumes as correlated"), shared-cwd
+#                            claude (red, shared-cwd text), claude.exe with recognition disabled via
+#                            HADRON_TEST_UNRECOGNIZE_CLAUDE_CMD (red "untracked"); GET /api/doctor is
+#                            token-gated (GET but authenticated), leaks no sessionId key/value; disk-seeded
+#                            malformed-id AND exhausted-attempts checkpoints loaded on restart with a live
+#                            pane are demoted green→red by the decideResume cross-check (evaluated against a
+#                            SIMULATED next boot, so "already attempted this boot" can't mask "attempts
+#                            exhausted"); free-string checkpoint fields (confidence/observed/desiredRuntime/
+#                            restoreState) are allowlisted before emission so a corrupt on-disk value (e.g. a
+#                            token in confidence) can never leak in a field or refusal message; the three
+#                            timestamp fields (cleanExitAt/lastObserved/lastPersistedAt) run through
+#                            safeTimestamp — a token/malformed value emits null (no leak) and a materially-future
+#                            value is rejected (can't dodge the durability + decideResume freshness checks), both
+#                            proven by a shell-pane doc-badts fixture; CLI exits 1 on
+#                            any red row (incl. hand-started server) and reports "server unreachable" first)
 ```
 
 ### Reliability gate
@@ -130,7 +146,8 @@ The suites that define "the core works" — run them before every merge, and
 grow them whenever a core defect ships past them: `test-resume.js`,
 `test-message.js` (dead-pane refusal), `test-agent-ops.js` (CLI front door),
 `test-terminal-ws.js` (fd accounting), `test-provenance.js`, `test-resume-live.js`
-(resume at the real tmux boundary). Planned addition: `test-doctor.js`.
+(resume at the real tmux boundary), `test-doctor.js` (`hadron doctor` — the
+reboot-readiness probe).
 Rationale and the full plan: `design-notes/reliability-plan.md`.
 
 **Silent-failure rule.** An invariant that, when false, silently *disables* a

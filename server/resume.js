@@ -147,7 +147,16 @@ export function scrapeSessionId(cwd, { projectsRoot = join(homedir(), ".claude",
 // Linux and "claude.exe" on macOS (how the native binary is shipped) — the
 // suffix is normalized away, not enumerated, in case it changes again.
 const CLAUDE_CMDS = new Set(["claude"]);
-export const isClaudeCmd = (c) => !!c && CLAUDE_CMDS.has(String(c).trim().toLowerCase().replace(/\.exe$/, ""));
+export const isClaudeCmd = (c) => {
+  if (!c) return false;
+  const raw = String(c).trim().toLowerCase();
+  // Test-only: force a specific pane command to be UNrecognised, to reproduce
+  // the "looks like claude but the tracker never tracked it" class (the
+  // claude.exe bug) without disabling recognition for every agent in the server.
+  const un = process.env.HADRON_TEST_UNRECOGNIZE_CLAUDE_CMD;
+  if (un && raw === un.toLowerCase()) return false;
+  return CLAUDE_CMDS.has(raw.replace(/\.exe$/, ""));
+};
 // Sentinel for the silent-failure class this guards against: a command that
 // looks like claude but isn't recognised means auto-resume is dead for that
 // agent while nothing else complains. Warn once per (invariant, agent).

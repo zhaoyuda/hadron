@@ -111,6 +111,10 @@ hadron notes [show|set|append]           # per-agent durable notes
 hadron version                           # is the server running the code in this tree?
                                          #   commit/dirty/managedBy for both; exit 1 if the
                                          #   server is stale or a tree is dirty (scriptable)
+hadron doctor                            # "if this machine reboots now, what comes back?" —
+                                         #   server provenance + managedBy, and per-agent resume
+                                         #   health (pane state, checkpoint durability, session id,
+                                         #   PATH resolves claude); exit 1 on any red (scriptable)
 ```
 
 `GET /api/health` reports the same provenance (`version`, `commit`, `dirty`,
