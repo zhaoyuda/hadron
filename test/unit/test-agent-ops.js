@@ -212,7 +212,7 @@ async function main() {
     ok(tmuxAlive(D), "delta's tmux session is up (message precondition)");
     // Pre-BOOLEAN_FLAGS, --raw consumed "Ops Delta" as its value and the CLI
     // tried to resolve "hi there" as the target → exit 1.
-    const out = hadron(["message", "--no-enter", "--raw", "Ops Delta", "hi there"]);
+    const out = hadron(["message", "--no-enter", "--raw", "--force", "Ops Delta", "hi there"]);
     ok(/delivered \d+ bytes \(no Enter\)/.test(out), "message --no-enter --raw <name> \"text\" delivers");
   }
 
@@ -341,6 +341,14 @@ async function main() {
     writeFileSync(join(WS, "normal.txt"), "before");
     const r5 = await req("POST", "/api/file", { path: "normal.txt", content: "after" });
     ok(r5.status === 200 && readFileSync(join(WS, "normal.txt"), "utf-8") === "after", "ordinary workspace file still writable");
+  }
+
+  console.log("\n[CLI: help renders (a stray backtick once turned the whole text into NaN)]");
+  {
+    for (const args of [["help"], ["--help"], []]) {
+      const out = hadron(args);
+      ok(out.includes("Commands:") && out.includes("hadron message") && !/^NaN/.test(out), `hadron ${args.join(" ") || "(no args)"} prints the help text`);
+    }
   }
 
   console.log("\n[server restart — pinned survives a full store reload]");

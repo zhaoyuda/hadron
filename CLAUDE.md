@@ -92,8 +92,10 @@ npm test
 #   = test-state-eval.js   (detectState snapshot fixtures)
 #   + test-state-machine.js (nextState reducer — temporal transitions)
 #   + test-security.js      (auth, cwd policy, injection, concurrency over HTTP)
-#   + test-annotations.js / test-message.js / test-upload.js (v0.8 surfaces)
-#   + test-resume.js        (v0.9 auto-resume gate: checkpoint, tombstone, scrape validation)
+#   + test-annotations.js / test-message.js / test-upload.js (v0.8 surfaces; message to a
+#                            bare-shell pane is refused 409 unless force — no paste into zsh)
+#   + test-resume.js        (v0.9 auto-resume gate: checkpoint, tombstone, scrape validation;
+#                            pane_current_command "claude.exe" (macOS) normalizes to claude)
 #   + test-file-revision.js (conditional /api/file writes: revision, 409 conflict, atomicity)
 #   + test-artifacts.js     (browse + suggest jail (per-level realpath revalidation, hidden files, no
 #                            client cwd, suggest { base, files } contract), artifact validation on EVERY

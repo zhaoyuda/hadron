@@ -13,7 +13,9 @@ import { tmux } from "./tmux.js";
 const AGENT_PROCESS_RE = /^(claude[-_]?code|claude|node|npx|bun|deno|\d+\.\d+\.\d+)(\.exe)?$/i;
 
 // Shell processes that indicate claude has exited
-const SHELL_RE = /^(zsh|bash|sh|fish)$/i;
+// Broad on purpose: the message guard fails closed on any of these.
+const SHELL_RE = /^(zsh|bash|sh|dash|ash|ksh|mksh|csh|tcsh|fish|nu|xonsh|elvish|pwsh|powershell)(\.exe)?$/i;
+export const isShellCmd = (cmd) => SHELL_RE.test(String(cmd || "").trim());
 
 // Chrome / status bar lines to strip before analysis
 const CHROME_RE = /ctx \[|⏵⏵|Remote Control|Auto-update|^[─━]+$/i;

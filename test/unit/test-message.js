@@ -116,7 +116,7 @@ async function main() {
       "-leading-dash $(echo INJECTED) `echo INJECTED` \\back\\slash",
       "third line survives intact",
     ].join("\n");
-    const r = await POST(`/api/sessions/${A}/message`, { text: payload, enter: false });
+    const r = await POST(`/api/sessions/${A}/message`, { text: payload, enter: false, force: true });
     const j = await r.json();
     ok(r.status === 200 && j.ok === true, "POST → 200 {ok:true}");
     ok(j.bytes === Buffer.byteLength(payload), `bytes echoes payload size (${j.bytes})`);
@@ -131,10 +131,37 @@ async function main() {
 
   console.log("\n[enter:true submits]");
   {
-    const r = await POST(`/api/sessions/${A}/message`, { text: "echo hadron-msg-ok" });
+    const r = await POST(`/api/sessions/${A}/message`, { text: "echo hadron-msg-ok", force: true });
     ok(r.status === 200, "POST (enter default true) → 200");
     await sleep(600); // paste + 250ms Enter delay + shell echo
     ok(/^hadron-msg-ok$/m.test(capturePane(A)), "command OUTPUT in pane — Enter submitted after the paste");
+  }
+
+  console.log("\n[shell prompt refused — the agent has exited, its pane is zsh/bash]");
+  {
+    // 2026-09 field report: a 937-byte deliverable was "delivered" straight
+    // into zsh (agent's claude had exited) and lost; a message with backticks
+    // or ; would have executed in the target cwd. Default = refuse, 409.
+    const marker = "echo SHELL-ATE-THIS";
+    const r = await POST(`/api/sessions/${A}/message`, { text: marker });
+    const j = await r.json();
+    ok(r.status === 409 && /not running/.test(j.error) && /force/.test(j.error), `bare shell pane → 409 naming the shell + the force escape hatch (${j.shell})`);
+    ok(/^(bash|zsh|sh|fish)$/.test(j.shell || ""), "response carries the foreground shell name");
+    await sleep(500);
+    ok(!capturePane(A).includes("SHELL-ATE-THIS"), "nothing was pasted into the shell");
+    const cli = (() => { try { hadron(["message", A, marker], { stdio: ["ignore", "pipe", "pipe"] }); return null; } catch (e) { return { status: e.status, stderr: String(e.stderr) }; } })();
+    ok(cli && cli.status !== 0 && /not running/.test(cli.stderr), "CLI without --force exits non-zero with the server's reason (no 'delivered N bytes' lie)");
+    ok(!capturePane(A).includes("SHELL-ATE-THIS"), "…and still nothing reached the pane");
+    for (const bad of ["false", "true", 1, [], {}]) {
+      const rb = await POST(`/api/sessions/${A}/message`, { text: marker, force: bad });
+      ok(rb.status === 400, `non-boolean force ${JSON.stringify(bad)} → 400 (truthy strings/objects must not bypass the guard)`);
+    }
+    await sleep(300);
+    ok(!capturePane(A).includes("SHELL-ATE-THIS"), "nothing pasted by the malformed-force probes");
+    const rf = await POST(`/api/sessions/${A}/message`, { text: "echo SHELL-FORCED", force: true });
+    ok(rf.status === 200, "force:true → 200 (explicit shell delivery still possible)");
+    await sleep(600);
+    ok(/^SHELL-FORCED$/m.test(capturePane(A)), "forced text executed in the shell");
   }
 
   console.log("\n[validation]");
@@ -152,14 +179,14 @@ async function main() {
 
   console.log("\n[CLI: hadron message]");
   {
-    const out = hadron(["message", A, "echo hadron-cli-ok"]);
+    const out = hadron(["message", A, "echo hadron-cli-ok", "--force"]);
     ok(/delivered \d+ bytes/.test(out), "CLI reports delivered bytes");
     await sleep(600);
     ok(/^hadron-cli-ok$/m.test(capturePane(A)), "CLI positional text landed and submitted");
 
     // stdin path: `cat brief.md | hadron message <id> -`
     const brief = "stdin line one\nstdin line two with $(echo INJECTED)\nstdin line three";
-    hadron(["message", A, "-", "--no-enter"], { input: brief });
+    hadron(["message", A, "-", "--no-enter", "--force"], { input: brief });
     await sleep(400);
     const pane = capturePane(A);
     ok(pane.includes("stdin line two with $(echo INJECTED)") && pane.includes("stdin line three"), "stdin-piped multiline text landed intact");
@@ -171,7 +198,7 @@ async function main() {
   {
     // Sender attribution is composed CLIENT-side by `hadron message` (agent-ops
     // spec M2) — the route itself must deliver text VERBATIM, never prefix it.
-    const r = await POST(`/api/sessions/${A}/message`, { text: "verbatim-attr-probe", enter: false });
+    const r = await POST(`/api/sessions/${A}/message`, { text: "verbatim-attr-probe", enter: false, force: true });
     ok(r.status === 200, "plain POST → 200");
     await sleep(400);
     const pane = capturePane(A);

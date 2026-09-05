@@ -11,7 +11,7 @@ import { connect as netConnect } from "net";
 import { networkInterfaces, hostname, tmpdir } from "os";
 import { URL } from "url";
 import { randomBytes } from "crypto";
-import { StateDetector } from "./state-detector.js";
+import { StateDetector, isShellCmd } from "./state-detector.js";
 import { probeClaudeCaps, RuntimeTracker, performResume } from "./resume.js";
 import { randomUUID } from "crypto";
 import { loadAgents, loadAgent, saveAgent, saveAgentLocked, archiveAgent, deleteAgent, initWorkspace, getWorkspaceDir, appendAgentField, removeAgentArtifact, isSelfWrite } from "./agent-store.js";
@@ -740,17 +740,35 @@ app.post("/api/sessions/:id/message", async (req, res) => {
   const { id } = req.params;
   if (!isValidId(id)) return res.status(400).json({ error: "invalid id" });
   if (!sessions.has(id)) return res.status(404).json({ error: "session not found" });
-  const { text, enter = true } = req.body;
+  const { text, enter = true, force = false } = req.body;
   if (typeof text !== "string" || text.length === 0) {
     return res.status(400).json({ error: "text (non-empty string) required" });
   }
+  if (typeof force !== "boolean") return res.status(400).json({ error: "force must be a boolean" });
   const tmuxName = tmuxSessionName(id);
   if (tmuxSafe(["has-session", "-t", tmuxName]) === null) {
     return res.status(409).json({ error: `agent tmux session ${tmuxName} is not running` });
   }
+  // A message is a prompt for the agent. If the agent's process has exited the
+  // pane is a bare shell, and pasting there hands arbitrary text to the shell
+  // for execution while reporting success (2026-09 field report: a finished
+  // deliverable "delivered 937 bytes" straight into zsh, lost for days). Refuse
+  // unless the caller explicitly wants the shell (force).
+  // Fails closed: an unreadable foreground command is treated like a shell.
+  // Re-checked right before the paste (guard) — the agent can exit between
+  // the first look and the buffer landing.
+  const shellCheck = () => {
+    const fg = (tmuxSafe(["display-message", "-t", tmuxName, "-p", "#{pane_current_command}"]) || "").trim();
+    return !fg || isShellCmd(fg) ? fg || "(unknown)" : null;
+  };
+  const shell = force ? null : shellCheck();
+  if (shell) {
+    return res.status(409).json({ error: `agent is not running — its pane is at a ${shell} prompt (pass force to paste into the shell anyway)`, shell });
+  }
   try {
-    await deliverToPane(tmuxName, text, enter);
+    await deliverToPane(tmuxName, text, enter, force ? null : shellCheck);
   } catch (e) {
+    if (e.shell) return res.status(409).json({ error: `agent exited while the message was in flight — pane is now a ${e.shell} prompt; nothing pasted`, shell: e.shell });
     return res.status(500).json({ error: e.message });
   }
   res.json({ ok: true, bytes: Buffer.byteLength(text) });
@@ -760,13 +778,18 @@ app.post("/api/sessions/:id/message", async (req, res) => {
 // length and content are unconstrained. Unique buffer name so concurrent
 // deliveries can't clobber each other; -d reclaims it on paste. Shared by the
 // message API and the auto-resume path (resume.js).
-async function deliverToPane(tmuxName, text, enter = true) {
+// guard: optional () => shellName|null, consulted after the buffer is loaded
+// and immediately before the paste — the last possible moment to notice the
+// target became a shell. Throws { shell } and reclaims the buffer.
+async function deliverToPane(tmuxName, text, enter = true, guard = null) {
   const dir = mkdtempSync(join(tmpdir(), "hadron-msg-"));
   const file = join(dir, "text");
   const buf = `hadron-msg-${Date.now()}-${randomBytes(4).toString("hex")}`;
   try {
     writeFileSync(file, text);
     tmux(["load-buffer", "-b", buf, file]);
+    const shell = guard ? guard() : null;
+    if (shell) throw Object.assign(new Error(`pane is a ${shell} prompt`), { shell });
     tmux(["paste-buffer", "-p", "-d", "-b", buf, "-t", tmuxName]);
   } catch (e) {
     tmuxSafe(["delete-buffer", "-b", buf]);

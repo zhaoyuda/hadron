@@ -136,13 +136,13 @@ try {
   // ── 4. messaging with attribution, fired from INSIDE agent A's pane ──
   // (before close/restore so B's original pane is still the delivery target)
   const CLI = join(REPO, "bin", "hadron.js");
-  typeInPane(A, `node ${CLI} message "Beta Two" "ping-e2e-attr" --no-enter`);
+  typeInPane(A, `node ${CLI} message "Beta Two" "ping-e2e-attr" --no-enter --force`);
   r.ok(await until(() => capturePane(B).includes("ping-e2e-attr")), "message text landed in the target pane");
   r.ok(capturePane(B).includes(`[hadron message from Alpha One (${A})]`),
     "attribution prefix names the SENDING agent (whoami inside the pane)");
   execFileSync("tmux", ["send-keys", "-t", paneOf(B), "C-c"]);
 
-  typeInPane(A, `node ${CLI} message "Beta Two" "ping-raw-probe" --raw --no-enter`);
+  typeInPane(A, `node ${CLI} message "Beta Two" "ping-raw-probe" --raw --no-enter --force`);
   r.ok(await until(() => capturePane(B).includes("ping-raw-probe")), "--raw message landed");
   const attrCount = (capturePane(B).match(/\[hadron message from/g) || []).length;
   r.ok(attrCount === 1, "--raw suppressed the attribution prefix (only the earlier one on screen)");

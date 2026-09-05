@@ -113,8 +113,20 @@ export function scrapeSessionId(cwd, { projectsRoot = join(homedir(), ".claude",
 // ── runtime checkpoint tracker ───────────────────────────────────────────
 // "claude" only — deliberately NOT "node": a dev server running in the pane
 // must not be checkpointed as a claude session (a wrong auto-resume is worse
-// than a missed one). The claude CLI reports pane_current_command="claude".
+// than a missed one). The claude CLI reports pane_current_command="claude" on
+// Linux and "claude.exe" on macOS (how the native binary is shipped) — the
+// suffix is normalized away, not enumerated, in case it changes again.
 const CLAUDE_CMDS = new Set(["claude"]);
+export const isClaudeCmd = (c) => !!c && CLAUDE_CMDS.has(String(c).trim().toLowerCase().replace(/\.exe$/, ""));
+// Sentinel for the silent-failure class this guards against: a command that
+// looks like claude but isn't recognised means auto-resume is dead for every
+// agent while nothing else complains. Warn once per process.
+let warnedClaudeish = false;
+function warnClaudeish(cmd) {
+  if (warnedClaudeish || !/^claude/i.test(cmd || "")) return;
+  warnedClaudeish = true;
+  console.warn(`[resume] pane_current_command ${JSON.stringify(cmd)} looks like claude but is not tracked — auto-resume checkpoints will not be written`);
+}
 const SETTLE_POLLS = 3; // claude must be foreground this long before we track it
 
 export class RuntimeTracker {
@@ -135,7 +147,8 @@ export class RuntimeTracker {
   // by the caller-provided save.
   observe(cmd) {
     const rt = this.session.runtime || (this.session.runtime = {});
-    const isClaude = CLAUDE_CMDS.has(cmd);
+    const isClaude = isClaudeCmd(cmd);
+    if (!isClaude) warnClaudeish(cmd);
 
     if (isClaude) {
       this.claudePolls++;
@@ -239,7 +252,7 @@ export async function performResume(session, tmuxName, { deliver, save, generati
   for (let i = 0; i < 30; i++) {
     await sleep(2000);
     const cmd = tmuxSafe(["display-message", "-t", tmuxName, "-p", "#{pane_current_command}"]);
-    if (cmd && CLAUDE_CMDS.has(cmd.trim())) { up = true; break; }
+    if (isClaudeCmd(cmd)) { up = true; break; }
   }
   rt.restoreAttempt.state = up ? "ready" : "failed";
   save(session);

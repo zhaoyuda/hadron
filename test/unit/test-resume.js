@@ -10,7 +10,7 @@
  *
  * Run: node test/unit/test-resume.js
  */
-import { decideResume, scrapeSessionId, validateSessionFile, claudeProjectDir, RuntimeTracker, performResume } from "../../server/resume.js";
+import { decideResume, scrapeSessionId, validateSessionFile, claudeProjectDir, RuntimeTracker, performResume, isClaudeCmd } from "../../server/resume.js";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -86,6 +86,21 @@ console.log("\n[RuntimeTracker — transitions and tombstone]");
   ok(D({ ...session.runtime, sessionId: SID, confidence: "correlated", lastObservedAt: FRESH }).resume === false, "tracker's tombstoned checkpoint is refused by decideResume");
   tr.observe("claude"); tr.observe("claude"); tr.observe("claude");
   ok(session.runtime.cleanExitAt === null && session.runtime.desiredRuntime === "claude", "re-entering claude clears the tombstone");
+}
+
+console.log("\n[RuntimeTracker — macOS reports claude.exe (2026-09 field report: resume 100% dead)]");
+{
+  // The native binary on macOS shows up in pane_current_command as "claude.exe";
+  // before normalization every checkpoint was rejected as "checkpoint stale".
+  ok(isClaudeCmd("claude") && isClaudeCmd("claude.exe") && isClaudeCmd("CLAUDE.EXE") && isClaudeCmd(" claude.exe\n"), "isClaudeCmd: claude / claude.exe (any case, trimmed)");
+  ok(!isClaudeCmd("node") && !isClaudeCmd("claude-code") && !isClaudeCmd("claude.exe.sh") && !isClaudeCmd("") && !isClaudeCmd(undefined), "isClaudeCmd: node / other claude-ish names / empty are NOT claude");
+  const session = { id: "mac", cwd: "/nonexistent/cwd" };
+  const tr = new RuntimeTracker(session, { save: () => {} });
+  tr.observe("claude.exe"); tr.observe("claude.exe"); tr.observe("claude.exe");
+  ok(session.runtime.observedRuntime === "claude" && session.runtime.lastObservedAt, "three claude.exe polls settle → lastObservedAt written");
+  ok(D({ ...session.runtime, sessionId: SID, confidence: "authoritative" }).resume === true, "…and decideResume accepts that checkpoint");
+  tr.observe("zsh");
+  ok(session.runtime.cleanExitAt !== null, "claude.exe → shell tombstones (the path that had never executed on macOS)");
 }
 
 console.log("\n[RuntimeTracker — shared-cwd scrape guard]");

@@ -26,6 +26,7 @@ cat brief.md | hadron message worker-2 -    # multiline brief from a file
 - **Only message siblings when the user asked for coordination.** Never set up automatic agent-to-agent chatter, relays, or reply loops — messaging is explicit and one-shot.
 - Your message is delivered with an attribution prefix (`[hadron message from <name> (<id>)]`) so the receiver knows who sent it. `--raw` drops the prefix.
 - It's fine to message a **working** agent — Claude Code queues composer input; don't wait for it to go idle.
+- If the target's Claude Code has **exited** (its pane is a bare shell), the message is refused with exit 1 — nothing is pasted, because a shell would execute the text. Tell the user the agent is down rather than retrying; `--force` pastes into the shell only when that is genuinely what you want.
 
 ## Pin / unpin
 

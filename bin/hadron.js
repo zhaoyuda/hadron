@@ -181,7 +181,7 @@ function printSkillsStatus() {
 // ── flag parsing ──
 // Presence-only flags must be declared here or they swallow the next positional
 // (`hadron message --raw "Beta Two" hi` would resolve "hi" as the target).
-const BOOLEAN_FLAGS = new Set(["json", "archived", "raw", "no-enter", "start", "auto"]);
+const BOOLEAN_FLAGS = new Set(["json", "archived", "raw", "no-enter", "start", "auto", "force"]);
 function parseFlags(args) {
   const flags = {};
   const positional = [];
@@ -301,7 +301,9 @@ async function main() {
         const me = await whoamiSoft();
         if (me) text = `[hadron message from ${me.name} (${me.id})]\n${text}`;
       }
-      const out = await api("POST", `/api/sessions/${agent.id}/message`, { text, enter: !flags["no-enter"] });
+      // force: paste even when the pane is a bare shell (default: the server
+      // refuses — a shell would execute the text and the message would be lost).
+      const out = await api("POST", `/api/sessions/${agent.id}/message`, { text, enter: !flags["no-enter"], force: !!flags.force });
       console.log(`delivered ${out.bytes} bytes${flags["no-enter"] ? " (no Enter)" : ""}`);
       break;
     }
@@ -448,8 +450,15 @@ async function main() {
       die("usage: hadron annotations <ls [--json] | resolve <id>>");
       break;
     }
-    default:
-      console.log(`hadron — manage Hadron agents from the terminal
+    case "version":
+    case "--version":
+    case "-v":
+      console.log(JSON.parse(readFileSync(join(REPO, "package.json"), "utf-8")).version);
+      break;
+    default: {
+      const known = cmd === undefined || cmd === "help" || cmd === "--help" || cmd === "-h";
+      if (!known) console.error(`hadron: unknown command "${cmd}"\n`);
+      (known ? console.log : console.error)(`hadron — manage Hadron agents from the terminal
 
 Commands:
   hadron ls [--json] [--archived]          list all agents (--archived: the archive instead)
@@ -474,12 +483,14 @@ Commands:
   hadron skills install                    symlink operation skills into ~/.claude/skills/ (additive)
   hadron skills sync                       like install, but also prune our own dead links
   hadron skills [status|uninstall]
-  hadron message <name|id> "text" [--no-enter] [--raw]
+  hadron message <name|id> "text" [--no-enter] [--raw] [--force]
                                            deliver a prompt to a running agent — reliable for
-                                           multiline/special chars (tmux buffer paste); `-` or
+                                           multiline/special chars (tmux buffer paste); '-' or
                                            piped stdin reads the text from stdin. Sent from inside
                                            a hadron agent session, the text is prefixed with a
-                                           sender-attribution line (--raw suppresses it)
+                                           sender-attribution line (--raw suppresses it).
+                                           Refused when the agent's pane is a bare shell
+                                           (agent exited) — --force pastes anyway
   hadron send <name|id> "keys"             low-level: type raw keys into a pane (single short line)
 
 Targets accept an agent id or its exact name (case-insensitive); ambiguous
@@ -488,6 +499,8 @@ CLI verb — use the dashboard (Agents → Delete Agent).
 
 Env: HADRON_PORT / HADRON_TOKEN override; otherwise both are read from the
 nearest .hadron/ (runtime.json + token) walking up from cwd; port defaults to 3000.`);
+      if (!known) process.exit(1);
+    }
   }
 }
 

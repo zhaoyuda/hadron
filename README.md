@@ -208,6 +208,64 @@ open http://<tailscale-ip>:3000
 
 The auto-generated token (`.hadron/token`) still gates every mutating request, but only expose the port on a trusted network (e.g. Tailscale), never the public internet.
 
+### Run at login (so auto-resume gets its chance)
+
+Auto-resume (v0.9) fires from the server's boot path: on startup every agent whose tmux session is gone gets a fresh one, and a fresh checkpoint resumes its Claude session. That only helps after a reboot if the server itself comes back — a server started by hand in a tmux window does not. Run it as a service:
+
+**Linux (systemd)** — `/etc/systemd/system/hadron.service`:
+
+```ini
+[Unit]
+Description=Hadron dashboard
+After=network.target
+
+[Service]
+User=you
+WorkingDirectory=/path/to/hadron
+Environment=PORT=3000
+ExecStart=/usr/bin/node server/index.js /home/you/work
+KillMode=process
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`KillMode=process` matters: a restart of the unit must stop only the server, never the agents' tmux sessions it spawned. `sudo systemctl enable --now hadron`.
+
+**macOS (launchd)** — `~/Library/LaunchAgents/com.hadron.server.plist` (one per workspace; change the label, port and paths):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.hadron.server</string>
+  <key>ProgramArguments</key><array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/path/to/hadron/server/index.js</string>
+    <string>/Users/you/work</string>
+  </array>
+  <key>WorkingDirectory</key><string>/path/to/hadron</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>PORT</key><string>3000</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>AbandonProcessGroup</key><true/>
+  <key>StandardOutPath</key><string>/tmp/hadron.log</string>
+  <key>StandardErrorPath</key><string>/tmp/hadron.log</string>
+</dict></plist>
+```
+
+`AbandonProcessGroup` is the launchd counterpart of `KillMode=process`; `PATH` must include wherever `node`, `tmux` and `claude` live because launchd does not read your shell profile. `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hadron.server.plist` to load it now.
+
+**Resume constraints worth knowing**
+
+- Agents that were spawned by Hadron carry an authoritative session id (`--session-id` is injected at launch) and resume cleanly.
+- Agents whose Claude session started some other way have their session id scraped from `~/.claude/projects/` — except when **several agents share one `cwd`**: the transcripts there are indistinguishable per agent, so Hadron refuses to guess and those agents do not auto-resume. Give each agent its own working directory, or spawn it through Hadron, if you want it to come back after a reboot.
+
 ## Roadmap
 
 See [ROADMAP.md](ROADMAP.md) for the full roadmap. Current version: **v0.7**.
