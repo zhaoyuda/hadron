@@ -116,7 +116,15 @@ hadron version                           # is the server running the code in thi
 `GET /api/health` reports the same provenance (`version`, `commit`, `dirty`,
 `repoRoot`, `startedAt`, `pid`, `node`, `platform`, `managedBy`) alongside the
 live pty/session counts — captured once at boot, so it describes the tree the
-process was started from.
+process was started from. `bootIdSource` says where the auto-resume boot
+generation came from (`linux-boot_id`, `darwin-kern.boottime`, `env`, or
+`process-random` — the last means "one resume attempt per machine boot" has
+degraded to per-server-start, and the server log says so).
+
+Server env knobs (tests and unusual hosts only): `HADRON_TMUX_SOCKET` runs every
+tmux call against an explicit socket (`tmux -S`), `HADRON_BOOT_ID` overrides the
+boot generation, `HADRON_RESUME_READY_POLLS` bounds the 2 s polls spent waiting
+for a resumed TUI (default 30).
 
 ### State Detection
 

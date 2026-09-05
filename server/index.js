@@ -12,11 +12,11 @@ import { networkInterfaces, hostname, tmpdir } from "os";
 import { URL } from "url";
 import { randomBytes } from "crypto";
 import { StateDetector, isShellCmd } from "./state-detector.js";
-import { probeClaudeCaps, RuntimeTracker, performResume } from "./resume.js";
+import { probeClaudeCaps, RuntimeTracker, performResume, BOOT } from "./resume.js";
 import { randomUUID } from "crypto";
 import { loadAgents, loadAgent, saveAgent, saveAgentLocked, archiveAgent, deleteAgent, initWorkspace, getWorkspaceDir, appendAgentField, removeAgentArtifact, isSelfWrite } from "./agent-store.js";
 import { resolve } from "path";
-import { tmux, tmuxSafe, isValidId, shellQuoteArgv } from "./tmux.js";
+import { tmux, tmuxSafe, isValidId, shellQuoteArgv, tmuxArgv } from "./tmux.js";
 import { syncSkills } from "./skills.js";
 import { collectProvenance } from "./provenance.js";
 import {
@@ -1842,7 +1842,7 @@ wss.on("connection", (ws) => {
   try {
     pty = spawn(
       "tmux",
-      ["attach-session", "-t", effectiveTmuxName],
+      tmuxArgv(["attach-session", "-t", effectiveTmuxName]),
       {
         name: "xterm-256color",
         cols: 80,
@@ -1976,7 +1976,8 @@ server.listen(PORT, HADRON_HOST, () => {
   const config = initWorkspace(WORKSPACE);
   AUTH_TOKEN = loadOrCreateToken();
   writeRuntimeFile();
-  PROVENANCE = collectProvenance(dirname(__dirname));
+  PROVENANCE = { ...collectProvenance(dirname(__dirname)), bootIdSource: BOOT.source };
+  console.log(`[resume] boot generation ${BOOT.id} (source: ${BOOT.source})`);
   probeClaudeCaps(); // warm the capability cache before any autostart needs it
   // Additive self-heal: link any not-yet-linked operation skills into ~/.claude/skills/
   // so a new skill appears after `git pull` + restart. Additive only (never prune or

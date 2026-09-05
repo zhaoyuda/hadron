@@ -44,7 +44,12 @@ const req = (method, p, body) => fetch(`${BASE}${p}`, {
 async function createAgent(name) {
   const r = await req("POST", "/api/sessions", { name, launchCommand: "shell" });
   if (r.status !== 201) throw new Error(`agent create failed: ${r.status}`);
-  return (await r.json()).id;
+  const id = (await r.json()).id;
+  // tmux 3.4 sizes a new detached session from the server's LATEST client (a tiny
+  // hidden web terminal on the developer's tmux → 10x5 panes where readline
+  // hard-wraps). Give this throwaway pane a real width for capture-pane.
+  try { execFileSync("tmux", ["resize-window", "-t", `hadron-${WS_NAME}-${id}`, "-x", "120", "-y", "30"], { stdio: "ignore" }); } catch {}
+  return id;
 }
 
 const agentFile = (id) => join(WS, ".hadron", "agents", `${id}.json`);
@@ -238,6 +243,7 @@ async function main() {
     const rE = await req("POST", "/api/sessions", { name: "Ops Echo", launchCommand: "cc-echo", autostart: true });
     ok(rE.status === 201, "spawn with a config-defined launcher → 201");
     const E = (await rE.json()).id;
+    try { execFileSync("tmux", ["resize-window", "-t", `hadron-${WS_NAME}-${E}`, "-x", "120", "-y", "30"], { stdio: "ignore" }); } catch {} // see createAgent
     let pane = "";
     for (let i = 0; i < 25 && !pane.includes("custom-launcher-ran"); i++) {
       await sleep(200);
@@ -253,6 +259,7 @@ async function main() {
     const rS = await req("POST", "/api/sessions", { name: "Ops Spaced", launchCommand: "cc-spaced", autostart: true });
     ok(rS.status === 201, "spawn with a spaced/metachar argv element → 201");
     const S = (await rS.json()).id;
+    try { execFileSync("tmux", ["resize-window", "-t", `hadron-${WS_NAME}-${S}`, "-x", "120", "-y", "30"], { stdio: "ignore" }); } catch {} // see createAgent
     let paneS = "";
     for (let i = 0; i < 25 && !/^one two;three$/m.test(paneS); i++) {
       await sleep(200);

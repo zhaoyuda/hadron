@@ -112,6 +112,11 @@ npm test
 #                            The OS-level fd probe self-validates (+1/-1 for a pty opened in the
 #                            test's own process) and prints an honest `skip` where it can't see
 #                            ptys — never a vacuous 0 === 0)
+#   + test-resume-live.js   (auto-resume at the REAL boundary: private tmux server (HADRON_TMUX_SOCKET) +
+#                            a process actually named claude/claude.exe; checkpoint on disk, shared-cwd
+#                            refusal warned once per agent, tombstone, reboot via HADRON_BOOT_ID (same id →
+#                            no second launch, new id → launches), failed resume; self-validating fixture,
+#                            honest skip where tmux reports a kernel proc name instead of argv[0])
 #   + test-provenance.js    (/api/health provenance — version/commit/dirty/repoRoot/startedAt/
 #                            managedBy captured at boot from a throwaway git copy; `hadron version`
 #                            exit 1 on stale server (HADRON_TEST_COMMIT), dirty tree, or whenever the
@@ -124,8 +129,8 @@ npm test
 The suites that define "the core works" — run them before every merge, and
 grow them whenever a core defect ships past them: `test-resume.js`,
 `test-message.js` (dead-pane refusal), `test-agent-ops.js` (CLI front door),
-`test-terminal-ws.js` (fd accounting), `test-provenance.js`. Planned additions:
-`test-resume-live.js` (resume at the real tmux boundary), `test-doctor.js`.
+`test-terminal-ws.js` (fd accounting), `test-provenance.js`, `test-resume-live.js`
+(resume at the real tmux boundary). Planned addition: `test-doctor.js`.
 Rationale and the full plan: `design-notes/reliability-plan.md`.
 
 **Silent-failure rule.** An invariant that, when false, silently *disables* a
@@ -222,3 +227,17 @@ staging first:
    fails.
 4. Check no prod agent is `working`, then: merge → main, `git push`,
    `sudo systemctl restart hadron`.
+
+### tmux safety (learned the hard way, 2026-09-05)
+
+- **Never run `tmux kill-server` from inside a pane.** Hadron only ever issues
+  targeted `kill-session`; `server/tmux.js` refuses `kill-server` outright.
+- **`TMUX_TMPDIR` is not isolation.** When `$TMUX` is set (any Hadron agent,
+  any tmux pane), tmux resolves the socket from `$TMUX` and ignores
+  `TMUX_TMPDIR` — an "isolated" `new-session` / `kill-server` lands on the
+  production server (this took out every agent once). A sandbox tmux is
+  `tmux -S <socket>` (immune to inherited env); a test Hadron server gets
+  `HADRON_TMUX_SOCKET=<socket>` and `TMUX` unset in its env.
+- **Boot generation** (`server/resume.js` `readBootId`): auto-resume fires at
+  most once per agent per *machine* boot (Linux `/proc/sys/kernel/random/boot_id`,
+  macOS `kern.boottime`); `HADRON_BOOT_ID` overrides it for tests only.

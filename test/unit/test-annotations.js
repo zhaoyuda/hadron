@@ -41,7 +41,13 @@ const DEL = (p) => fetch(`${BASE}${p}`, { method: "DELETE", headers: authHeaders
 async function createAgent(name) {
   const r = await POST("/api/sessions", { name, launchCommand: "shell" });
   if (r.status !== 201) throw new Error(`agent create failed: ${r.status}`);
-  return (await r.json()).id;
+  const id = (await r.json()).id;
+  // tmux 3.4 sizes a new detached session from the server's LATEST client (a
+  // 10-column hidden web terminal on the developer's tmux makes every new pane
+  // 10x5, where readline hard-wraps a literal like /hadron-review across rows).
+  // Give this throwaway pane a real width so capture-pane sees whole lines.
+  try { execFileSync("tmux", ["resize-window", "-t", `hadron-${WS_NAME}-${id}`, "-x", "120", "-y", "30"], { stdio: "ignore" }); } catch {}
+  return id;
 }
 const annUrl = (id, rest = "") => `/api/sessions/${id}/annotations${rest}`;
 
@@ -460,6 +466,7 @@ async function main() {
     const jr = await (await POST(annUrl(D, "/retry-dispatch"))).json();
     ok(jr.ok === false && jr.dispatchError, "retry while tmux still dead → ok:false + dispatchError");
     execFileSync("tmux", ["new-session", "-d", "-s", `hadron-${WS_NAME}-${D}`, "-x", "80", "-y", "24"]);
+    try { execFileSync("tmux", ["resize-window", "-t", `hadron-${WS_NAME}-${D}`, "-x", "120", "-y", "30"], { stdio: "ignore" }); } catch {}
     const jr2 = await (await POST(annUrl(D, "/retry-dispatch"))).json();
     ok(jr2.ok === true && jr2.summary.dispatchError === null, "retry after tmux back → ok, dispatchError cleared");
     await sleep(400);

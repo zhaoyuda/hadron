@@ -42,7 +42,12 @@ const POST = (p, body) => fetch(`${BASE}${p}`, {
 async function createAgent(name) {
   const r = await POST("/api/sessions", { name, launchCommand: "shell" });
   if (r.status !== 201) throw new Error(`agent create failed: ${r.status}`);
-  return (await r.json()).id;
+  const id = (await r.json()).id;
+  // tmux 3.4 sizes a new detached session from the server's LATEST client (a tiny
+  // hidden web terminal on the developer's tmux → 10x5 panes where readline
+  // hard-wraps). Give this throwaway pane a real width for capture-pane.
+  try { execFileSync("tmux", ["resize-window", "-t", `hadron-${WS_NAME}-${id}`, "-x", "120", "-y", "30"], { stdio: "ignore" }); } catch {}
+  return id;
 }
 
 const paneOf = (agentId) => `hadron-${WS_NAME}-${agentId}`;

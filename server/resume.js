@@ -20,8 +20,8 @@
  * (server boot after a machine crash). A pane the user parked at a shell is a
  * legal state and is left alone.
  */
-import { execFile } from "child_process";
-import { readdirSync, statSync, openSync, readSync, closeSync } from "fs";
+import { execFile, execFileSync } from "child_process";
+import { readdirSync, statSync, openSync, readSync, closeSync, readFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { randomUUID } from "crypto";
@@ -30,7 +30,36 @@ import { warnOnce } from "./log.js";
 
 const UUID_RE = /^[0-9a-fA-F][0-9a-fA-F-]{7,63}$/; // strict enough to be shell-inert
 export const RESUME_TTL_MS = 7 * 24 * 3600 * 1000;
-export const BOOT_GENERATION = `boot-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
+
+// ── boot generation ──────────────────────────────────────────────────────
+// Semantics: ONE resume attempt per agent per MACHINE boot. A service restart
+// mid-boot must not re-fire a resume that already ran (or failed) this boot, so
+// the generation is derived from the machine's boot id, not the process.
+// HADRON_BOOT_ID overrides it (tests simulate reboots); when no source works
+// the fallback is per-process and says so — silently degrading to "every
+// restart is a new boot" is exactly the class of failure this module guards.
+export function readBootId(env = process.env, platform = process.platform, { warn = warnOnce } = {}) {
+  const override = env.HADRON_BOOT_ID;
+  if (override !== undefined && override !== "") {
+    if (/^[A-Za-z0-9._-]{1,64}$/.test(override)) return { id: `boot-${override}`, source: "env" };
+    warn("bootid:server", `[resume] HADRON_BOOT_ID ${JSON.stringify(override)} ignored — must match [A-Za-z0-9._-]{1,64}`);
+  }
+  try {
+    if (platform === "linux") {
+      const id = readFileSync("/proc/sys/kernel/random/boot_id", "utf-8").trim();
+      if (UUID_RE.test(id)) return { id: `boot-${id}`, source: "linux-boot_id" };
+    } else if (platform === "darwin") {
+      const out = execFileSync("sysctl", ["-n", "kern.boottime"], { encoding: "utf-8", timeout: 3000, stdio: ["ignore", "pipe", "ignore"] });
+      const m = out.match(/sec\s*=\s*(\d+)/);
+      if (m) return { id: `boot-darwin-${m[1]}`, source: "darwin-kern.boottime" };
+    }
+  } catch {}
+  const id = `boot-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
+  warn("bootid:server", `[resume] machine boot id unavailable on ${platform} — using per-process id ${id}; "one resume attempt per boot" degrades to per-server-start`);
+  return { id, source: "process-random" };
+}
+export const BOOT = readBootId();
+export const BOOT_GENERATION = BOOT.id;
 
 // ── capability probe ─────────────────────────────────────────────────────
 // Codex review: probe and persist, never silently fall back to guessing.
@@ -158,8 +187,11 @@ export class RuntimeTracker {
           rt.desiredRuntime = "claude";
           rt.cleanExitAt = null;
           delete rt.restoreAttempt; // a live session supersedes old attempts
-          urgent = true;
         }
+        // The settle itself is a transition, not a heartbeat: persist now. Otherwise a
+        // Hadron-spawned session (desiredRuntime already "claude") has no lastObservedAt
+        // on disk for up to 30 s, and a crash in that window is "checkpoint stale".
+        urgent = true;
       }
       if (this.claudePolls >= SETTLE_POLLS) {
         rt.observedRuntime = "claude";
@@ -167,7 +199,11 @@ export class RuntimeTracker {
         // Session id: cheap to skip, expensive to find — only when missing or
         // stale (revalidate every 5 min; ids change when sessions fork).
         const now = Date.now();
-        if ((!rt.sessionId || now - this.lastScrapeAt > 5 * 60 * 1000) && !this.cwdShared()) {
+        const shared = this.cwdShared();
+        if (shared && !rt.sessionId) {
+          warnOnce(`sharedcwd:${this.session.id}`, `[resume] agent ${this.session.id}: cwd ${JSON.stringify(this.session.cwd || null)} is shared with another agent (or unset) — its claude session id cannot be scraped, auto-resume is off for it until it is launched by Hadron with --session-id`);
+        }
+        if ((!rt.sessionId || now - this.lastScrapeAt > 5 * 60 * 1000) && !shared) {
           this.lastScrapeAt = now;
           const hit = scrapeSessionId(this.session.cwd || process.cwd());
           // Never demote an authoritative id with a scrape guess.
@@ -229,7 +265,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // deliver: (tmuxName, text, enter) => void — the server's bracketed-paste
 // message path, injected so this module stays free of buffer bookkeeping.
-export async function performResume(session, tmuxName, { deliver, save, generation = BOOT_GENERATION, log = console.log, launchArgv = ["claude"] }) {
+// HADRON_RESUME_READY_POLLS: how many 2 s polls to wait for the TUI (default 30
+// = 60 s; tests shorten the failed-resume path). Must be an integer 1..300 —
+// anything else (incl. "Infinity") falls back to 30 so the wait stays bounded.
+export function readyPollsFrom(raw) {
+  const n = /^\d{1,3}$/.test(String(raw ?? "").trim()) ? Number(raw) : 30;
+  return n >= 1 && n <= 300 ? n : 30;
+}
+const READY_POLLS = readyPollsFrom(process.env.HADRON_RESUME_READY_POLLS);
+
+export async function performResume(session, tmuxName, { deliver, save, generation = BOOT_GENERATION, log = console.log, launchArgv = ["claude"], readyPolls = READY_POLLS }) {
   const rt = session.runtime;
   const decision = decideResume(rt, { generation });
   if (!decision.resume) return decision;
@@ -248,7 +293,7 @@ export async function performResume(session, tmuxName, { deliver, save, generati
   // Wait for the TUI to own the pane before declaring ready (and before any
   // resumeCommand — pasting into a bash prompt would be shell execution).
   let up = false;
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < readyPolls; i++) {
     await sleep(2000);
     const cmd = tmuxSafe(["display-message", "-t", tmuxName, "-p", "#{pane_current_command}"]);
     if (isClaudeCmd(cmd)) { up = true; break; }
