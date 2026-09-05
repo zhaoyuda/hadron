@@ -18,6 +18,7 @@ import { loadAgents, loadAgent, saveAgent, saveAgentLocked, archiveAgent, delete
 import { resolve } from "path";
 import { tmux, tmuxSafe, isValidId, shellQuoteArgv } from "./tmux.js";
 import { syncSkills } from "./skills.js";
+import { collectProvenance } from "./provenance.js";
 import {
   listAnnotations, createAnnotation, updateAnnotation, deleteAnnotation,
   sendAnnotations, resolveAnnotation, reopenAnnotations, retryDispatch,
@@ -418,8 +419,12 @@ function ensureDefaults() {
 // Ops visibility: live pty count is the early-warning signal for the macOS
 // ptmx-exhaustion incident class (system cap 511 — the user finds out from
 // iTerm failing to open unless we surface it first).
+// Provenance (version/commit/dirty/managedBy…) is captured once at boot so a
+// service still running last week's code says so — `hadron version` and
+// `hadron doctor` compare it against the working tree.
+let PROVENANCE = null;
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true, livePtys: livePtys.size, liveSessions: sessions.size, wsClients: wss.clients.size });
+  res.json({ ok: true, livePtys: livePtys.size, liveSessions: sessions.size, wsClients: wss.clients.size, ...(PROVENANCE || {}) });
 });
 
 app.get("/api/workspace", (req, res) => {
@@ -1971,6 +1976,7 @@ server.listen(PORT, HADRON_HOST, () => {
   const config = initWorkspace(WORKSPACE);
   AUTH_TOKEN = loadOrCreateToken();
   writeRuntimeFile();
+  PROVENANCE = collectProvenance(dirname(__dirname));
   probeClaudeCaps(); // warm the capability cache before any autostart needs it
   // Additive self-heal: link any not-yet-linked operation skills into ~/.claude/skills/
   // so a new skill appears after `git pull` + restart. Additive only (never prune or

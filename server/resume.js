@@ -26,6 +26,7 @@ import { join } from "path";
 import { homedir } from "os";
 import { randomUUID } from "crypto";
 import { tmuxSafe, shellQuoteArgv } from "./tmux.js";
+import { warnOnce } from "./log.js";
 
 const UUID_RE = /^[0-9a-fA-F][0-9a-fA-F-]{7,63}$/; // strict enough to be shell-inert
 export const RESUME_TTL_MS = 7 * 24 * 3600 * 1000;
@@ -119,13 +120,11 @@ export function scrapeSessionId(cwd, { projectsRoot = join(homedir(), ".claude",
 const CLAUDE_CMDS = new Set(["claude"]);
 export const isClaudeCmd = (c) => !!c && CLAUDE_CMDS.has(String(c).trim().toLowerCase().replace(/\.exe$/, ""));
 // Sentinel for the silent-failure class this guards against: a command that
-// looks like claude but isn't recognised means auto-resume is dead for every
-// agent while nothing else complains. Warn once per process.
-let warnedClaudeish = false;
-function warnClaudeish(cmd) {
-  if (warnedClaudeish || !/^claude/i.test(cmd || "")) return;
-  warnedClaudeish = true;
-  console.warn(`[resume] pane_current_command ${JSON.stringify(cmd)} looks like claude but is not tracked — auto-resume checkpoints will not be written`);
+// looks like claude but isn't recognised means auto-resume is dead for that
+// agent while nothing else complains. Warn once per (invariant, agent).
+function warnClaudeish(cmd, agentId) {
+  if (!/^claude/i.test(cmd || "")) return;
+  warnOnce(`claudeish:${agentId}`, `[resume] agent ${agentId}: pane_current_command ${JSON.stringify(cmd)} looks like claude but is not tracked — auto-resume checkpoints will not be written`);
 }
 const SETTLE_POLLS = 3; // claude must be foreground this long before we track it
 
@@ -148,7 +147,7 @@ export class RuntimeTracker {
   observe(cmd) {
     const rt = this.session.runtime || (this.session.runtime = {});
     const isClaude = isClaudeCmd(cmd);
-    if (!isClaude) warnClaudeish(cmd);
+    if (!isClaude) warnClaudeish(cmd, this.session.id);
 
     if (isClaude) {
       this.claudePolls++;

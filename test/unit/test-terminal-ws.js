@@ -21,6 +21,7 @@ import { tmpdir, platform } from "os";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import WebSocket from "ws";
+import { spawn as ptySpawn } from "node-pty";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = join(__dirname, "..", "..");
@@ -39,14 +40,13 @@ const WS_NAME = WS.split("/").pop().replace(/[^a-zA-Z0-9_-]/g, "");
 let server, TOKEN;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function ptmxCount() {
+function ptmxCount(pid) {
   // OS-level truth, not the server's own Set: the second leak (node-pty 1.1.0
   // pty_posix_spawn off-by-one, macOS-only) was invisible to livePtys — the
-  // bookkeeping was right while the fds piled up. -1 = unsupported platform,
-  // assertions self-skip.
+  // bookkeeping was right while the fds piled up. -1 = unsupported platform.
   if (platform() === "linux") {
     try {
-      const dir = `/proc/${server.pid}/fd`;
+      const dir = `/proc/${pid}/fd`;
       return readdirSync(dir).filter((f) => {
         try { return readlinkSync(join(dir, f)) === "/dev/ptmx"; } catch { return false; }
       }).length;
@@ -54,13 +54,33 @@ function ptmxCount() {
   }
   if (platform() === "darwin") {
     try {
-      const out = execFileSync("lsof", ["-p", String(server.pid)], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] });
+      const out = execFileSync("lsof", ["-p", String(pid)], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] });
       // Match the NAME column (row-final), not the whole row — a cwd or command
-      // containing "ptmx" must not count as a descriptor.
-      return out.split("\n").filter((l) => l.trimEnd().endsWith("/dev/ptmx")).length;
+      // containing "ptmx" must not count as a descriptor. Field reports disagree
+      // on whether macOS lists a pty master as /dev/ptmx or /dev/ttysNNN; accept
+      // both and let validateProbe() decide whether the count is trustworthy.
+      return out.split("\n").filter((l) => /\/dev\/(ptmx|ttys\d+)$/.test(l.trimEnd())).length;
     } catch { return -1; }
   }
   return -1;
+}
+
+// The probe must prove it can see a pty before any fd assertion trusts it: open
+// one pty in THIS process, expect exactly +1, close it, expect the baseline
+// back. Anything else → every fd assertion is an honest skip, never `0 === 0`.
+async function validateProbe() {
+  const before = ptmxCount(process.pid);
+  if (before < 0) return { ok: false, why: `unsupported platform ${platform()}` };
+  let p;
+  try { p = ptySpawn("sleep", ["30"], { name: "xterm", cols: 20, rows: 5, cwd: tmpdir(), env: process.env }); }
+  catch (e) { return { ok: false, why: `node-pty spawn failed: ${e.message}` }; }
+  const during = ptmxCount(process.pid);
+  try { p.kill(); } catch {}
+  try { p.destroy?.(); } catch {}
+  const back = await waitFor(() => ptmxCount(process.pid), before, 3000);
+  if (during !== before + 1) return { ok: false, why: `one pty opened → count went ${before} → ${during}, expected +1` };
+  if (!back) return { ok: false, why: `pty closed → count did not return to ${before}` };
+  return { ok: true };
 }
 
 const health = async () => (await (await fetch(`${BASE}/api/health`)).json());
@@ -100,7 +120,10 @@ async function main() {
     await sleep(200);
   }
   TOKEN = readFileSync(join(WS, ".hadron", "token"), "utf-8").trim();
-  const baseline = ptmxCount();
+  const probe = await validateProbe();
+  const fdOk = (cond, msg) => probe.ok ? ok(cond, msg) : console.log(`  - skip (fd probe unavailable on ${platform()}: ${probe.why}): ${msg}`);
+  console.log(probe.ok ? "  ✓ fd probe self-validated (+1/-1 for one pty in this process)" : `  - fd probe unavailable on ${platform()}: ${probe.why} — fd assertions will skip`);
+  const baseline = probe.ok ? ptmxCount(server.pid) : -1;
 
   console.log("\n[health endpoint]");
   {
@@ -112,10 +135,10 @@ async function main() {
   {
     const ws = await connectTerminal("pty-a");
     ok((await health()).livePtys === 1, "connected terminal → livePtys 1");
-    if (baseline >= 0) ok(ptmxCount() === baseline + 1, `one ptmx fd held while connected (${baseline}+1)`);
+    fdOk(ptmxCount(server.pid) === baseline + 1, `one ptmx fd held while connected (${baseline}+1)`);
     ws.close();
     ok(await waitFor(async () => (await health()).livePtys, 0), "close → pty reaped (livePtys back to 0)");
-    if (baseline >= 0) ok(await waitFor(() => ptmxCount(), baseline), "master fd released back to baseline");
+    fdOk(await waitFor(() => ptmxCount(server.pid), baseline), "master fd released back to baseline");
   }
 
   console.log("\n[half-open connection: heartbeat terminates, pty reaped]");
@@ -127,7 +150,7 @@ async function main() {
     // kept this connection (and its pty) forever while the UI reconnected.
     ws._socket.pause();
     ok(await waitFor(async () => (await health()).livePtys, 0, HEARTBEAT_MS * 10), "heartbeat reaped the half-open connection's pty");
-    if (baseline >= 0) ok(await waitFor(() => ptmxCount(), baseline), "its master fd released too");
+    fdOk(await waitFor(() => ptmxCount(server.pid), baseline), "its master fd released too");
     try { ws.terminate(); } catch {}
   }
 
@@ -139,7 +162,7 @@ async function main() {
       await waitFor(async () => (await health()).livePtys, 0);
     }
     ok((await health()).livePtys === 0, "5 cycles → livePtys 0");
-    if (baseline >= 0) ok(ptmxCount() === baseline, `5 cycles → ptmx fds at baseline (${baseline})`);
+    fdOk(ptmxCount(server.pid) === baseline, `5 cycles → ptmx fds at baseline (${baseline})`);
   }
 
   console.log(`\n${failed === 0 ? "PASS" : "FAIL"}: ${passed} passed, ${failed} failed`);

@@ -108,8 +108,32 @@ npm test
 #                            atomic PATCH merge; /api/file .hadron write jail; restart persistence)
 #   + test-terminal-ws.js   (terminal pty lifecycle — the macOS ptmx-exhaustion class: normal close
 #                            releases the master fd (kill+destroy), ws heartbeat reaps half-open
-#                            connections' ptys, /api/health livePtys count, no fd accumulation)
+#                            connections' ptys, /api/health livePtys count, no fd accumulation.
+#                            The OS-level fd probe self-validates (+1/-1 for a pty opened in the
+#                            test's own process) and prints an honest `skip` where it can't see
+#                            ptys — never a vacuous 0 === 0)
+#   + test-provenance.js    (/api/health provenance — version/commit/dirty/repoRoot/startedAt/
+#                            managedBy captured at boot from a throwaway git copy; `hadron version`
+#                            exit 1 on stale server (HADRON_TEST_COMMIT), dirty tree, or whenever the
+#                            server can't be verified — down, stalled (5s timeout), HTTP error,
+#                            malformed, older build; falls back to package versions without git)
 ```
+
+### Reliability gate
+
+The suites that define "the core works" — run them before every merge, and
+grow them whenever a core defect ships past them: `test-resume.js`,
+`test-message.js` (dead-pane refusal), `test-agent-ops.js` (CLI front door),
+`test-terminal-ws.js` (fd accounting), `test-provenance.js`. Planned additions:
+`test-resume-live.js` (resume at the real tmux boundary), `test-doctor.js`.
+Rationale and the full plan: `design-notes/reliability-plan.md`.
+
+**Silent-failure rule.** An invariant that, when false, silently *disables* a
+feature instead of breaking it (a process name we don't recognise, a cwd we
+refuse to scrape, a boot id we couldn't read) must warn loudly — once per
+distinct (invariant, agent) pair via `warnOnce("<invariant>:<agentId>", msg)`
+in `server/log.js`, never a process-global boolean — and must surface as a
+`hadron doctor` finding. Logs carry agent ids, never tokens or session ids.
 
 Individual suites can be run directly, e.g. `node test/unit/test-state-eval.js`.
 `test/unit/test-state-detector.js` is a separate live integration harness that

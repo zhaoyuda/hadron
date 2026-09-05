@@ -108,7 +108,15 @@ hadron message <id> "text"               # deliver a prompt to a running agent â
 hadron send <id> "keys"                  # low-level: type raw keys into a pane
 hadron artifacts add <path...>           # attach files to the current agent
 hadron notes [show|set|append]           # per-agent durable notes
+hadron version                           # is the server running the code in this tree?
+                                         #   commit/dirty/managedBy for both; exit 1 if the
+                                         #   server is stale or a tree is dirty (scriptable)
 ```
+
+`GET /api/health` reports the same provenance (`version`, `commit`, `dirty`,
+`repoRoot`, `startedAt`, `pid`, `node`, `platform`, `managedBy`) alongside the
+live pty/session counts â€” captured once at boot, so it describes the tree the
+process was started from.
 
 ### State Detection
 

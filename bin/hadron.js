@@ -11,6 +11,7 @@ import { readFileSync, existsSync, writeSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { syncSkills, removeSkills, skillsStatus, userSkillsDir } from "../server/skills.js";
+import { gitInfo, packageVersion, short } from "../server/provenance.js";
 
 const REPO = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -65,6 +66,16 @@ function findPort() {
 const TOKEN = findToken();
 const PORT = findPort();
 const BASE = `http://127.0.0.1:${PORT}`;
+
+function ago(iso) {
+  const ms = Date.now() - Date.parse(iso || "");
+  if (!(ms >= 0)) return "unknown time ago";
+  const m = Math.floor(ms / 60000);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
 
 async function api(method, path, body) {
   const headers = {};
@@ -452,9 +463,46 @@ async function main() {
     }
     case "version":
     case "--version":
-    case "-v":
-      console.log(JSON.parse(readFileSync(join(REPO, "package.json"), "utf-8")).version);
+    case "-v": {
+      // Provenance gate: is the server on :PORT running the code in this
+      // working tree? Exit 1 on mismatch, dirty tree, or whenever the server's
+      // provenance cannot actually be verified (unreachable, error, malformed,
+      // older build) — a gate that passes without comparing is not a gate.
+      const cli = { version: packageVersion(REPO), repoRoot: REPO, ...gitInfo(REPO) };
+      let srv = null, status = "ok", detail = "";
+      try {
+        const r = await fetch(`${BASE}/api/health`, { signal: AbortSignal.timeout(5000) });
+        if (!r.ok) { status = "error"; detail = `HTTP ${r.status}`; }
+        else {
+          try { srv = await r.json(); } catch { status = "malformed"; detail = "response is not JSON"; }
+          if (srv && (typeof srv !== "object" || srv.ok !== true)) { status = "malformed"; detail = "not a Hadron health response"; srv = null; }
+          else if (srv && !srv.commit && !srv.version) { status = "no-provenance"; detail = "server predates provenance reporting"; }
+        }
+      } catch (e) {
+        status = e && e.name === "TimeoutError" ? "timeout" : "unreachable";
+        detail = status === "timeout" ? "no response within 5s" : `nothing listening on :${PORT} (set HADRON_PORT to change)`;
+      }
+      const problems = [];
+      if (status !== "ok") problems.push(`server provenance not verified — ${status}: ${detail}${status === "no-provenance" ? " — restart it" : ""}`);
+      else if (srv.commit && cli.commit) {
+        if (srv.commit !== cli.commit) problems.push(`server is running ${short(srv.commit)} (started ${ago(srv.startedAt)}), working tree is ${short(cli.commit)} — restart it`);
+      } else if (srv.version !== cli.version) {
+        problems.push(`no git metadata to compare commits; server version ${srv.version || "?"} (started ${ago(srv.startedAt)}) ≠ working tree ${cli.version || "?"} — restart it`);
+      } else problems.push(`no git metadata on ${!cli.commit && !srv.commit ? "either side" : !cli.commit ? "the CLI side" : "the server side"} — only package versions compared (both ${cli.version || "?"})`);
+      if (srv && srv.dirty) problems.push(`server was started from a dirty tree (${short(srv.commit)}+local edits) — what runs is not any commit`);
+      if (cli.dirty) problems.push("working tree has uncommitted changes");
+      // "versions match, no commits" is informational only — it must not fail the gate.
+      const blocking = problems.filter((p) => !p.startsWith("no git metadata on "));
+      if (flags.json) { console.log(JSON.stringify({ cli, server: srv, status, problems }, null, 2)); if (blocking.length) process.exit(1); break; }
+      const state = (g) => g.dirty === null ? "" : g.dirty ? " (dirty)" : " (clean)";
+      console.log(`hadron ${cli.version || "?"}`);
+      console.log(`cli:    ${short(cli.commit)}${state(cli)}  ${cli.repoRoot}`);
+      if (status !== "ok") console.log(`server: ${status} on :${PORT} — ${detail}`);
+      else console.log(`server: ${short(srv.commit)}${state(srv)}  started ${ago(srv.startedAt)}, pid ${srv.pid}, ${srv.managedBy || "hand-started"}${srv.repoRoot && srv.repoRoot !== cli.repoRoot ? `, from ${srv.repoRoot}` : ""}`);
+      for (const p of problems) console.error(`${blocking.includes(p) ? "⚠" : "ℹ"} ${p}`);
+      if (blocking.length) process.exit(1);
       break;
+    }
     default: {
       const known = cmd === undefined || cmd === "help" || cmd === "--help" || cmd === "-h";
       if (!known) console.error(`hadron: unknown command "${cmd}"\n`);
@@ -480,6 +528,9 @@ Commands:
        [--jupyter PATH]                    kept; path must contain bin/python3)
   hadron annotations ls [--json]           list pending review comments for the current agent
   hadron annotations resolve <id>          mark a review comment done
+  hadron version [--json]                  CLI vs server provenance (commit/dirty/managedBy);
+                                           exit 1 when the server is stale, a tree is dirty, or
+                                           the server could not be verified (down/timeout/older)
   hadron skills install                    symlink operation skills into ~/.claude/skills/ (additive)
   hadron skills sync                       like install, but also prune our own dead links
   hadron skills [status|uninstall]

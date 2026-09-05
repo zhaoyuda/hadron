@@ -11,6 +11,7 @@
  * Run: node test/unit/test-resume.js
  */
 import { decideResume, scrapeSessionId, validateSessionFile, claudeProjectDir, RuntimeTracker, performResume, isClaudeCmd } from "../../server/resume.js";
+import { warnOnce, firedWarnings, resetWarnOnce } from "../../server/log.js";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -140,6 +141,25 @@ console.log("\n[performResume — resumes through the agent's launcher argv]");
   ok((await run(null))[0] === `claude --resume ${SID}`, "default launchArgv stays bare claude");
   ok((await run(["cc-kimi", "--profile", "two words"]))[0] === `cc-kimi --profile 'two words' --resume ${SID}`,
     "argv boundaries survive resume (spaced element single-quoted)");
+}
+
+console.log("\n[silent-failure warnings: once per (invariant, agent), not once per process]");
+{
+  resetWarnOnce();
+  const seen = [];
+  const origWarn = console.warn;
+  console.warn = (m) => seen.push(String(m));
+  try {
+    const a = new RuntimeTracker({ id: "agent-a", cwd: "/nonexistent/a" }, { save: () => {} });
+    const b = new RuntimeTracker({ id: "agent-b", cwd: "/nonexistent/b" }, { save: () => {} });
+    for (let i = 0; i < 5; i++) { a.observe("claude-code"); b.observe("claude-code"); }
+    a.observe("node"); b.observe("zsh"); // non-claude-ish names never warn
+    ok(seen.filter((m) => m.includes("agent-a")).length === 1, "agent-a warned exactly once across 5 polls");
+    ok(seen.filter((m) => m.includes("agent-b")).length === 1, "agent-b warned exactly once too (a global boolean would have hidden it)");
+    ok(seen.length === 2 && seen.every((m) => /claude-code/.test(m)), "no warning for node/zsh; message names the untracked command");
+    ok(firedWarnings.has("claudeish:agent-a") && firedWarnings.has("claudeish:agent-b"), "fired keys are recorded for doctor to surface");
+    ok(warnOnce("claudeish:agent-a", "again") === false && seen.length === 2, "warnOnce returns false and stays quiet on a repeated key");
+  } finally { console.warn = origWarn; resetWarnOnce(); }
 }
 
 console.log(`\n${failed === 0 ? "PASS" : "FAIL"}: ${passed} passed, ${failed} failed`);
