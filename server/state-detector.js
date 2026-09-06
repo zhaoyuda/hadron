@@ -450,13 +450,18 @@ export class StateDetector {
     // Content change detection: hash of last pane content
     this.lastContentHash = null;
 
-    // Resolve the first pane ID (immune to base-index settings)
+    // Pane target is the stable *session name*. Every tmux call in _poll targets
+    // it directly and lets tmux resolve the session's current pane itself, inside
+    // that one call. We deliberately do NOT cache a %N pane id (nor resolve one
+    // and thread it across calls): tmux recycles %N ids after a pane dies, so a
+    // stale id can silently start pointing at a *different* agent's pane after a
+    // tmux-server restart / session recreation — scrambling state across boxes (a
+    // monitor built at boot polling a pane recreated hours later). Never handing a
+    // %N id from one tmux invocation to the next is what makes foreign-pane
+    // aliasing impossible; a bare `-t <session>` is also base-index-immune (no
+    // window.pane numeric index involved). Hadron agent sessions are single-pane,
+    // so "the session's active pane" is unambiguously the agent's pane.
     this.paneTarget = this.tmuxName;
-    try {
-      const paneId = tmux(["list-panes", "-t", this.tmuxName, "-F", "#{pane_id}"], { timeout: 2000 })
-        .trim().split("\n")[0];
-      if (paneId) this.paneTarget = paneId;
-    } catch {}
 
     this.pollTimer = setInterval(() => this._poll(), 1000);
 
@@ -473,6 +478,9 @@ export class StateDetector {
 
     let cmd, panePath, altScreen = false;
     try {
+      // Target the session name — tmux resolves its current pane inside this one
+      // call. No pane id is read back or reused, so nothing can alias a foreign
+      // pane (see the paneTarget note in the constructor).
       const out = tmux(
         ["display-message", "-t", this.paneTarget, "-p", "#{pane_current_command}\t#{pane_current_path}\t#{alternate_on}"],
         { timeout: 2000 }
