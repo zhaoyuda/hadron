@@ -17,6 +17,31 @@ const AGENT_PROCESS_RE = /^(claude[-_]?code|claude|node|npx|bun|deno|\d+\.\d+\.\
 const SHELL_RE = /^(zsh|bash|sh|dash|ash|ksh|mksh|csh|tcsh|fish|nu|xonsh|elvish|pwsh|powershell)(\.exe)?$/i;
 export const isShellCmd = (cmd) => SHELL_RE.test(String(cmd || "").trim());
 
+// ── Pane probe parsing (pure; unit-tested without tmux) ──────────────────────
+// display-message prints one line ending in "\n". Strip ONLY that newline —
+// never .trim(): a trailing space in a command name or path is data, not noise.
+export const stripLine = (out) => String(out ?? "").replace(/\r?\n$/, "");
+
+// Format for the atomic state-driving read. The separator MUST be printable
+// ASCII: tmux >= 3.5 rewrites every control character in display-message
+// output to "_" (TAB, LF, US, SOH all become "_"), so a "\t"-packed format
+// collapses into one garbage field on tmux 3.6a (macOS/Homebrew) — cmd never
+// matches an agent, every state freezes and no resume checkpoint is written.
+// tmux 3.4 (Ubuntu) preserves TAB, which is why this only surfaced on macOS.
+//
+// alternate_on goes FIRST because it is exactly one char ("0"/"1") and can
+// never contain the separator, so everything after the first "|" is the
+// command — intact even if the process name itself contains "|". Two unbounded
+// fields can never share one delimited string unambiguously, which is why the
+// path is read separately (see _poll).
+export const CMD_PROBE_FORMAT = "#{alternate_on}|#{pane_current_command}";
+export function parseCmdProbe(out) {
+  const line = stripLine(out);
+  const i = line.indexOf("|");
+  if (i < 0) return { altScreen: false, cmd: line };   // no separator: whole line is the cmd
+  return { altScreen: line.slice(0, i) === "1", cmd: line.slice(i + 1) };
+}
+
 // Chrome / status bar lines to strip before analysis
 const CHROME_RE = /ctx \[|⏵⏵|Remote Control|Auto-update|^[─━]+$/i;
 
@@ -481,16 +506,28 @@ export class StateDetector {
       // Target the session name — tmux resolves its current pane inside this one
       // call. No pane id is read back or reused, so nothing can alias a foreign
       // pane (see the paneTarget note in the constructor).
-      const out = tmux(
-        ["display-message", "-t", this.paneTarget, "-p", "#{pane_current_command}\t#{pane_current_path}\t#{alternate_on}"],
+      //
+      // The two fields that drive state detection come from ONE atomic read so
+      // they always describe the same instant. Layout + parsing rules live in
+      // parseCmdProbe (pure, unit-tested without tmux).
+      ({ altScreen, cmd } = parseCmdProbe(tmux(
+        ["display-message", "-t", this.paneTarget, "-p", CMD_PROBE_FORMAT],
         { timeout: 2000 }
-      ).trim();
-      const parts = out.split("\t");
-      cmd = parts[0];
-      panePath = parts[1] || null;
-      altScreen = parts[2] === "1";
+      )));
     } catch {
       return;
+    }
+    // The path is a second, single-field read: it never shares a delimited
+    // string with another unbounded field, so no "|" anywhere can shift a
+    // parse. It only feeds session.cwd, so a transient failure here must not
+    // abort state detection — fall back to "unknown" and keep polling.
+    try {
+      panePath = stripLine(tmux(
+        ["display-message", "-t", this.paneTarget, "-p", "#{pane_current_path}"],
+        { timeout: 2000 }
+      )) || null;
+    } catch {
+      panePath = null;
     }
 
     // Runtime-checkpoint piggyback (resume.js): the tracker just needs the
