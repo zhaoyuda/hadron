@@ -136,8 +136,12 @@ npm test
 #                            timestamp fields (cleanExitAt/lastObserved/lastPersistedAt) run through
 #                            safeTimestamp — a token/malformed value emits null (no leak) and a materially-future
 #                            value is rejected (can't dodge the durability + decideResume freshness checks), both
-#                            proven by a shell-pane doc-badts fixture; CLI exits 1 on
-#                            any red row (incl. hand-started server) and reports "server unreachable" first)
+#                            proven by a shell-pane doc-badts fixture; `hadron adopt <agent> --session-id`
+#                            (POST /api/sessions/:id/adopt) turns a shared-cwd red into green "resumes as
+#                            manual" — transcript-verified unless force, 400 malformed / 404 unverifiable,
+#                            never demoted by a later scrape, survives a restart; a launchd-managed server
+#                            (XPC_SERVICE_NAME) is green like systemd; CLI exits 1 on any red row (incl.
+#                            hand-started server) and reports "server unreachable" first)
 ```
 
 ### Reliability gate

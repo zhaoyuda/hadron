@@ -96,7 +96,10 @@ function writeAgentFile(id, data) {
 
 export function saveAgent(agent) {
   const { id, name, group, task, icon, tmuxSession, artifacts, relatedAgents, notes, sortOrder, archived, archivedAt, deletable, cwd, launchCommand, autostartedAt, pinned } = agent;
-  const data = { id, name, group: group || "Workers", task, tmuxSession: tmuxSession || `hadron-${id}`, artifacts: artifacts || [], relatedAgents: relatedAgents || [], notes: notes || "" };
+  const data = { id, name, group: group || "Workers", task, artifacts: artifacts || [], relatedAgents: relatedAgents || [], notes: notes || "" };
+  // Never fabricate a name here: the real one is `hadron-<workspace>-<id>`
+  // (server/index.js tmuxSessionName) and only the server knows the prefix.
+  if (tmuxSession) data.tmuxSession = tmuxSession;
   if (icon) data.icon = icon;
   if (pinned) data.pinned = true;
   if (sortOrder !== undefined && sortOrder !== null) data.sortOrder = sortOrder;

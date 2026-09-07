@@ -115,6 +115,11 @@ hadron doctor                            # "if this machine reboots now, what co
                                          #   server provenance + managedBy, and per-agent resume
                                          #   health (pane state, checkpoint durability, session id,
                                          #   PATH resolves claude); exit 1 on any red (scriptable)
+hadron adopt <name|id> --session-id <uuid> [--force]
+                                         # hand Hadron a claude session id it could not learn itself
+                                         #   (hand-attached agent, shared cwd where scraping is refused);
+                                         #   verified against ~/.claude/projects unless --force; the
+                                         #   agent then resumes as "manual" and is never re-scraped
 ```
 
 `GET /api/health` reports the same provenance (`version`, `commit`, `dirty`,

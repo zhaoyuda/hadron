@@ -155,6 +155,12 @@ async function main() {
     ok(!!live && !live.archived, "restored agent reappears in GET /api/sessions un-archived");
     ok(live?.pinned === true, "pinned survived archive → restore");
     ok(!(await archivedList()).some((s) => s.id === A), "restored agent left the archived list");
+    // Report 3 (macOS fleet, 2026-09-07): the store used to fall back to
+    // `hadron-<id>` (wrong prefix — the real name is hadron-<workspace>-<id>) so
+    // every archived/restored JSON carried a tmux name that didn't exist.
+    const disk = JSON.parse(readFileSync(agentFile(A), "utf-8"));
+    ok(disk.tmuxSession === `hadron-${WS_NAME}-${A}`, `restored JSON carries the real tmux name hadron-<ws>-<id> (${disk.tmuxSession})`);
+    ok(!/^hadron-[^-]/.test(disk.tmuxSession) || disk.tmuxSession.startsWith(`hadron-${WS_NAME}-`), "no fabricated hadron-<id> name on disk");
     await req("PATCH", `/api/sessions/${A}`, { pinned: false });
   }
 

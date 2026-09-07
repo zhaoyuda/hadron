@@ -12,7 +12,7 @@ import { networkInterfaces, hostname, tmpdir } from "os";
 import { URL } from "url";
 import { randomBytes } from "crypto";
 import { StateDetector, isShellCmd } from "./state-detector.js";
-import { probeClaudeCaps, RuntimeTracker, performResume, BOOT, isClaudeCmd, decideResume } from "./resume.js";
+import { probeClaudeCaps, RuntimeTracker, performResume, BOOT, isClaudeCmd, decideResume, verifyAdoption } from "./resume.js";
 import { randomUUID } from "crypto";
 import { loadAgents, loadAgent, saveAgent, saveAgentLocked, archiveAgent, deleteAgent, initWorkspace, getWorkspaceDir, appendAgentField, removeAgentArtifact, isSelfWrite } from "./agent-store.js";
 import { resolve } from "path";
@@ -456,7 +456,7 @@ const DOCTOR_SIM_GENERATION = `doctor-sim-reboot-${randomUUID()}`;
 // so every free-string checkpoint field is allowlisted to its known set here;
 // anything else collapses to the literal "invalid" (which also keeps such a
 // checkpoint out of the "green" verdict — "invalid" is below every resume policy).
-const CONFIDENCE_VALUES = new Set(["authoritative", "correlated", "ambiguous"]);
+const CONFIDENCE_VALUES = new Set(["authoritative", "correlated", "ambiguous", "manual"]);
 const RUNTIME_VALUES = new Set(["claude", "shell"]);
 const RESTORE_STATES = new Set(["started", "ready", "failed"]);
 const allowlist = (set) => (v) => (v == null || v === "" ? null : set.has(v) ? v : "invalid");
@@ -523,8 +523,8 @@ function classifyAgentHealth(session, { paneExists, paneCmd, cwdShared, now }) {
     }
     if (!rt.sessionId) {
       return cwdShared
-        ? { level: "red", message: "no session id (shared cwd — give it its own cwd or launch through Hadron)" }
-        : { level: "red", message: "no session id (scrape found nothing)" };
+        ? { level: "red", message: "no session id (shared cwd — cannot be scraped; run `hadron adopt <agent> --session-id <uuid>`, or relaunch through Hadron)" }
+        : { level: "red", message: "no session id (scrape found nothing — run `hadron adopt <agent> --session-id <uuid>` if you know it)" };
     }
     if (rt.restoreAttempt && rt.restoreAttempt.state === "failed") {
       return { level: "red", message: "last resume failed — claude TUI did not come up" };
@@ -545,15 +545,15 @@ app.get("/api/doctor", async (req, res) => {
   ensureDefaults();
   const now = Date.now();
   const live = [...sessions.values()].filter((s) => !s.archived);
-  const cwdCounts = new Map();
-  for (const s of live) if (s.cwd) cwdCounts.set(s.cwd, (cwdCounts.get(s.cwd) || 0) + 1);
 
   const agents = live.map((session) => {
     const tmuxName = tmuxSessionName(session.id);
     const paneExists = tmuxSafe(["has-session", "-t", tmuxName]) !== null;
     const paneCmd = paneExists ? (tmuxSafe(["display-message", "-t", tmuxName, "-p", "#{pane_current_command}"]) || "").trim() : null;
     const paneCurrentPath = paneExists ? (tmuxSafe(["display-message", "-t", tmuxName, "-p", "#{pane_current_path}"]) || null) : null;
-    const cwdShared = !!session.cwd && (cwdCounts.get(session.cwd) || 0) > 1;
+    // Same predicate the tracker uses to refuse scraping — doctor must never
+    // disagree with the code that actually decides.
+    const cwdShared = isCwdShared(session.id);
     const pathEnv = paneExists ? tmuxSessionPathEnv(tmuxName) : null;
     const finding = classifyAgentHealth(session, { paneExists, paneCmd, cwdShared, now });
     const rt = session.runtime || {};
@@ -708,10 +708,34 @@ app.post("/api/sessions/:id/restore", (req, res) => {
   delete agent.archived;
   delete agent.archivedAt;
   agent.state = "idle";
+  agent.tmuxSession = tmuxSessionName(id);
   sessions.set(id, agent);
   saveAgent(agent);
   startMonitor(id);
   res.json(agent);
+});
+
+// Hand Hadron a claude session id it could not learn on its own (hand-attached
+// agents, shared cwds where scraping is refused). The id is verified against
+// the transcript claude itself wrote for this agent's cwd unless force is set;
+// confidence "manual" resumes like an authoritative id and is never demoted
+// by a later scrape.
+app.post("/api/sessions/:id/adopt", (req, res) => {
+  const { id } = req.params;
+  const session = sessions.get(id);
+  if (!session || session.archived) return res.status(404).json({ error: "agent not found" });
+  const body = req.body || {};
+  const v = verifyAdoption(session, body.sessionId, { force: body.force === true });
+  if (!v.ok) return res.status(v.status).json({ error: v.error });
+  const rt = session.runtime || (session.runtime = {});
+  rt.sessionId = v.sessionId;
+  rt.confidence = "manual";
+  rt.desiredRuntime = "claude";
+  rt.cleanExitAt = null;
+  delete rt.restoreAttempt;
+  saveRuntimeCheckpoint(session, true);
+  console.log(`[resume] agent ${id}: session id adopted manually (confidence manual)`);
+  res.json(resolvedSession(session));
 });
 
 app.delete("/api/sessions/:id/permanent", (req, res) => {
@@ -1855,6 +1879,16 @@ function saveRuntimeCheckpoint(session, urgent) {
   }, RUNTIME_SAVE_INTERVAL_MS));
 }
 
+// Does any OTHER agent share this agent's cwd right now? Unknown cwd → true
+// (conservative: a transcript can't be attributed without a cwd). This is the
+// single source of truth for the tracker's scrape refusal AND the doctor's
+// shared-cwd finding, so the two can never disagree.
+function isCwdShared(sessionId) {
+  const me = sessions.get(sessionId);
+  if (!me || !me.cwd) return true;
+  return [...sessions.values()].some((s) => s.id !== sessionId && s.cwd === me.cwd);
+}
+
 function startMonitor(sessionId) {
   if (monitors.has(sessionId)) return;
   const session = sessions.get(sessionId);
@@ -1868,11 +1902,7 @@ function startMonitor(sessionId) {
     save: saveRuntimeCheckpoint,
     // Shared-cwd agents can't be told apart by transcript scraping (the jsonl
     // head proves the cwd, not the owner) — the tracker refuses to scrape there.
-    cwdShared: () => {
-      const me = sessions.get(sessionId);
-      if (!me || !me.cwd) return true; // unknown cwd → be conservative
-      return [...sessions.values()].some((s) => s.id !== sessionId && s.cwd === me.cwd);
-    },
+    cwdShared: () => isCwdShared(sessionId),
   });
   runtimeTrackers.set(sessionId, tracker);
   detector.onCmd = (cmd) => tracker.observe(cmd);

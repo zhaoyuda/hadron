@@ -21,7 +21,7 @@
  * legal state and is left alone.
  */
 import { execFile, execFileSync } from "child_process";
-import { readdirSync, statSync, openSync, readSync, closeSync, readFileSync } from "fs";
+import { readdirSync, statSync, openSync, readSync, closeSync, readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { randomUUID } from "crypto";
@@ -147,6 +147,30 @@ export function scrapeSessionId(cwd, { projectsRoot = join(homedir(), ".claude",
 // Linux and "claude.exe" on macOS (how the native binary is shipped) — the
 // suffix is normalized away, not enumerated, in case it changes again.
 const CLAUDE_CMDS = new Set(["claude"]);
+// Operator-supplied session id (`hadron adopt`). Pure: returns { ok: true } or
+// { ok: false, status, error }. Unless force, the id must be backed by the
+// transcript claude wrote for THIS agent's cwd — and that cwd must actually be
+// known: never fall back to the workspace/server cwd, or an unrelated root
+// transcript could validate a hand-attached agent's id.
+export function verifyAdoption(session, sessionId, { force = false, projectsRoot = join(homedir(), ".claude", "projects") } = {}) {
+  const sid = typeof sessionId === "string" ? sessionId.trim() : "";
+  if (!UUID_RE.test(sid)) return { ok: false, status: 400, error: "sessionId must be a claude session uuid" };
+  if (force === true) return { ok: true, sessionId: sid };
+  const cwd = session && session.cwd;
+  if (!cwd) return { ok: false, status: 400, error: "agent cwd is not known yet (pane not observed) — cannot verify the transcript; retry shortly or pass force" };
+  const projectDir = join(projectsRoot, claudeProjectDir(cwd));
+  const file = join(projectDir, `${sid}.jsonl`);
+  if (!existsSync(file) || !validateSessionFile(file, sid, cwd)) {
+    return { ok: false, status: 404, error: `no transcript for that session id under ${projectDir} (cwd ${cwd}) — pass force to adopt anyway` };
+  }
+  return { ok: true, sessionId: sid };
+}
+
+// Confidence levels that resume under every policy except "off" and that a
+// later scrape may never overwrite: Hadron launched it (authoritative) or the
+// operator told us (manual, via `hadron adopt`).
+export const PINNED_CONFIDENCE = new Set(["authoritative", "manual"]);
+
 export const isClaudeCmd = (c) => {
   if (!c) return false;
   const raw = String(c).trim().toLowerCase();
@@ -167,9 +191,10 @@ function warnClaudeish(cmd, agentId) {
 const SETTLE_POLLS = 3; // claude must be foreground this long before we track it
 
 export class RuntimeTracker {
-  constructor(session, { save, cwdShared }) {
+  constructor(session, { save, cwdShared, scrape = scrapeSessionId }) {
     this.session = session;
     this.save = save; // (session, urgent) => void — urgent flushes immediately
+    this.scrape = scrape; // (cwd) => { sessionId, confidence } | null — injectable for tests
     // cwdShared(): does any OTHER agent share this agent's cwd right now?
     // Shared-cwd transcripts validate identically for every sharer (the head
     // only proves the cwd, not which agent owns the session), so scraping
@@ -212,11 +237,13 @@ export class RuntimeTracker {
         if (shared && !rt.sessionId) {
           warnOnce(`sharedcwd:${this.session.id}`, `[resume] agent ${this.session.id}: cwd ${JSON.stringify(this.session.cwd || null)} is shared with another agent (or unset) — its claude session id cannot be scraped, auto-resume is off for it until it is launched by Hadron with --session-id`);
         }
-        if ((!rt.sessionId || now - this.lastScrapeAt > 5 * 60 * 1000) && !shared) {
+        // cwdShared() already returns true for an unset cwd (the server's own
+        // cwd would attribute a foreign transcript), so no process.cwd() fallback.
+        if ((!rt.sessionId || now - this.lastScrapeAt > 5 * 60 * 1000) && !shared && this.session.cwd) {
           this.lastScrapeAt = now;
-          const hit = scrapeSessionId(this.session.cwd || process.cwd());
-          // Never demote an authoritative id with a scrape guess.
-          if (hit && rt.confidence !== "authoritative" && rt.sessionId !== hit.sessionId) {
+          const hit = this.scrape(this.session.cwd);
+          // Never demote an authoritative or manually adopted id with a scrape guess.
+          if (hit && !PINNED_CONFIDENCE.has(rt.confidence) && rt.sessionId !== hit.sessionId) {
             rt.sessionId = hit.sessionId;
             rt.confidence = hit.confidence;
             urgent = true;
@@ -258,7 +285,7 @@ export function decideResume(runtime, { now = Date.now(), ttlMs = RESUME_TTL_MS,
   if (!runtime.sessionId) return { resume: false, reason: "no session id" };
   if (!UUID_RE.test(runtime.sessionId)) return { resume: false, reason: "malformed session id" };
   const conf = runtime.confidence || "ambiguous";
-  if (conf !== "authoritative" && !(conf === "correlated" && policy === "correlated")) {
+  if (!PINNED_CONFIDENCE.has(conf) && !(conf === "correlated" && policy === "correlated")) {
     return { resume: false, reason: `confidence ${conf} below policy ${policy}` };
   }
   const seen = Date.parse(runtime.lastObservedAt || 0);

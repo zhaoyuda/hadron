@@ -10,7 +10,7 @@
  *
  * Run: node test/unit/test-resume.js
  */
-import { decideResume, scrapeSessionId, validateSessionFile, claudeProjectDir, RuntimeTracker, performResume, isClaudeCmd } from "../../server/resume.js";
+import { decideResume, scrapeSessionId, validateSessionFile, claudeProjectDir, RuntimeTracker, performResume, isClaudeCmd, verifyAdoption } from "../../server/resume.js";
 import { warnOnce, firedWarnings, resetWarnOnce } from "../../server/log.js";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "fs";
 import { tmpdir } from "os";
@@ -37,6 +37,9 @@ ok(D({ ...base, cleanExitAt: FRESH }).resume === false, "clean-exit tombstone �
 ok(D({ ...base, sessionId: null }).resume === false, "no session id → skip (never falls back to --continue)");
 ok(D({ ...base, sessionId: "$(rm -rf /)" }).resume === false, "malformed session id → skip (shell-inert gate)");
 ok(D({ ...base, confidence: "ambiguous" }).resume === false, "ambiguous confidence → skip");
+ok(D({ ...base, confidence: "manual" }).resume === true, "manual (hadron adopt) → resume");
+ok(D({ ...base, confidence: "manual" }, { policy: "authoritative" }).resume === true, "manual resumes under the authoritative-only policy too");
+ok(D({ ...base, confidence: "manual" }, { policy: "off" }).resume === false, "manual still respects policy off");
 ok(D({ ...base }, { policy: "authoritative" }).resume === false, "correlated under authoritative-only policy → skip");
 ok(D({ ...base }, { policy: "off" }).resume === false, "policy off → skip");
 ok(D({ ...base, lastObservedAt: new Date(NOW - 8 * 24 * 3600e3).toISOString() }).resume === false, "checkpoint older than TTL → skip");
@@ -121,6 +124,53 @@ console.log("\n[RuntimeTracker — shared-cwd scrape guard]");
   const trX = new RuntimeTracker({ id: "b", cwd }, { save: () => {} });
   ok(typeof trX.cwdShared === "function" && trX.cwdShared() === false, "cwdShared defaults to exclusive when not provided");
   rmSync(root, { recursive: true, force: true });
+}
+
+console.log("\n[verifyAdoption — hadron adopt never verifies against a fallback cwd]");
+{
+  const root = mkdtempSync(join(tmpdir(), "resume-adopt-"));
+  const cwd = "/agents/own/cwd";
+  const sid = "44444444-5555-4666-8777-888888888888";
+  const dir = join(root, claudeProjectDir(cwd));
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${sid}.jsonl`), JSON.stringify({ sessionId: sid, cwd }) + "\n");
+  const o = { projectsRoot: root };
+  ok(verifyAdoption({ cwd }, sid, o).ok === true, "transcript-backed id for the agent's own cwd → ok");
+  ok(verifyAdoption({ cwd }, "$(rm -rf /)", o).status === 400, "malformed id → 400 (shell-inert gate, before any fs access)");
+  ok(verifyAdoption({ cwd }, "99999999-5555-4666-8777-888888888888", o).status === 404, "uuid without a transcript for this cwd → 404");
+  ok(verifyAdoption({ cwd: "/other/cwd" }, sid, o).status === 404, "transcript exists but for a different cwd → 404 (cwd mismatch)");
+  // The sol finding: an agent whose cwd is not yet observed must NOT be verified
+  // against the workspace/server cwd — that root transcript is not its own.
+  const unset = verifyAdoption({}, sid, o);
+  ok(unset.ok === false && unset.status === 400 && /cwd is not known/.test(unset.error), `unset cwd → 400, no fallback dir is consulted (${unset.error})`);
+  ok(verifyAdoption({}, sid, { ...o, force: true }).ok === true, "force skips verification (operator's explicit call)");
+  ok(verifyAdoption({}, "$(rm -rf /)", { ...o, force: true }).status === 400, "force never bypasses the id format gate");
+  rmSync(root, { recursive: true, force: true });
+}
+
+console.log("\n[RuntimeTracker — manual (hadron adopt) id is never demoted; unset cwd is never scraped]");
+{
+  const scraped = "33333333-4444-4555-8666-777777777777";
+  let calls = 0;
+  const scrape = (cwd) => { calls++; return { sessionId: scraped, confidence: "correlated", cwd }; };
+  // Operator-adopted id: a later correlated scrape hit must NOT overwrite it.
+  const manual = { id: "m", cwd: "/some/cwd", runtime: { sessionId: "11111111-2222-4333-8444-555555555555", confidence: "manual" } };
+  const trM = new RuntimeTracker(manual, { save: () => {}, cwdShared: () => false, scrape });
+  trM.observe("claude"); trM.observe("claude"); trM.observe("claude");
+  ok(manual.runtime.sessionId === "11111111-2222-4333-8444-555555555555" && manual.runtime.confidence === "manual",
+    "manual id survives a correlated scrape hit (never demoted)");
+  // Correlated id IS refreshed by a scrape (the existing behaviour, as a control).
+  const corr = { id: "c", cwd: "/some/cwd", runtime: { sessionId: "11111111-2222-4333-8444-555555555555", confidence: "correlated" } };
+  const trC = new RuntimeTracker(corr, { save: () => {}, cwdShared: () => false, scrape });
+  trC.observe("claude"); trC.observe("claude"); trC.observe("claude");
+  ok(corr.runtime.sessionId === scraped, "control: a correlated id is still refreshed by a scrape");
+  // Unset cwd: no scrape at all, even if cwdShared() says exclusive — the old
+  // process.cwd() fallback would have attributed the SERVER's transcripts.
+  calls = 0;
+  const noCwd = { id: "n" };
+  const trN = new RuntimeTracker(noCwd, { save: () => {}, cwdShared: () => false, scrape });
+  trN.observe("claude"); trN.observe("claude"); trN.observe("claude");
+  ok(calls === 0 && !noCwd.runtime.sessionId, `unset cwd → scrape never called, no id (calls=${calls})`);
 }
 
 console.log("\n[performResume — resumes through the agent's launcher argv]");

@@ -98,7 +98,7 @@ function validateFixture() {
 }
 
 let server, TOKEN, serverLog = "";
-function bootServer() {
+function bootServer(extraEnv = {}) {
   const env = {
     ...process.env, PORT: String(PORT), HOME, SHELL: "/bin/bash",
     PATH: `${FIX}:${process.env.PATH}`,
@@ -108,6 +108,7 @@ function bootServer() {
     // plain `claude` stay recognised.
     HADRON_TEST_UNRECOGNIZE_CLAUDE_CMD: "claude.exe",
     INVOCATION_ID: "", XPC_SERVICE_NAME: "",
+    ...extraEnv,
   };
   delete env.TMUX; delete env.TMUX_PANE;
   server = spawn("node", [join(REPO, "server", "index.js"), WS], { env, stdio: ["ignore", "pipe", "pipe"] });
@@ -239,6 +240,38 @@ async function main() {
   const cliJson = runCli(["doctor", "--json"]);
   ok(cliJson.code === 1 && !/sessionId/.test(cliJson.stdout), "hadron doctor --json also exits 1 and leaks no sessionId");
 
+  // ── hadron adopt: hand the operator's session id to a shared-cwd agent ───
+  // Report 3 (macOS fleet, 2026-09-07): four hand-attached agents in shared
+  // cwds could never get a session id — scraping is (correctly) refused there
+  // and nothing let the operator supply the id they can read off `claude`.
+  console.log("\nPOST /api/sessions/:id/adopt + hadron adopt");
+  const shASid = randomUUID(), shBSid = randomUUID();
+  seedTranscript(sharedCwd, shASid);
+  seedTranscript(sharedCwd, shBSid);
+  const bad = await POST(`/api/sessions/${shA}/adopt`, { sessionId: "$(rm -rf /)" });
+  ok(bad.status === 400, `adopt with a malformed id → 400 (${bad.status})`);
+  const noTx = await POST(`/api/sessions/${shA}/adopt`, { sessionId: randomUUID() });
+  ok(noTx.status === 404 && /no transcript/.test((await noTx.json()).error), `adopt with a uuid that has no transcript for this cwd → 404 (${noTx.status})`);
+  const nobody = await POST(`/api/sessions/no-such-agent/adopt`, { sessionId: shASid });
+  ok(nobody.status === 404, `adopt on an unknown agent → 404 (${nobody.status})`);
+  ok((onDisk(shA).runtime || {}).confidence !== "manual", "refused adopts left nothing on disk");
+  const good = await POST(`/api/sessions/${shA}/adopt`, { sessionId: shASid });
+  ok(good.status === 200, `adopt with the transcript-backed id → 200 (${good.status})`);
+  const shADisk = await waitDisk(shA, (a) => a.runtime?.confidence === "manual", 5000);
+  ok(shADisk.runtime?.sessionId === shASid && shADisk.runtime?.confidence === "manual", "adopted id persisted on disk with confidence manual");
+  const cliAdopt = runCli(["adopt", "doc-shared-b", "--session-id", shBSid]);
+  ok(cliAdopt.code === 0 && /adopted session id for doc-shared-b/.test(cliAdopt.stdout), `hadron adopt <name> --session-id <uuid> → exit 0 (${cliAdopt.code}: ${cliAdopt.stdout.trim()})`);
+  const cliAdoptBad = runCli(["adopt", "doc-shared-b", "--session-id", randomUUID()]);
+  ok(cliAdoptBad.code !== 0, `hadron adopt with an unverifiable id exits non-zero (${cliAdoptBad.code})`);
+  await sleep(4000); // let the trackers poll again: a scrape must NOT demote the manual ids
+  const docA = await (await fetch(`${BASE}/api/doctor`, { headers: { "x-hadron-token": TOKEN } })).json();
+  const FA = (n) => docA.agents.find((a) => a.name === n)?.finding || {};
+  ok(FA("doc-shared-a").level === "green" && /resumes as manual/.test(FA("doc-shared-a").message), `adopted shared-cwd agent → green "resumes as manual" (${FA("doc-shared-a").level}: ${FA("doc-shared-a").message})`);
+  ok(FA("doc-shared-b").level === "green" && /resumes as manual/.test(FA("doc-shared-b").message), `CLI-adopted agent → green "resumes as manual" (${FA("doc-shared-b").level}: ${FA("doc-shared-b").message})`);
+  ok(!FA("doc-shared-a").crossCheck && !FA("doc-shared-b").crossCheck, "manual rows pass the decideResume cross-check");
+  ok(!JSON.stringify(docA).includes(shASid) && !JSON.stringify(docA).includes(shBSid), "doctor still leaks no adopted session id");
+  ok(onDisk(shA).runtime.sessionId === shASid && onDisk(shB).runtime.sessionId === shBSid, "manual ids survived further tracker polls (no scrape demotion)");
+
   // ── disk-seed + restart: a nominally-green row decideResume refuses ───────
   // The live scraper filters non-UUIDs, so a malformed / mistrusted checkpoint
   // is only reachable by loading a corrupted on-disk checkpoint at boot. Seed
@@ -357,7 +390,10 @@ async function main() {
   };
   writeFileSync(join(WS, ".hadron", "agents", `${btId}.json`), JSON.stringify(btDisk, null, 2));
 
-  bootServer();
+  // Second boot claims launchd provenance (XPC_SERVICE_NAME is what launchd
+  // sets) — Report 3: doctor only ever accepted systemd, so a launchd-managed
+  // Mac fleet could never go green.
+  bootServer({ XPC_SERVICE_NAME: "com.example.hadron" });
   await waitForServer();
   TOKEN = readFileSync(join(WS, ".hadron", "token"), "utf-8").trim();
   await sleep(6000); // let the tracker re-settle on the still-live panes (no transcript → keeps the seeds)
@@ -392,6 +428,10 @@ async function main() {
 
   const cli2 = runCli(["doctor"]);
   ok(cli2.code === 1, `hadron doctor exits 1 with the demoted-green red rows (exit ${cli2.code})`);
+  ok(/server is managed by launchd \(boot-restarts\)/.test(cli2.stdout) && !/will NOT restart after a reboot/.test(cli2.stdout),
+    "launchd-managed server is green in hadron doctor (not only systemd)");
+  const shAReboot = doc2.agents.find((a) => a.name === "doc-shared-a")?.finding || {};
+  ok(shAReboot.level === "green" && /resumes as manual/.test(shAReboot.message), `manual adoption survives a server restart (${shAReboot.level}: ${shAReboot.message})`);
   ok(/would not resume — malformed session id/.test(cli2.stdout), "CLI shows the malformed-id demoted-green red row");
   ok(/would not resume — attempts exhausted/.test(cli2.stdout), "CLI shows the exhausted-attempts demoted-green red row");
   ok(/would not resume — confidence invalid below policy/.test(cli2.stdout), "CLI shows the corrupt-confidence red row with a sanitized reason");

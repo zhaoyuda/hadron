@@ -358,6 +358,15 @@ async function main() {
       }
       break;
     }
+    case "adopt": {
+      // hadron adopt <name|id> --session-id <uuid> [--force]
+      const sid = flags["session-id"];
+      if (!positional.length || typeof sid !== "string" || !sid) die("usage: hadron adopt <name|id> --session-id <uuid> [--force]");
+      const agent = await resolveTarget(positional[0]);
+      const out = await api("POST", `/api/sessions/${agent.id}/adopt`, { sessionId: sid, force: !!flags.force });
+      console.log(`adopted session id for ${out.name || agent.name} (${agent.id}) — confidence manual; verify with: hadron doctor`);
+      break;
+    }
     case "artifacts": {
       const sub = positional[0];
       const me = await whoami();
@@ -495,8 +504,8 @@ async function main() {
         if (health.dirty) local.push({ level: "yellow", message: "server was started from a dirty tree — what runs is not any commit" });
         if (cli.dirty) local.push({ level: "yellow", message: "working tree has uncommitted changes" });
         // 4. managedBy: hand-started will not come back
-        if (health.managedBy === "systemd") local.push({ level: "green", message: "server is managed by systemd (boot-restarts)" });
-        else local.push({ level: "red", message: `server is ${health.managedBy || "hand-started"} — it will NOT restart after a reboot (run it under systemd)` });
+        if (health.managedBy === "systemd" || health.managedBy === "launchd") local.push({ level: "green", message: `server is managed by ${health.managedBy} (boot-restarts)` });
+        else local.push({ level: "red", message: `server is ${health.managedBy || "hand-started"} — it will NOT restart after a reboot (run it under ${process.platform === "darwin" ? "launchd" : "systemd"})` });
       }
 
       // per-agent findings + caps (authenticated GET — send the token on this GET)
@@ -609,6 +618,9 @@ Commands:
   hadron close [name|id ...]               archive agent(s): tmux dies, JSON kept (no arg = self;
                                            several targets allowed — self is archived last)
   hadron restore <name|id ...>             bring archived agent(s) back (searches the archive)
+  hadron adopt <name|id> --session-id <uuid> [--force]
+                                           hand Hadron a claude session id it could not scrape (hand-attached
+                                           agent, shared cwd); verified against ~/.claude/projects unless --force
   hadron artifacts add [--auto | <path...>]  attach files to the current agent
   hadron artifacts ls                      list the current agent's artifacts
   hadron notes [show|set "..."|append "..."]
