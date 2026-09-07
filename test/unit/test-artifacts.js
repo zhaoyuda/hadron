@@ -32,7 +32,15 @@ function ok(cond, msg) {
   else { failed++; console.error(`  ✗ ${msg}`); }
 }
 
-const WS = mkdtempSync(join(tmpdir(), "hadron-arttest-"));
+// The server is pointed at a SYMLINK alias of the workspace so the macOS path
+// divergence is reproduced on every platform: there mkdtemp lives under /var
+// (really /private/var), and the state detector rewrites session.cwd to the
+// pane's kernel-reported canonical path every poll. A cwd containment check
+// done on raw prefixes against the workspace as typed then rejects the agent's
+// own cwd, and browse/suggest silently fall back to the workspace root.
+const WS_REAL = mkdtempSync(join(tmpdir(), "hadron-arttest-"));
+const WS = `${WS_REAL}-link`;
+symlinkSync(WS_REAL, WS);
 let server, TOKEN;
 
 function authHeaders(extra = {}) {
@@ -298,6 +306,15 @@ async function main() {
     // Response shape is { base, files }: base = the resolved scan root the server
     // ACTUALLY used, the join base for every returned path.
     const wsReal = realpathSync(WS);
+    // Pin the trigger: by now the detector must have rewritten arty's cwd from
+    // the as-created alias path to the pane's canonical path. Everything below
+    // runs against THAT cwd — the case that clamped to the root on macOS.
+    let liveCwd = null;
+    for (let i = 0; i < 50 && liveCwd !== join(wsReal, "sub"); i++) {
+      await new Promise((r) => setTimeout(r, 200));
+      try { liveCwd = (await (await fetch(`${BASE}/api/sessions`)).json()).find((s) => s.id === "arty")?.cwd ?? null; } catch {}
+    }
+    ok(liveCwd === join(wsReal, "sub"), `detector rewrote agent cwd to the pane's canonical path (got ${liveCwd})`);
     let r = await fetch(`${BASE}/api/files/suggest?agentId=arty`);
     let j = await r.json();
     ok(j.base === join(wsReal, "sub"), `base reports the resolved scan root (got ${j.base})`);
@@ -346,6 +363,6 @@ main()
   .finally(() => {
     if (server) try { server.kill("SIGKILL"); } catch {}
     killTmux();
-    try { rmSync(WS, { recursive: true, force: true }); } catch {}
+    try { rmSync(WS_REAL, { recursive: true, force: true }); rmSync(WS, { force: true }); } catch {}
     process.exit(failed === 0 ? 0 : 1);
   });

@@ -2155,14 +2155,25 @@ function validateCwd(rawCwd) {
   if (rawCwd === undefined || rawCwd === null || rawCwd === "") return { cwd: undefined };
   const expanded = String(rawCwd).replace(/^~/, process.env.HOME || "");
   const abs = resolve(WORKSPACE, expanded);
-  const root = resolve(WORKSPACE);
-  if (abs !== root && !abs.startsWith(root + "/")) {
-    return { error: `cwd must be inside the workspace (${root})` };
-  }
+  // Containment is decided on CANONICAL paths (same jail contract as
+  // /api/files/browse). This is not only about symlink escapes: the state
+  // detector rewrites session.cwd to the pane's kernel-reported path every
+  // poll, and that path is canonical. On macOS a workspace under /var or /tmp
+  // is really /private/var or /private/tmp, so a raw prefix compare against
+  // the workspace as typed rejected the agent's OWN cwd once the detector had
+  // polled — and resolveAgentCwd silently fell back to the workspace root
+  // (browse, suggest and respawn all started in the wrong directory).
+  let root;
+  try { root = realpathSync(WORKSPACE); } catch { root = resolve(WORKSPACE); }
+  let canon;
   try {
-    if (!statSync(abs).isDirectory()) return { error: `cwd is not a directory: ${abs}` };
+    canon = realpathSync(abs);
+    if (!statSync(canon).isDirectory()) return { error: `cwd is not a directory: ${abs}` };
   } catch {
     return { error: `cwd does not exist: ${abs}` };
+  }
+  if (canon !== root && !canon.startsWith(root + "/")) {
+    return { error: `cwd must be inside the workspace (${root})` };
   }
   return { cwd: abs };
 }
