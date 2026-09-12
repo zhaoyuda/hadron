@@ -105,7 +105,12 @@ const RETRYING_RE = /Retrying in \d+s\b|·\s*attempt \d+\/\d+/i;
 
 const RATE_LIMIT_PATTERNS = [
   /rate.?limit/i,
-  /\b429\b/,
+  // A bare "429" is NOT an API error: ticket ids, part numbers and prompts
+  // ("DVMM-429", "PR 429") pinned a finished agent to blocked for as long as
+  // the text sat in the 15-line tail (canary, 2026-09-12). Real Claude Code
+  // output always carries HTTP context: "API Error: 429" (covered below) or
+  // "429 - too many requests" / "status 429" / "HTTP 429".
+  /(?:error|status|http)\W{0,10}\b429\b|\b429\b\W{0,10}(?:too many|rate)/i,
   /too many requests/i,
   /overloaded/i,
   /API Error:\s*[45]\d\d/i,

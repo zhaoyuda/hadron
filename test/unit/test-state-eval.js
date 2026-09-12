@@ -87,6 +87,8 @@ const EXPECTED = {
   "idle-recap-above-prompt":               { state: null },
   "idle-cooked-summary":                   { state: null },
   "idle-100pct-context":                   { state: null },
+  // bare "429" in conversation text (PR/issue ids) is not an API error (canary, 2026-09-12)
+  "idle-429-in-conversation":              { state: null },
 
   // ── Blocked: needs input ──
   "blocked-needs-input":               { state: "blocked", blockReason: "Needs input" },
@@ -98,6 +100,9 @@ const EXPECTED = {
 
   // ── Blocked: API error ──
   "blocked-rate-limit":                { state: "blocked", blockReason: "API error" },
+  // "HTTP 429" without the "API Error:" prefix, "rate limit" or "too many requests":
+  // exercises the tightened bare-429 pattern on its own (nothing else in the list matches)
+  "blocked-http-429-bare":             { state: "blocked", blockReason: "API error" },
   "blocked-overloaded":                { state: "blocked", blockReason: "API error" },
   "blocked-api-500":                   { state: "blocked", blockReason: "API error" },
   "blocked-no-healthy-deployments":    { state: "blocked", blockReason: "API error" },
