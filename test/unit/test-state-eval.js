@@ -79,6 +79,16 @@ const EXPECTED = {
   // Must win over the stale "Wandering…" spinner above the prompt so a retrying
   // agent reads as working, not idle.
   "working-retrying-api":          { state: "working", promptVisible: true, substatus: { type: "retrying" } },
+  // the generic head "API error · Retrying in 3s · attempt 1/10" (what the first attempts
+  // render unless rate-limit / network-down / SSL metadata is present): no hard status
+  // named → still working (retrying), not blocked
+  "working-retry-banner-generic":  { state: "working", promptVisible: true, substatus: { type: "retrying" } },
+  // final-attempt variant without an attempt count: "· retrying once, waiting up to 1m"
+  "working-retry-no-response":     { state: "working", promptVisible: true, substatus: { type: "retrying" } },
+  // stalled connection: "Waiting for API response · will retry in 1m · check your network"
+  "working-retry-stalled":             { state: "working", promptVisible: true, substatus: { type: "retrying" } },
+  // opted-in lower-priority wait: "… · next try in 5m · attempt 2 · esc to interrupt"
+  "working-retry-low-priority":        { state: "working", promptVisible: true, substatus: { type: "retrying" } },
 
   // ── Idle (prompt visible, NO working indicators in above window) ──
   "idle-at-prompt":                        { state: null },
@@ -89,6 +99,20 @@ const EXPECTED = {
   "idle-100pct-context":                   { state: null },
   // bare "429" in conversation text (PR/issue ids) is not an API error (canary, 2026-09-12)
   "idle-429-in-conversation":              { state: null },
+  // the same error strings QUOTED mid-sentence in the agent's answer, or inside a tool's
+  // output (⎿ block) are not Claude's own API error — line-anchored rule (2026-09-12)
+  "idle-api-error-quoted-in-prose":        { state: null },
+  "idle-api-error-in-tool-output":         { state: null },
+  // a retry banner QUOTED in prose (no leading ✻/⎿ glyph) is neither retrying nor blocked
+  "idle-retry-banner-quoted-in-prose":     { state: null },
+  // the same banner text echoed by a tool (⎿ / 5-space continuation) is not the banner
+  "idle-retry-banner-in-tool-output":      { state: null },
+  // the error heads as ordinary words at line start ("API Error handling is now covered")
+  // — every head carries its rendered delimiter ("API Error: ", "Not logged in ·",
+  // "high demand for ", "usage limits" ≠ "usage limit ·"), so a summary sentence does not count
+  "idle-error-words-in-summary":           { state: null },
+  // a /goal pause for a non-API reason (hook ended the turn) is not an API error
+  "idle-goal-paused-hook":                 { state: null },
 
   // ── Blocked: needs input ──
   "blocked-needs-input":               { state: "blocked", blockReason: "Needs input" },
@@ -100,13 +124,44 @@ const EXPECTED = {
 
   // ── Blocked: API error ──
   "blocked-rate-limit":                { state: "blocked", blockReason: "API error" },
-  // "HTTP 429" without the "API Error:" prefix, "rate limit" or "too many requests":
-  // exercises the tightened bare-429 pattern on its own (nothing else in the list matches)
-  "blocked-http-429-bare":             { state: "blocked", blockReason: "API error" },
+  // assistant-rendered "● API Error: 429 {…rate_limit_error…}" — how Claude Code actually
+  // shows a failed call (its own isApiErrorMessage test is text.startsWith("API Error"))
+  "blocked-api-429-message":           { state: "blocked", blockReason: "API error" },
+  // macOS renders the message bullet as ⏺ (U+23FA) instead of ● — same anchor
+  "blocked-api-error-mac-bullet":      { state: "blocked", blockReason: "API error" },
+  // client-composed billing / auth failures (v2.1.269 renders these as the message text)
+  "blocked-credit-balance":            { state: "blocked", blockReason: "API error" },
+  "blocked-invalid-api-key":           { state: "blocked", blockReason: "API error" },
+  "blocked-not-logged-in":             { state: "blocked", blockReason: "API error" },
+  "blocked-gateway-auth":              { state: "blocked", blockReason: "API error" },
+  "blocked-request-timed-out":         { state: "blocked", blockReason: "API error" },
+  "blocked-high-demand":               { state: "blocked", blockReason: "API error" },
+  // retry banner whose head names a hard status ("529 Overloaded · Retrying in 8s …"):
+  // the user should see the block, not a green "retrying"
+  "blocked-retry-banner-529":          { state: "blocked", blockReason: "API error" },
+  // longer delays are formatted "1m 30s" / "5m", not seconds
+  "blocked-retry-banner-minutes":      { state: "blocked", blockReason: "API error" },
+  // the server's message text can itself contain "·"
+  "blocked-retry-banner-dot-in-message": { state: "blocked", blockReason: "API error" },
+  // narrow pane: the head is truncated to ≥10 chars with "…" before the retry suffix
+  "blocked-retry-banner-truncated-head": { state: "blocked", blockReason: "API error" },
+  // a mid-stream (SSE) failure has no HTTP status, so the formatted head is the bare
+  // message ("Overloaded") — any non-generic head counts, not just "<status> …"
+  "blocked-retry-banner-overloaded-stream": { state: "blocked", blockReason: "API error" },
+  // delays of five minutes and up show the most significant unit only ("1h", "1d")
+  "blocked-retry-banner-hours":        { state: "blocked", blockReason: "API error" },
   "blocked-overloaded":                { state: "blocked", blockReason: "API error" },
   "blocked-api-500":                   { state: "blocked", blockReason: "API error" },
   "blocked-no-healthy-deployments":    { state: "blocked", blockReason: "API error" },
   "blocked-model-issue":               { state: "blocked", blockReason: "API error" },
+  // narrow pane (50 cols): the renderer wraps the message at a space, so the head's
+  // delimiter " (" lands on the next line — end-of-line stands in for it
+  "blocked-model-issue-wrapped":       { state: "blocked", blockReason: "API error" },
+  // 45 cols: the head itself wraps ("… the selected" / "  model (…)"); the bullet line is
+  // re-joined with its 2-space continuation lines before the head is tested
+  "blocked-model-issue-wrapped-45":    { state: "blocked", blockReason: "API error" },
+  // /goal notice, prefixed by a goal-spinner frame (∴ ∷ ∵): the API-caused pauses count
+  "blocked-goal-paused-rate-limited":  { state: "blocked", blockReason: "API error" },
 
   // ── Inconclusive (no prompt, no recognized indicators) ──
   "inconclusive-mid-output":           { state: "inconclusive" },

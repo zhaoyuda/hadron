@@ -1,6 +1,6 @@
-● Bash(curl -s https://api.example.com/v1/items)
-  ⎿  {"ok":true,"count":12}
-⚠ HTTP 429 from the API. Retrying in 30s...
+● Read(server/index.js)
+  ⎿  Read 40 lines
+● Request timed out
 ─────────────────────────────────────────────────────────────────────────────────────────────
 ❯ 
 ─────────────────────────────────────────────────────────────────────────────────────────────

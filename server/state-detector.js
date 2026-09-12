@@ -99,30 +99,107 @@ const COMPACTING_RE = /Compacting\s+\w+…/;
 // failure the agent is auto-recovering from. Real-time work, and crucially the
 // "thinking" timer above it often freezes while the call is blocked, so without
 // this an actively-retrying agent reads as idle.
-const RETRYING_RE = /Retrying in \d+s\b|·\s*attempt \d+\/\d+/i;
+// API retry banner. v2.1.269 renders it as a fixed "✻" (error colour) at column 0
+// followed by "<head> · Retrying in 3s · attempt 2/10" — the delay comes from the
+// duration formatter: "8s" under a minute, "1m 30s" under five, then the most
+// significant unit only ("5m", "1h", "1d" — long Retry-After delays are allowed with the
+// retry watchdog) — or "No response from the API after 30s · retrying, waiting up to 1m ·
+// attempt 2/10" (final attempt: "· retrying once, waiting up to 1m", no attempt count).
+// The same renderer draws the stalled-connection form "Waiting for API response · will
+// retry in 1m · check your network" and the lower-priority wait "Working at lower
+// priority · waiting for capacity · next try in 5m · attempt 2 · esc to interrupt".
+// Older builds put it under the message as "⎿  Retrying in 0s · attempt 1/10" with
+// nothing in between. All forms are line-anchored on their exact layout, so the banner
+// quoted in the agent's prose or echoed in tool output ("  ⎿  529 … · Retrying in 3s")
+// does not count. Known tradeoff: a tool that prints exactly "Retrying in 3s · attempt
+// 3/10" as its first output line is indistinguishable from the legacy banner (→ retrying).
+const RETRY_DELAY = "(?:\\d+d|\\d+h|\\d+m(?: \\d+s)?|\\d+(?:\\.\\d)?s)";
+const RETRYING_RE = new RegExp(
+  "^(?:✻\\s+(?:.*?·\\s*)?(?:(?:Retrying in|will retry in|next try in) " + RETRY_DELAY + "\\b" +
+  "|retrying(?: once)?, waiting up to)" +
+  "| {0,2}⎿\\s+Retrying in " + RETRY_DELAY + "\\b)",
+);
 
 // ── Blocked indicators ──
 
-const RATE_LIMIT_PATTERNS = [
-  /rate.?limit/i,
-  // A bare "429" is NOT an API error: ticket ids, part numbers and prompts
-  // ("DVMM-429", "PR 429") pinned a finished agent to blocked for as long as
-  // the text sat in the 15-line tail (canary, 2026-09-12). Real Claude Code
-  // output always carries HTTP context: "API Error: 429" (covered below) or
-  // "429 - too many requests" / "status 429" / "HTTP 429".
-  /(?:error|status|http)\W{0,10}\b429\b|\b429\b\W{0,10}(?:too many|rate)/i,
-  /too many requests/i,
-  /overloaded/i,
-  /API Error:\s*[45]\d\d/i,
-  /BadRequestError/i,
-  /no healthy deployments/i,
-  /There's an issue with the selected model/i,
-  /model.*not exist/i,
-  /you may not have access/i,
-  /InvalidRequestError/i,
-  /AuthenticationError/i,
-  /\b(?:40[0-9]|5[0-9]{2})\s+(?:Forbidden|Unauthorized|Not Found|Internal Server Error|Bad Gateway|Service Unavailable)/i,
-];
+// Claude Code renders an API failure as an assistant message whose text STARTS
+// with "API Error" (its own isApiErrorMessage test is `text.startsWith("API Error")`,
+// plus a few fixed client-composed messages). On screen that is a line beginning
+// with the message bullet — "●" (Linux/Windows) or "⏺" (macOS, v2.1.269:
+// `M()==="macos"?"\u23FA":"\u25CF"`) — or "⚠", a /goal notice's spinner frame
+// (∴ ∷ ∵ — "∷ Goal paused · the request was rate limited · …"), or the 2-space indent.
+// Anchoring to the line start (and matching case-sensitively, as the client
+// composes these strings) is what stops most of the false positives that pinned
+// finished agents to blocked: "DVMM-429" in a catalogue id, "API Error: 429"
+// quoted mid-sentence in an answer, "overloaded" in a credit-card summary (prod,
+// 2026-09-12: 26 API-error flips in 14 days, none real). The residual risk is a
+// continuation line of the agent's own prose that itself begins with one of these
+// exact strings at the 2-space indent; accepted. Each head therefore includes its
+// delimiter ("API Error: ", "Not logged in(?: ·|$)") so "● API Error handling is done" in a
+// summary does not count. The renderer wraps long messages at spaces (text width is
+// columns − 10), so where the delimiter follows a space, end-of-line stands in for it:
+// "● There's an issue with the selected model" / "  (claude-…). It may not exist…" on
+// a 50-column pane is still the error. Matched per line (or per re-joined message
+// block, see joinedMessageBlocks), never on the whole tail joined into one string.
+const API_ERROR_LINE_RE = new RegExp(
+  "^(?:[●⏺⚠∴∷∵]\uFE0F? ?| {0,2})(?:" +
+  [
+    "API Error: ",                       // "API Error: 429 {…}" — always status after the colon
+    "Please run /login(?: ·|$)",
+    "Not logged in(?: ·|$)",
+    "OAuth token revoked(?: ·|$)",
+    "Login expired(?: ·|$)",
+    "Credit balance too low(?: ·|$)",
+    "Invalid API key(?: ·|$)",
+    "Authentication error(?: ·|$)",
+    "Request timed out\\s*$",
+    "We are experiencing high demand(?: for |$)",
+    "The model is currently overloaded\\.",
+    "There's an issue with the selected model(?: \\(|\\.|$)",
+    "(?:Error: )?no healthy deployments\\b",
+    "You've hit your (?:channel's )?(?:fast|monthly spend) limit(?: ·|\\.|$)",
+    // /goal notice (prefixed by a goal-spinner frame ∴ ∷ ∵): only the API-caused pauses
+    "Goal paused ·(?: (?:usage limit reached|the request was rate limited|the API rejected the last request)|\\s*$)",
+    "Goal paused after \\d+ automatic retries ·",
+    "AWS (?:credentials expired or invalid|authentication failed)(?: ·|\\.|$)",
+    "Google Cloud (?:credentials expired or invalid|authentication failed)(?: ·|\\.|$)",
+  ].join("|") + ")",
+);
+// The retry banner's head carries the error. v2.1.269 picks it in exactly three ways:
+// rate-limit metadata → "<Type> limit reached" (session/weekly/Opus/Sonnet/Fable/usage
+// credit/usage, truncated to ≥10 chars with "…" on narrow panes); otherwise the first
+// two attempts → the generic "API error"; from attempt 3 (or network-down / SSL) → the
+// formatted error, which is "<status> <message>" when the HTTP status is known ("529
+// Overloaded", "429 …rate_limit_error…" — the message may itself contain "·") but just
+// the message for a mid-stream (SSE) failure that has no status ("Overloaded"). So the
+// rule is by exclusion: a ✻ retry banner whose head is anything other than the generic
+// "API error" is the block step 5d should own; "API error · Retrying …", the
+// "No response from the API … retrying" form and the legacy "⎿  Retrying in 0s ·
+// attempt 1/10" stay working.
+const RETRY_ERROR_LINE_RE = new RegExp(
+  "^✻\\s+(?!API error\\s*·)(?!No response from the API\\b)\\S.*?·\\s*Retrying in " + RETRY_DELAY,
+);
+const isApiErrorLine = (l) => API_ERROR_LINE_RE.test(l) || RETRY_ERROR_LINE_RE.test(l);
+// A message wraps at spaces on narrow panes (text width is columns − 10), so on a
+// 45-column pane the head itself splits: "● There's an issue with the selected" /
+// "  model (claude-…)". Re-join each bullet line with its 2-space continuation lines
+// (up to a blank line, a tool-result "⎿" or the next bullet) and test the head against
+// the joined block — the anchor stays the bullet, so prose is no more exposed than a
+// single line is.
+function joinedMessageBlocks(lines) {
+  const blocks = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^[●⏺⚠]/.test(lines[i])) continue;
+    let block = lines[i];
+    for (let j = i + 1; j < lines.length && /^ {2}[^\s⎿]/.test(lines[j]); j++) {
+      block += " " + lines[j].slice(2);
+    }
+    blocks.push(block);
+  }
+  return blocks;
+}
+const hasApiError = (lines) =>
+  lines.some(isApiErrorLine) || joinedMessageBlocks(lines).some((b) => API_ERROR_LINE_RE.test(b));
 
 const WAITING_INPUT_RE = /Allow once|Allow always|Allow\s+Deny|Do you want to proceed|manually approve this|❯ Enter to select|Esc to cancel|Would you like to proceed\?|written up a plan|Yes, and bypass permissions|Yes, manually approve edits/;
 
@@ -243,8 +320,7 @@ export function detectState(rawLines, opts = {}) {
   // (the "⎿ Retrying…" line sits below the spinner, not in the `above` window).
   // Exception: a retry that accompanies a hard API error code (429/5xx/auth) is
   // a real block the user should see — let step 5d claim it instead.
-  const retryTail = tail.join("\n");
-  if (RETRYING_RE.test(retryTail) && !RATE_LIMIT_PATTERNS.some((p) => p.test(retryTail))) {
+  if (tail.some((l) => RETRYING_RE.test(l)) && !hasApiError(tail)) {
     return { state: "working", promptVisible: hasPrompt, stale: false, substatus: { type: "retrying" } };
   }
 
@@ -317,11 +393,10 @@ export function detectState(rawLines, opts = {}) {
     return { state: "blocked", blockReason: "Needs input", substatus: null };
   }
 
-  // 5d. API error
-  for (const pat of RATE_LIMIT_PATTERNS) {
-    if (pat.test(tailText)) {
-      return { state: "blocked", blockReason: "API error", substatus: null };
-    }
+  // 5d. API error — a line that BEGINS with one of Claude Code's error messages,
+  // or a retry banner whose head is a real error rather than the generic "API error"
+  if (hasApiError(tail)) {
+    return { state: "blocked", blockReason: "API error", substatus: null };
   }
 
   // ── Step 6: Final state ──

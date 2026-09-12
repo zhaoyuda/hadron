@@ -1,0 +1,10 @@
+● Bash(curl -s -i https://api.example.com/v1/items | head -3)
+  ⎿  HTTP/2 429
+     API Error: 429 Too Many Requests
+     Rate limit exceeded, retry after 30s
+● 对方接口限流了，我先等 30 秒再重试。
+─────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+─────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 5  |  ctx [██████░░░░] 61% (200k)  |  $1.8498  |  5h [░░░░░░░░░░] 5% (3h29m)
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents

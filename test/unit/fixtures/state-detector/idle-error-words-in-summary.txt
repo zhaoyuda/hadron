@@ -1,0 +1,12 @@
+● API Error handling is now covered by tests.
+  Claude usage limits are now documented, and AWS credentials expired warnings are logged.
+  Goal paused states and You've hit your fast limit banners are tested.
+  Authentication error handling is now covered by tests, and Request timed out paths too.
+  Not logged in states are covered as well.
+● Claude usage limits are now documented.
+✻ Cooked for 3m 2s · done 7:58 AM
+─────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+─────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 5  |  ctx [██████░░░░] 61% (200k)  |  $1.8498  |  5h [░░░░░░░░░░] 5% (3h29m)
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents

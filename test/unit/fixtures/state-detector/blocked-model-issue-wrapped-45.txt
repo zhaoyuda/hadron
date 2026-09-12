@@ -1,0 +1,10 @@
+● There's an issue with the selected
+  model (claude-opus-4-6). It may not
+  exist or you may not have access to
+  it. Run /model to pick a different
+  model.
+─────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+─────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 5  |  ctx [██████░░░░] 61% (200k)  |  $1.8498  |  5h [░░░░░░░░░░] 5% (3h29m)
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents

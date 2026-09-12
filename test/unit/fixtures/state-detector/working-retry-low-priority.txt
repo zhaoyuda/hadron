@@ -1,0 +1,8 @@
+● Reading the streamed response.
+
+✻ Working at lower priority · waiting for capacity · next try in 5m · attempt 2 · esc to interrupt
+─────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+─────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 5  |  ctx [██████░░░░] 61% (200k)  |  $1.8498  |  5h [░░░░░░░░░░] 5% (3h29m)
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents
