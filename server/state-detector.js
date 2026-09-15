@@ -144,7 +144,9 @@ const RETRYING_RE = new RegExp(
 const API_ERROR_LINE_RE = new RegExp(
   "^(?:[●⏺⚠∴∷∵]\uFE0F? ?| {0,2})(?:" +
   [
-    "API Error: ",                       // "API Error: 429 {…}" — always status after the colon
+    // "API Error: 429 {…}" — the renderer rewrites even a bare "API Error" message to
+    // "API Error: Please wait a moment and try again.", so the colon is always there
+    "API Error: ",
     "Please run /login(?: ·|$)",
     "Not logged in(?: ·|$)",
     "OAuth token revoked(?: ·|$)",
@@ -152,12 +154,19 @@ const API_ERROR_LINE_RE = new RegExp(
     "Credit balance too low(?: ·|$)",
     "Invalid API key(?: ·|$)",
     "Authentication error(?: ·|$)",
-    "Request timed out\\s*$",
+    // SDK timeout: the message text is exactly "Request timed out", drawn verbatim
+    // (plus " (API_TIMEOUT_MS=…ms, try increasing it)" when that env var is set)
+    "Request timed out(?: \\(API_TIMEOUT_MS=|$)",
     "We are experiencing high demand(?: for |$)",
     "The model is currently overloaded\\.",
     "There's an issue with the selected model(?: \\(|\\.|$)",
+    "The model \\S+ is not available on your \\S+ deployment(?:\\.|$)",   // "… your bedrock deployment. Try /model …"
     "(?:Error: )?no healthy deployments\\b",
     "You've hit your (?:channel's )?(?:fast|monthly spend) limit(?: ·|\\.|$)",
+    "You've hit your team's shared budget(?: ·|\\.|$)",
+    "You're out of usage credits(?: ·|\\.|$)",
+    "Your organization is out of usage credits(?: ·|\\.|$)",
+    "Your organization's usage credit cap is reached(?: for |$)",
     // /goal notice (prefixed by a goal-spinner frame ∴ ∷ ∵): only the API-caused pauses
     "Goal paused ·(?: (?:usage limit reached|the request was rate limited|the API rejected the last request)|\\s*$)",
     "Goal paused after \\d+ automatic retries ·",
@@ -189,7 +198,7 @@ const isApiErrorLine = (l) => API_ERROR_LINE_RE.test(l) || RETRY_ERROR_LINE_RE.t
 function joinedMessageBlocks(lines) {
   const blocks = [];
   for (let i = 0; i < lines.length; i++) {
-    if (!/^[●⏺⚠]/.test(lines[i])) continue;
+    if (!/^[●⏺⚠∴∷∵]/.test(lines[i])) continue;
     let block = lines[i];
     for (let j = i + 1; j < lines.length && /^ {2}[^\s⎿]/.test(lines[j]); j++) {
       block += " " + lines[j].slice(2);

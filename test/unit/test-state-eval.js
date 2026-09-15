@@ -135,6 +135,18 @@ const EXPECTED = {
   "blocked-not-logged-in":             { state: "blocked", blockReason: "API error" },
   "blocked-gateway-auth":              { state: "blocked", blockReason: "API error" },
   "blocked-request-timed-out":         { state: "blocked", blockReason: "API error" },
+  // (2026-09-15 review of d88d9f5) forms the client emits that d88d9f5 missed
+  "blocked-request-timed-out-env":     { state: "blocked", blockReason: "API error" },
+  "blocked-shared-budget":             { state: "blocked", blockReason: "API error" },
+  "blocked-out-of-credits":            { state: "blocked", blockReason: "API error" },
+  "blocked-org-out-of-credits":        { state: "blocked", blockReason: "API error" },
+  "blocked-org-credit-cap":            { state: "blocked", blockReason: "API error" },
+  "blocked-model-unavailable-wrapped-50": { state: "blocked", blockReason: "API error" },
+  "blocked-goal-paused-wrapped-45":    { state: "blocked", blockReason: "API error" },
+  // prose that starts with "API Error" but is not the renderer's "API Error: " form
+  "idle-api-error-prose-no-colon":     { state: null },
+  "idle-api-error-paren-in-prose":     { state: null },
+  "idle-model-unavailable-in-prose":   { state: null },
   "blocked-high-demand":               { state: "blocked", blockReason: "API error" },
   // retry banner whose head names a hard status ("529 Overloaded · Retrying in 8s …"):
   // the user should see the block, not a green "retrying"

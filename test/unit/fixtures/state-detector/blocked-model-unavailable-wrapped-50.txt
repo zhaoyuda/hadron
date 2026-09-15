@@ -1,0 +1,10 @@
+● Let me look at that file.
+● The model claude-opus-5 is not available on
+  your Bedrock deployment. Try /model to switch
+  to claude-sonnet-5, or ask your admin to
+  enable this model.
+─────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+─────────────────────────────────────────────────────────────────────────────────────────────
+  Opus 5  |  ctx [██████░░░░] 61% (200k)  |  $1.8498  |  5h [░░░░░░░░░░] 5% (3h29m)
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents
