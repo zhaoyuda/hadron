@@ -7,6 +7,8 @@
  *   - half-open connection (client stops responding) is terminated by the ws
  *     heartbeat and its pty reaped — pre-fix this leaked one pty per reconnect
  *   - /api/health exposes the live pty count
+ *   - the attached tmux client has UTF-8 on even when the server has no locale
+ *     and is not inside tmux (macOS/launchd: every non-ASCII cell rendered "_")
  *
  * fd accounting asserts the OS-level truth (Linux: /proc/<pid>/fd; macOS: lsof;
  * skips cleanly elsewhere) — livePtys alone proved blind to the node-pty 1.1.0
@@ -37,6 +39,11 @@ function ok(cond, msg) {
 
 const WS = mkdtempSync(join(tmpdir(), "hadron-ptytest-"));
 const WS_NAME = WS.split("/").pop().replace(/[^a-zA-Z0-9_-]/g, "");
+// Private tmux server: the Hadron under test gets HADRON_TMUX_SOCKET and every
+// tmux call this file makes passes the same -S, so neither the operator's default
+// server (where prod agents live) nor an inherited $TMUX can be what we inspect.
+const SOCK = join(WS, "tmux.sock");
+const tmuxQ = (args) => execFileSync("tmux", ["-S", SOCK, ...args], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] });
 let server, TOKEN;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -104,15 +111,20 @@ async function waitFor(fn, want, ms = 8000) {
 
 function killTmux() {
   try {
-    const names = execFileSync("tmux", ["ls", "-F", "#{session_name}"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] })
-      .trim().split("\n").filter((n) => n.includes(`hadron-${WS_NAME}`));
-    for (const n of names) try { execFileSync("tmux", ["kill-session", "-t", n]); } catch {}
+    const names = tmuxQ(["ls", "-F", "#{session_name}"]).trim().split("\n").filter(Boolean);
+    for (const n of names) try { tmuxQ(["kill-session", "-t", n]); } catch {}
   } catch {}
 }
 
 async function main() {
+  // Run the server the way launchd starts it on macOS — not inside tmux and with
+  // no UTF-8 locale (LC_ALL=C beats any LANG a parent might set) — the environment
+  // in which the "_" rendering bug was found. Without -u on the attach, tmux has
+  // nothing left to take CLIENT_UTF8 from.
+  const serverEnv = { ...process.env, PORT: String(PORT), HADRON_HOST: "127.0.0.1", HADRON_WS_HEARTBEAT_MS: String(HEARTBEAT_MS), HADRON_TMUX_SOCKET: SOCK, LC_ALL: "C" };
+  for (const k of ["TMUX", "TMUX_PANE", "LC_CTYPE", "LANG"]) delete serverEnv[k];
   server = spawnProc("node", [join(REPO, "server", "index.js"), WS], {
-    env: { ...process.env, PORT: String(PORT), HADRON_HOST: "127.0.0.1", HADRON_WS_HEARTBEAT_MS: String(HEARTBEAT_MS) },
+    env: serverEnv,
     stdio: ["ignore", "pipe", "pipe"],
   });
   for (let i = 0; i < 50; i++) {
@@ -129,6 +141,19 @@ async function main() {
   {
     const h = await health();
     ok(h.ok === true && h.livePtys === 0, `health reports 0 live ptys before any terminal (got ${h.livePtys})`);
+  }
+
+  console.log("\n[attached client renders UTF-8 with LC_ALL=C and no $TMUX in the server env]");
+  {
+    const ws = await connectTerminal("pty-a");
+    ok((await health()).livePtys === 1, "connected terminal → livePtys 1");
+    const utf8 = await waitFor(() => {
+      try { return tmuxQ(["list-clients", "-t", `hadron-${WS_NAME}-pty-a`, "-F", "#{client_utf8}"]).trim(); }
+      catch { return ""; }
+    }, "1", 4000);
+    ok(utf8, "tmux reports client_utf8=1 for the web terminal's client (attach passes -u)");
+    ws.close();
+    ok(await waitFor(async () => (await health()).livePtys, 0), "close → pty reaped");
   }
 
   console.log("\n[normal close releases the pty master fd]");

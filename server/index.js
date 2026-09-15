@@ -2074,9 +2074,17 @@ wss.on("connection", (ws) => {
 
   let pty;
   try {
+    // -u: tmux only emits UTF-8 when the attaching CLIENT opts in ($TMUX set, a
+    // UTF-8 LC_ALL/LC_CTYPE/LANG, or -u); without it every wide/non-ASCII cell is
+    // written as "_" (claude-hud bars → "__________", "⏵⏵ auto mode" → "__ auto
+    // mode"). The server process is not inside tmux and, under launchd on macOS,
+    // has no LANG at all — on Linux/systemd it happened to inherit LANG=C.UTF-8,
+    // which is why the bug only ever showed on the Mac. (A LANG default here would
+    // reach only this client, not the pane's processes — they predate the attach
+    // and the default update-environment excludes LANG — so -u is the whole fix.)
     pty = spawn(
       "tmux",
-      tmuxArgv(["attach-session", "-t", effectiveTmuxName]),
+      tmuxArgv(["-u", "attach-session", "-t", effectiveTmuxName]),
       {
         name: "xterm-256color",
         cols: 80,
