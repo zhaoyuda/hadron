@@ -364,7 +364,7 @@ function tmuxSessionHasProcesses(sessionName) {
     for (const pid of panes) {
       if (!pid) continue;
       try {
-        const children = execFileSync("pgrep", ["-P", String(pid)], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+        const children = execFileSync("pgrep", ["-P", String(pid)], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 3000, killSignal: "SIGKILL" }).trim();
         if (children) return true;
       } catch {}
     }

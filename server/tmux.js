@@ -20,12 +20,23 @@ export function tmuxArgv(args) {
   return SOCKET ? ["-S", SOCKET, ...args] : args;
 }
 
+// Every tmux call is a SYNCHRONOUS spawn on the main thread (monitor polls,
+// capture-pane, the HTTP handlers). One that never returns therefore stops the
+// whole event loop: the port keeps accepting, nothing is ever served, and a
+// supervisor sees a live process (macOS, 2026-09-17: 2d15h in, one tmux client
+// parked in kevent forever — launchd never restarted it). Bound every call;
+// SIGKILL because a client that ignores SIGTERM would re-hang the same call.
+// A timeout throws like any failed tmux call, so tmuxSafe callers see null.
+export const TMUX_TIMEOUT_MS = 5000;
+
 export function tmux(args, opts = {}) {
   // Hadron only ever needs targeted kill-session. kill-server would take every
   // agent on the socket with it (and, from inside a pane, the caller's own shell).
   return execFileSync("tmux", tmuxArgv(args), {
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "ignore"],
+    timeout: TMUX_TIMEOUT_MS,
+    killSignal: "SIGKILL",
     ...opts,
   });
 }

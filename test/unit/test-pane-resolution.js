@@ -37,6 +37,7 @@ const SOCK = join(T, "tmux.sock");
 // Must be set BEFORE importing tmux.js (it reads the env at module load).
 process.env.HADRON_TMUX_SOCKET = SOCK;
 const { StateDetector, parseCmdProbe, stripLine, CMD_PROBE_FORMAT } = await import("../../server/state-detector.js");
+const { tmux, tmuxSafe, TMUX_TIMEOUT_MS } = await import("../../server/tmux.js");
 
 let passed = 0, failed = 0, skipped = 0;
 function ok(cond, msg) {
@@ -170,6 +171,37 @@ if (!haveTmux) {
         `detector reads recreated agentA's own current pane → done/idle (state=${sessA.state})`);
     }
     clearInterval(detA.pollTimer);
+
+    // ── Test 4: a tmux call that never returns cannot wedge the process.
+    // `wait-for <channel>` blocks until the channel is signalled — a real,
+    // deterministic never-returning client. Pre-fix tmux() had no timeout, so
+    // one such call parked the whole server in kevent for good (macOS, 2026-09-17).
+    {
+      ok(Number.isFinite(TMUX_TIMEOUT_MS) && TMUX_TIMEOUT_MS > 0 && TMUX_TIMEOUT_MS <= 10000,
+        `tmux() has a bounded default timeout (${TMUX_TIMEOUT_MS}ms)`);
+      let t0 = Date.now(), err = null;
+      try { tmux(["wait-for", "hadron-test-never-signalled"], { timeout: 400 }); } catch (e) { err = e; }
+      const dt = Date.now() - t0;
+      ok(err && dt < 3000, `never-returning tmux client is killed at the timeout, call throws (${dt}ms, ${err && (err.code || err.signal)})`);
+      ok(err && err.signal === "SIGKILL", `killed with SIGKILL, not SIGTERM (got ${err && err.signal})`);
+      t0 = Date.now();
+      ok(tmuxSafe(["wait-for", "hadron-test-never-signalled"], { timeout: 400 }) === null && Date.now() - t0 < 3000,
+        "tmuxSafe reports the hung call as null, like any failed tmux call");
+      // The DEFAULT applies when a caller passes no timeout — that is the case
+      // every monitor poll and HTTP handler is in.
+      // (guarded: on pre-fix code this call would never return, and a test that
+      // hangs is worse than one that fails)
+      if (Number.isFinite(TMUX_TIMEOUT_MS)) {
+        t0 = Date.now(); err = null;
+        try { tmux(["wait-for", "hadron-test-never-signalled"]); } catch (e) { err = e; }
+        const dtDefault = Date.now() - t0;
+        ok(err && dtDefault > TMUX_TIMEOUT_MS * 0.8 && dtDefault < TMUX_TIMEOUT_MS + 2000,
+          `with no opts the DEFAULT timeout is what bounds the call (${dtDefault}ms)`);
+      } else {
+        ok(false, "no default timeout exported — a caller passing no opts can hang the server");
+      }
+      ok(txSafe(["display-message", "-p", "ok"]) === "ok", "the tmux server itself is unaffected by killing the parked client");
+    }
   } finally {
     for (const s of ["agentA", "foreign"]) txSafe(["kill-session", "-t", s]);
     txSafe(["kill-server"]);   // private socket only — never the developer's server

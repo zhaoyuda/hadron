@@ -103,7 +103,7 @@ async function api(method, path, body) {
 function currentTmuxSession() {
   if (!process.env.TMUX) return null;
   try {
-    return execFileSync("tmux", ["display-message", "-p", "#{session_name}"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return execFileSync("tmux", ["display-message", "-p", "#{session_name}"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000, killSignal: "SIGKILL" }).trim();
   } catch {
     return null;
   }
