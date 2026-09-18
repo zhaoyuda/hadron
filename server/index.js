@@ -19,6 +19,7 @@ import { resolve } from "path";
 import { tmux, tmuxSafe, isValidId, shellQuoteArgv, tmuxArgv } from "./tmux.js";
 import { syncSkills } from "./skills.js";
 import { collectProvenance } from "./provenance.js";
+import { startHeartbeat } from "./heartbeat.js";
 import {
   listAnnotations, createAnnotation, updateAnnotation, deleteAnnotation,
   sendAnnotations, resolveAnnotation, reopenAnnotations, retryDispatch,
@@ -160,6 +161,9 @@ function writeRuntimeFile() {
 function removeRuntimeFile() {
   try { unlinkSync(runtimeFilePath()); } catch {}
 }
+// Event-loop liveness beat (server/heartbeat.js): `hadron watchdog` reads the
+// mtime of .hadron/heartbeat out-of-process and SIGKILLs a wedged server.
+let heartbeat = null;
 
 // When bound to all interfaces, the browser reaches us via a concrete IP (LAN/Tailscale),
 // NOT "0.0.0.0" — so enumerate this machine's own addresses and allow those. The host
@@ -424,7 +428,7 @@ function ensureDefaults() {
 // `hadron doctor` compare it against the working tree.
 let PROVENANCE = null;
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true, livePtys: livePtys.size, liveSessions: sessions.size, wsClients: wss.clients.size, ...(PROVENANCE || {}) });
+  res.json({ ok: true, livePtys: livePtys.size, liveSessions: sessions.size, wsClients: wss.clients.size, ...(heartbeat ? heartbeat.status() : {}), ...(PROVENANCE || {}) });
 });
 
 // GET but AUTHENTICATED: requireAuth waves GET through, and this returns per-agent
@@ -2229,6 +2233,9 @@ server.listen(PORT, HADRON_HOST, () => {
   const config = initWorkspace(WORKSPACE);
   AUTH_TOKEN = loadOrCreateToken();
   writeRuntimeFile();
+  // A previous server that was SIGKILLed (by the watchdog, say) left its last
+  // beat on disk; drop it so it can't be judged against THIS pid while we boot.
+  try { unlinkSync(join(getWorkspaceDir(), ".hadron", "heartbeat")); } catch {}
   PROVENANCE = { ...collectProvenance(dirname(__dirname)), bootIdSource: BOOT.source };
   console.log(`[resume] boot generation ${BOOT.id} (source: ${BOOT.source})`);
   probeClaudeCaps(); // warm the capability cache before any autostart needs it
@@ -2285,6 +2292,13 @@ server.listen(PORT, HADRON_HOST, () => {
     });
   } catch {}
 
+  // Start beating only now: the loop above is sequential sync tmux work (bounded
+  // per call, but N agents × a slow tmux can take a minute). No heartbeat file
+  // while booting reads as "booting" to `hadron watchdog` (exit 3, never a kill);
+  // a beat that started and then froze is the only thing it treats as a wedge.
+  heartbeat = startHeartbeat(join(getWorkspaceDir(), ".hadron", "heartbeat"), {
+    intervalMs: Number(process.env.HADRON_HEARTBEAT_INTERVAL_MS) > 0 ? Number(process.env.HADRON_HEARTBEAT_INTERVAL_MS) : undefined, // test hook
+  });
   console.log(`Hadron server running on http://localhost:${PORT}`);
 });
 
@@ -2298,6 +2312,7 @@ function cleanupSubprocesses() {
     try { entry.process.kill(); } catch {}
   }
   jupyterProcesses.clear();
+  if (heartbeat) { heartbeat.stop(); heartbeat = null; }
   removeRuntimeFile();
 }
 process.on("exit", cleanupSubprocesses);

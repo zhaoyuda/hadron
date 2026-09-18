@@ -7,7 +7,7 @@
  * by asking the SERVER to resolve its tmux session — it never reverse-engineers ids.
  */
 import { execFileSync } from "child_process";
-import { readFileSync, existsSync, writeSync } from "fs";
+import { readFileSync, existsSync, writeSync, statSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { syncSkills, removeSkills, skillsStatus, userSkillsDir } from "../server/skills.js";
@@ -192,7 +192,7 @@ function printSkillsStatus() {
 // ── flag parsing ──
 // Presence-only flags must be declared here or they swallow the next positional
 // (`hadron message --raw "Beta Two" hi` would resolve "hi" as the target).
-const BOOLEAN_FLAGS = new Set(["json", "archived", "raw", "no-enter", "start", "auto", "force"]);
+const BOOLEAN_FLAGS = new Set(["json", "archived", "raw", "no-enter", "start", "auto", "force", "restart"]);
 function parseFlags(args) {
   const flags = {};
   const positional = [];
@@ -215,6 +215,74 @@ function printAgent(a) {
   if (a.artifacts && a.artifacts.length) console.log(`  artifacts: ${a.artifacts.map((x) => x.label || x.value).join(", ")}`);
   if (a.relatedAgents && a.relatedAgents.length) console.log(`  related: ${a.relatedAgents.join(", ")}`);
   if (a.notes) console.log(`  notes: ${a.notes.split("\n")[0]}${a.notes.includes("\n") ? " …" : ""}`);
+}
+
+
+// ---- watchdog: is the server's event loop alive? (see server/heartbeat.js) ----
+// Everything here is local (runtime.json pid + heartbeat mtime + ps) so it works
+// when the server is wedged and an HTTP probe would hang; the single HTTP call is
+// a short-timeout SAFETY check before a kill, never the primary signal.
+const HEARTBEAT_STALE_AFTER_S = 30;
+// A server beats only after its boot-time tmux loop. Past this much uptime with
+// no beat AND no HTTP answer it is wedged in boot, not booting (worst measured
+// realistic boot: 8 agents × a 4s-per-call tmux ≈ 100s).
+const BOOT_GRACE_S = 300;
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function pidAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; }
+}
+// Guard against pid reuse after a crash: only a process whose argv names the
+// hadron server is ours to judge (or kill).
+function pidIsHadronServer(pid) {
+  try {
+    const args = execFileSync("ps", ["-o", "args=", "-p", String(pid)], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 3000, killSignal: "SIGKILL" });
+    return /server[\\/]index\.js/.test(args);
+  } catch { return false; }
+}
+function heartbeatAgeMs() {
+  try { return Date.now() - statSync(join(HADRON_DIR, "heartbeat")).mtimeMs; } catch { return null; }
+}
+// Read-only probe: { status: running|not-running|wedged|unknown, ... }.
+// "unknown" = a live hadron pid but no heartbeat file (an older build, or the
+// server is still starting) — never a kill candidate.
+async function probeWatchdog(staleAfterS, bootGraceS = BOOT_GRACE_S) {
+  const out = { status: "unknown", pid: null, port: null, heartbeatAgeS: null, staleAfterS, bootGraceS, message: "" };
+  if (!HADRON_DIR) { out.message = "no .hadron/ found walking up from cwd — run from inside the workspace (WorkingDirectory in the timer unit)"; return out; }
+  let rt = null;
+  try { rt = JSON.parse(readFileSync(join(HADRON_DIR, "runtime.json"), "utf-8")); } catch {}
+  if (!rt || !rt.pid) { out.status = "not-running"; out.message = "runtime.json absent or unreadable — server not running (or never wrote it)"; return out; }
+  out.pid = rt.pid;
+  out.port = rt.port || null; // the port paired with THIS pid — never the env/cwd-derived BASE
+  if (!pidAlive(rt.pid)) { out.status = "not-running"; out.message = `pid ${rt.pid} from runtime.json is gone (crashed or killed — runtime.json is stale)`; return out; }
+  if (!pidIsHadronServer(rt.pid)) { out.status = "not-running"; out.message = `pid ${rt.pid} from runtime.json is not a hadron server (pid reused after a crash)`; return out; }
+  let age = heartbeatAgeMs();
+  if (age === null) {
+    // The server starts beating only after its boot-time tmux loop, so "no
+    // file" is the normal state of a server that is still booting — or an
+    // older build. Neither is a wedge the watchdog may act on.
+    const upS = rt.startedAt ? Math.round((Date.now() - rt.startedAt) / 1000) : null;
+    out.status = "booting";
+    out.message = `pid ${rt.pid} is a hadron server with no heartbeat yet (up ${upS === null ? "?" : upS}s: still booting, or an older build) — cannot judge liveness`;
+    if (upS !== null && upS > bootGraceS) {
+      // Long past any realistic boot with no beat: an older build (serves HTTP —
+      // the caller's probe clears it) or a server wedged inside its boot loop.
+      out.status = "wedged";
+      out.message = `pid ${rt.pid} has been up ${upS}s with no heartbeat (> boot grace ${bootGraceS}s) — wedged during boot, or an older build`;
+    }
+    return out;
+  }
+  if (age > staleAfterS * 1000) {
+    // Re-sample once: the machine may have just woken from sleep, in which
+    // case the next beat lands within an interval and this was never a wedge.
+    await sleepMs(3000);
+    age = heartbeatAgeMs();
+    if (age === null) { out.message = "heartbeat file vanished while probing — server shutting down"; return out; }
+  }
+  out.heartbeatAgeS = Math.round(age / 100) / 10;
+  if (age > staleAfterS * 1000) { out.status = "wedged"; out.message = `pid ${rt.pid} is alive but its event loop has not beaten for ${out.heartbeatAgeS}s (> ${staleAfterS}s) — wedged`; }
+  else { out.status = "running"; out.message = `pid ${rt.pid} alive, heartbeat ${out.heartbeatAgeS}s ago`; }
+  return out;
 }
 
 async function main() {
@@ -470,6 +538,39 @@ async function main() {
       die("usage: hadron annotations <ls [--json] | resolve <id>>");
       break;
     }
+    case "watchdog": {
+      // Exit codes are the contract for a timer/cron job: 0 alive, 1 not running,
+      // 2 wedged (killed if --restart), 3 cannot judge (booting / older build /
+      // no .hadron here / heartbeat not landing). Only ever kills a pid that is
+      // (a) named by runtime.json, (b) a hadron server by argv, (c) has beaten
+      // before and is stale twice 3s apart, and (d) not answering /api/health on
+      // the port runtime.json pairs with it.
+      const staleAfterS = Number(flags["stale-after"]) > 0 ? Number(flags["stale-after"]) : HEARTBEAT_STALE_AFTER_S;
+      const bootGraceS = Number(flags["boot-grace"]) > 0 ? Number(flags["boot-grace"]) : BOOT_GRACE_S;
+      const w = await probeWatchdog(staleAfterS, bootGraceS);
+      let action = "none";
+      if (w.status === "wedged") {
+        let httpAlive = false;
+        // Probe the port runtime.json pairs with this pid — HADRON_PORT (stamped
+        // into every agent pane) may point at another workspace's server.
+        if (w.port) { try { httpAlive = (await fetch(`http://127.0.0.1:${w.port}/api/health`, { signal: AbortSignal.timeout(5000) })).ok; } catch {} }
+        if (httpAlive) {
+          // Loop is turning but the heartbeat isn't landing (fs full/read-only?):
+          // not a wedge — refuse to kill a server that is serving.
+          w.status = "unknown";
+          w.message = w.heartbeatAgeS === null
+            ? `pid ${w.pid} writes no heartbeat but /api/health answers — an older build; restart it to get the watchdog (not killing)`
+            : `heartbeat is ${w.heartbeatAgeS}s stale but /api/health answers — not killing; check that ${join(HADRON_DIR, "heartbeat")} is writable`;
+        } else if (flags.restart) {
+          try { process.kill(w.pid, "SIGKILL"); action = "killed"; }
+          catch (e) { action = `kill failed: ${e.message}`; }
+        } else action = "not restarted (pass --restart)";
+      }
+      const code = { running: 0, "not-running": 1, wedged: 2, booting: 3, unknown: 3 }[w.status];
+      if (flags.json) console.log(JSON.stringify({ ...w, action, exitCode: code }, null, 2));
+      else console.log(`${w.status}: ${w.message}${action === "none" ? "" : ` — ${action}`}`);
+      process.exit(code);
+    }
     case "doctor": {
       // "If this machine reboots now, what comes back?" Read-only. The CLI does
       // the local checks itself (they must run even when the server is down);
@@ -506,6 +607,20 @@ async function main() {
         // 4. managedBy: hand-started will not come back
         if (health.managedBy === "systemd" || health.managedBy === "launchd") local.push({ level: "green", message: `server is managed by ${health.managedBy} (boot-restarts)` });
         else local.push({ level: "red", message: `server is ${health.managedBy || "hand-started"} — it will NOT restart after a reboot (run it under ${process.platform === "darwin" ? "launchd" : "systemd"})` });
+      }
+      // 5. event-loop heartbeat (server/heartbeat.js). A supervisor only restarts a
+      // process that DIES; a wedged one needs `hadron watchdog --restart` on a timer
+      // (README). Evaluated whether or not HTTP answers — a wedge is exactly the
+      // state where it doesn't — and it says the same thing the watchdog would.
+      let rtPid = null;
+      try { rtPid = JSON.parse(readFileSync(join(HADRON_DIR, "runtime.json"), "utf-8")).pid; } catch {}
+      if (HADRON_DIR && rtPid && pidAlive(rtPid)) { // a dead server's last beat proves nothing
+        const hbAge = heartbeatAgeMs();
+        const hbStale = hbAge !== null && hbAge > HEARTBEAT_STALE_AFTER_S * 1000;
+        if (hbAge === null) { if (reachable) local.push({ level: "yellow", message: "no heartbeat file — server still booting, or predates the liveness watchdog (restart it)" }); }
+        else if (hbStale && !reachable) local.push({ level: "red", message: `heartbeat is ${Math.round(hbAge / 1000)}s stale and HTTP does not answer — event loop wedged; \`hadron watchdog --restart\` recovers it` });
+        else if (hbStale) local.push({ level: "yellow", message: `heartbeat is ${Math.round(hbAge / 1000)}s stale but HTTP answers — the beat isn't landing; check that ${join(HADRON_DIR, "heartbeat")} is writable (watchdog will not kill this)` });
+        else local.push({ level: "green", message: `event loop alive (heartbeat ${Math.round(hbAge / 1000)}s ago${reachable && typeof health.eventLoopLagMs === "number" ? `, lag ${health.eventLoopLagMs}ms` : ""})` });
       }
 
       // per-agent findings + caps (authenticated GET — send the token on this GET)
@@ -635,6 +750,12 @@ Commands:
   hadron version [--json]                  CLI vs server provenance (commit/dirty/managedBy);
                                            exit 1 when the server is stale, a tree is dirty, or
                                            the server could not be verified (down/timeout/older)
+  hadron watchdog [--restart] [--json]     is the server's event loop alive? reads runtime.json +
+       [--stale-after <s>] [--boot-grace <s>]  the .hadron/heartbeat mtime (no HTTP needed); exit 0
+                                           alive, 1 not running, 2 wedged, 3 cannot judge
+                                           (still booting / older build / no .hadron here).
+                                           --restart SIGKILLs a wedged server so systemd/launchd
+                                           relaunch it — run from a timer (see README)
   hadron skills install                    symlink operation skills into ~/.claude/skills/ (additive)
   hadron skills sync                       like install, but also prune our own dead links
   hadron skills [status|uninstall]

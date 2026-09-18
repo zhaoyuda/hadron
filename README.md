@@ -286,6 +286,59 @@ WantedBy=multi-user.target
 
 `AbandonProcessGroup` is the launchd counterpart of `KillMode=process`; `PATH` must include wherever `node`, `tmux` and `claude` live because launchd does not read your shell profile. `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hadron.server.plist` to load it now.
 
+**Wedge watchdog (both platforms)** — a supervisor only restarts a process that *dies*. A server whose event loop is stuck (the failure the Mac hit: a sync `tmux` spawn that never returned) keeps its pid and its port, so `Restart=always` / `KeepAlive` never fire and every HTTP probe hangs. The server touches `<workspace>/.hadron/heartbeat` every 2s from its event loop; `hadron watchdog` reads that mtime from a separate process (no HTTP, so it works precisely when the server does not) and exits 0 alive / 1 not running / 2 wedged / 3 cannot judge. With `--restart` it SIGKILLs a wedged server (SIGTERM would be delivered through the stuck loop) and the supervisor relaunches it. It only ever kills the pid named in `.hadron/runtime.json`, and only if that pid is a hadron server by argv, it has beaten before (the beat starts after the boot-time tmux loop, so a slow boot reads as "booting", exit 3, never a kill — until `--boot-grace`, default 300s, at which point a server that also does not answer HTTP is treated as wedged in boot), its heartbeat is stale on two samples 3s apart, and `/api/health` on that pid's own port does not answer. `hadron doctor` shows the heartbeat age. Run it every 30s:
+
+Linux — `/etc/systemd/system/hadron-watchdog.service` + `.timer`:
+
+```ini
+# hadron-watchdog.service
+[Unit]
+Description=Hadron event-loop watchdog
+
+[Service]
+Type=oneshot
+User=you
+WorkingDirectory=/home/you/work
+ExecStart=/usr/bin/node /path/to/hadron/bin/hadron.js watchdog --restart
+SuccessExitStatus=0 1 2 3
+
+# hadron-watchdog.timer
+[Unit]
+Description=Run the Hadron watchdog every 30s
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=30
+AccuracySec=5
+
+[Install]
+WantedBy=timers.target
+```
+
+`WorkingDirectory` is the workspace (the CLI walks up from cwd to find `.hadron/`), and `User` must be the one that runs the server so the SIGKILL is permitted. `sudo systemctl enable --now hadron-watchdog.timer`; `journalctl -u hadron-watchdog` shows each verdict.
+
+macOS — `~/Library/LaunchAgents/com.hadron.watchdog.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.hadron.watchdog</string>
+  <key>ProgramArguments</key><array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/path/to/hadron/bin/hadron.js</string>
+    <string>watchdog</string>
+    <string>--restart</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/you/work</string>
+  <key>StartInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>/tmp/hadron-watchdog.log</string>
+  <key>StandardErrorPath</key><string>/tmp/hadron-watchdog.log</string>
+</dict></plist>
+```
+
+`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hadron.watchdog.plist`. Manual recovery without the timer: `hadron watchdog --restart` (or `launchctl kickstart -k gui/$(id -u)/com.hadron.server`).
+
 **Resume constraints worth knowing**
 
 - Agents that were spawned by Hadron carry an authoritative session id (`--session-id` is injected at launch) and resume cleanly.
