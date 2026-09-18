@@ -7,14 +7,44 @@ import { readFileSync } from "fs";
 import { join } from "path";
 
 export function gitInfo(root, { timeoutMs = 5000 } = {}) {
-  const run = (args) => execFileSync("git", ["-C", root, ...args], {
+  const runRaw = (args) => execFileSync("git", ["-C", root, ...args], {
     encoding: "utf-8", timeout: timeoutMs, stdio: ["ignore", "pipe", "ignore"],
-  }).trim();
+  });
+  const run = (args) => runRaw(args).trim();
   let commit = null;
   try { commit = run(["rev-parse", "HEAD"]) || null; } catch { return { commit: null, dirty: null }; }
-  let dirty = null;
-  try { dirty = run(["status", "--porcelain"]).length > 0; } catch { dirty = null; }
-  return { commit, dirty };
+  let dirty = null, dirtyOther = null;
+  try {
+    // -z: NUL-separated, unquoted, REPO-ROOT-relative paths; a rename/copy
+    // entry is followed by the source path as its own field. When Hadron is a
+    // subdirectory of a larger repo (vendored / monorepo) the runtime paths
+    // sit under that prefix — strip it, or every edit looks like "other".
+    const prefix = run(["rev-parse", "--show-prefix"]);
+    const fields = runRaw(["status", "--porcelain", "-z"]).split("\0");
+    dirty = false; dirtyOther = false;
+    for (let i = 0; i < fields.length; i++) {
+      const entry = fields[i];
+      if (!entry) continue;
+      const xy = entry.slice(0, 2);
+      const path = entry.slice(3);
+      // A rename/copy lists the source next; a runtime file renamed AWAY is
+      // as much "not any commit" as one edited in place, so judge both ends.
+      const paths = [path];
+      if (xy[0] === "R" || xy[0] === "C") paths.push(fields[++i] || "");
+      const hit = paths.some((p) => p.startsWith(prefix) && affectsRuntime(p.slice(prefix.length)));
+      if (xy !== "??" && hit) dirty = true; else dirtyOther = true;
+    }
+  } catch { dirty = null; dirtyOther = null; }
+  return { commit, dirty, dirtyOther };
+}
+
+// `dirty` means "what runs is not any commit": a tracked file under the paths
+// the server actually executes/serves is modified. Docs, tests, design notes
+// and untracked files are reported separately (`dirtyOther`) as a note — a
+// README edit must not fail `hadron version` or turn `hadron doctor` yellow.
+export const RUNTIME_PATHS = ["server/", "bin/", "client/", "package.json", "package-lock.json"];
+export function affectsRuntime(path) {
+  return RUNTIME_PATHS.some((r) => (r.endsWith("/") ? path.startsWith(r) : path === r));
 }
 
 export function packageVersion(root) {
@@ -35,6 +65,7 @@ export function collectProvenance(root, env = process.env) {
     version: packageVersion(root),
     commit: env.HADRON_TEST_COMMIT || git.commit, // test hook: fake a stale server
     dirty: git.dirty,
+    dirtyOther: git.dirtyOther,
     repoRoot: root,
     startedAt: new Date().toISOString(),
     pid: process.pid,

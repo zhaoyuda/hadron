@@ -193,13 +193,43 @@ function printSkillsStatus() {
 // Presence-only flags must be declared here or they swallow the next positional
 // (`hadron message --raw "Beta Two" hi` would resolve "hi" as the target).
 const BOOLEAN_FLAGS = new Set(["json", "archived", "raw", "no-enter", "start", "auto", "force", "restart"]);
-function parseFlags(args) {
+// Every --flag a command accepts. Anything else is rejected up front with
+// `unknown option: --x` (exit 1) — a typo like `watchdog --restrat` used to be
+// silently ignored and exit 0, which from a timer unit looks like success.
+const COMMAND_FLAGS = {
+  ls: ["json", "archived"],
+  whoami: ["json"],
+  spawn: ["group", "task", "cwd", "launch", "start", "related", "artifact"],
+  skills: [],
+  send: [],
+  message: ["no-enter", "raw", "force"],
+  pin: [], unpin: [], close: [], restore: [],
+  adopt: ["session-id", "force"],
+  artifacts: ["auto"],
+  kernels: ["json", "marimo", "jupyter"],
+  notes: [],
+  annotations: ["json"],
+  watchdog: ["restart", "json", "stale-after", "boot-grace"],
+  doctor: ["json"],
+  version: ["json"], "--version": ["json"], "-v": ["json"],
+};
+// Option grammar: `--flag`, `--flag value`; `--help` anywhere in option
+// position and `-h` as the FIRST word ask for usage (flags.help) — a `-h`
+// after a positional is payload (`hadron message bob -h`), and so is a flag
+// value (`--task -h`). `--` ends option parsing: everything after it is
+// positional, so a note or message may begin with `--`.
+function parseFlags(args, allowed = null) {
   const flags = {};
   const positional = [];
+  let optionsDone = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
+    if (optionsDone) { positional.push(a); continue; }
+    if (a === "--") { optionsDone = true; continue; }
+    if (a === "--help" || (a === "-h" && i === 0)) { flags.help = true; continue; }
     if (a.startsWith("--")) {
       const key = a.slice(2);
+      if (allowed && !allowed.includes(key)) die(`unknown option: --${key} (hadron ${process.argv[2] || ""} --help for usage)`);
       const next = args[i + 1];
       if (BOOLEAN_FLAGS.has(key) || next === undefined || next.startsWith("--")) { flags[key] = true; }
       else { flags[key] = next; i++; }
@@ -285,9 +315,13 @@ async function probeWatchdog(staleAfterS, bootGraceS = BOOT_GRACE_S) {
   return out;
 }
 
+const HELP_WORDS = new Set([undefined, "help", "--help", "-h"]);
+
 async function main() {
-  const [cmd, ...rest] = process.argv.slice(2);
-  const { flags, positional } = parseFlags(rest);
+  let [cmd, ...rest] = process.argv.slice(2);
+  const { flags, positional } = parseFlags(rest, COMMAND_FLAGS[cmd] || null);
+  // `hadron <cmd> --help` / `hadron <cmd> -h` prints usage instead of running the command.
+  if (flags.help && !HELP_WORDS.has(cmd)) cmd = "help";
 
   switch (cmd) {
     case "ls": {
@@ -575,7 +609,7 @@ async function main() {
       // "If this machine reboots now, what comes back?" Read-only. The CLI does
       // the local checks itself (they must run even when the server is down);
       // per-agent findings come from the authenticated GET /api/doctor.
-      const icon = { green: "✓", yellow: "⚠", red: "✗", na: "·" };
+      const icon = { green: "✓", yellow: "⚠", red: "✗", info: "ℹ", na: "·" };
       const local = []; // { level, message }
       const cli = { version: packageVersion(REPO), repoRoot: REPO, ...gitInfo(REPO) };
 
@@ -602,8 +636,9 @@ async function main() {
           if (health.commit !== cli.commit) local.push({ level: "red", message: `server is running ${short(health.commit)} (started ${ago(health.startedAt)}), working tree is ${short(cli.commit)} — restart it` });
           else local.push({ level: "green", message: `server matches the working tree (${short(cli.commit)})` });
         } else local.push({ level: "yellow", message: "no git metadata to compare server vs working tree" });
-        if (health.dirty) local.push({ level: "yellow", message: "server was started from a dirty tree — what runs is not any commit" });
-        if (cli.dirty) local.push({ level: "yellow", message: "working tree has uncommitted changes" });
+        if (health.dirty) local.push({ level: "yellow", message: "server was started from a dirty tree (server/, bin/, client/ or package.json modified) — what runs is not any commit" });
+        if (cli.dirty) local.push({ level: "yellow", message: "working tree has uncommitted changes under server/, bin/, client/ or package.json" });
+        if (health.dirtyOther || cli.dirtyOther) local.push({ level: "info", message: "uncommitted changes outside the runtime paths (docs, tests, untracked files) — do not affect what runs" });
         // 4. managedBy: hand-started will not come back
         if (health.managedBy === "systemd" || health.managedBy === "launchd") local.push({ level: "green", message: `server is managed by ${health.managedBy} (boot-restarts)` });
         else local.push({ level: "red", message: `server is ${health.managedBy || "hand-started"} — it will NOT restart after a reboot (run it under ${process.platform === "darwin" ? "launchd" : "systemd"})` });
@@ -702,17 +737,21 @@ async function main() {
       } else if (srv.version !== cli.version) {
         problems.push(`no git metadata to compare commits; server version ${srv.version || "?"} (started ${ago(srv.startedAt)}) ≠ working tree ${cli.version || "?"} — restart it`);
       } else problems.push(`no git metadata on ${!cli.commit && !srv.commit ? "either side" : !cli.commit ? "the CLI side" : "the server side"} — only package versions compared (both ${cli.version || "?"})`);
-      if (srv && srv.dirty) problems.push(`server was started from a dirty tree (${short(srv.commit)}+local edits) — what runs is not any commit`);
-      if (cli.dirty) problems.push("working tree has uncommitted changes");
-      // "versions match, no commits" is informational only — it must not fail the gate.
+      if (srv && srv.dirty) problems.push(`server was started from a dirty tree (${short(srv.commit)}+local edits under server/, bin/, client/ or package.json) — what runs is not any commit`);
+      if (cli.dirty) problems.push("working tree has uncommitted changes under server/, bin/, client/ or package.json");
+      // Informational only — must not fail the gate: "versions match, no commits",
+      // and edits outside the runtime paths (docs, tests, untracked files).
+      const notes = [];
+      if ((srv && srv.dirtyOther) || cli.dirtyOther) notes.push("uncommitted changes outside the runtime paths (docs, tests, untracked files) — do not affect what runs");
       const blocking = problems.filter((p) => !p.startsWith("no git metadata on "));
-      if (flags.json) { console.log(JSON.stringify({ cli, server: srv, status, problems }, null, 2)); if (blocking.length) process.exit(1); break; }
+      if (flags.json) { console.log(JSON.stringify({ cli, server: srv, status, problems, notes }, null, 2)); if (blocking.length) process.exit(1); break; }
       const state = (g) => g.dirty === null ? "" : g.dirty ? " (dirty)" : " (clean)";
       console.log(`hadron ${cli.version || "?"}`);
       console.log(`cli:    ${short(cli.commit)}${state(cli)}  ${cli.repoRoot}`);
       if (status !== "ok") console.log(`server: ${status} on :${PORT} — ${detail}`);
       else console.log(`server: ${short(srv.commit)}${state(srv)}  started ${ago(srv.startedAt)}, pid ${srv.pid}, ${srv.managedBy || "hand-started"}${srv.repoRoot && srv.repoRoot !== cli.repoRoot ? `, from ${srv.repoRoot}` : ""}`);
       for (const p of problems) console.error(`${blocking.includes(p) ? "⚠" : "ℹ"} ${p}`);
+      for (const n of notes) console.error(`ℹ ${n}`);
       if (blocking.length) process.exit(1);
       break;
     }
@@ -770,8 +809,10 @@ Commands:
   hadron send <name|id> "keys"             low-level: type raw keys into a pane (single short line)
 
 Targets accept an agent id or its exact name (case-insensitive); ambiguous
-names list the candidates and exit. Permanent deletion is deliberately not a
-CLI verb — use the dashboard (Agents → Delete Agent).
+names list the candidates and exit. Unrecognised --flags are an error (exit 1);
+\`hadron <command> --help\` prints this text; \`--\` ends option parsing (a message or
+note may start with --). Permanent deletion is deliberately not a CLI verb — use
+the dashboard (Agents → Delete Agent).
 
 Env: HADRON_PORT / HADRON_TOKEN override; otherwise both are read from the
 nearest .hadron/ (runtime.json + token) walking up from cwd; port defaults to 3000.`);

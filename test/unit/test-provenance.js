@@ -9,7 +9,7 @@
  *
  * Run: node test/unit/test-provenance.js
  */
-import { spawn, execFileSync } from "child_process";
+import { spawn, spawnSync, execFileSync } from "child_process";
 import { createServer as createNetServer } from "net";
 import { createServer as createHttpServer } from "http";
 import { mkdtempSync, readFileSync, writeFileSync, rmSync, symlinkSync, mkdirSync, appendFileSync } from "fs";
@@ -105,6 +105,81 @@ async function main() {
     ok(/^hadron \d/.test(txt) && txt.includes(`cli:    ${COPY_HEAD.slice(0, 7)} (clean)`) && txt.includes(`server: ${COPY_HEAD.slice(0, 7)} (clean)`) && txt.includes("hand-started"), "human output names both commits and hand-started");
   }
   stop();
+
+  console.log("\n[edits outside the runtime paths are a note, not dirty]");
+  // A README edit + an untracked scratch file: nothing that runs changed, so
+  // health.dirty stays false, `hadron version` passes, and both report the
+  // edits as an informational note (dirtyOther).
+  // The CLI in COPY (its tree is the one being edited; REPO's own tree is irrelevant here).
+  const hadronCopy = (args) => {
+    // spawnSync: stderr is wanted on exit 0 too (the ℹ note goes there).
+    const r = spawnSync("node", [join(COPY, "bin", "hadron.js"), ...args], { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, HADRON_PORT: String(PORT), TMUX: "" } });
+    return { status: r.status, out: r.stdout || "", err: r.stderr || "" };
+  };
+  appendFileSync(join(COPY, "README.md"), "\ndocs edit\n");
+  writeFileSync(join(COPY, "scratch-untracked.txt"), "untracked\n");
+  writeFileSync(join(COPY, "test", "unit", "scratch-untracked.js"), "// untracked under a runtime-adjacent dir? no: test/ is not runtime\n");
+  await boot(COPY);
+  {
+    const h = await health();
+    ok(h.dirty === false, "dirty=false: README.md + untracked files do not affect what runs");
+    ok(h.dirtyOther === true, "dirtyOther=true: the edits are reported separately");
+    const r = hadronCopy(["version", "--json"]);
+    const j = JSON.parse(r.out);
+    ok(r.status === 0 && j.problems.length === 0, `version --json: exit 0, no problems (got ${r.status}, ${JSON.stringify(j.problems)})`);
+    ok(j.notes.some((n) => /outside the runtime paths/.test(n)) && j.cli.dirtyOther === true && j.server.dirtyOther === true, "…and a note names the non-runtime edits on both sides");
+    const t = hadronCopy(["version"]);
+    ok(t.status === 0 && /^ℹ uncommitted changes outside the runtime paths/m.test(t.err) && !/⚠/.test(t.err), `human output: ℹ note only, no ⚠ (status ${t.status}; stderr: ${JSON.stringify(t.err)})`);
+  }
+  stop();
+  git("checkout", "--", "README.md");
+  rmSync(join(COPY, "scratch-untracked.txt"));
+  rmSync(join(COPY, "test", "unit", "scratch-untracked.js"));
+  ok(git("status", "--porcelain") === "", "(tree reverted to clean)");
+  {
+    // An untracked file UNDER a runtime path is still only a note: nothing
+    // imports it unless a tracked file changed too (which would be `dirty`).
+    writeFileSync(join(COPY, "server", "scratch-untracked.js"), "// not imported\n");
+    await boot(COPY);
+    const h = await health();
+    ok(h.dirty === false && h.dirtyOther === true, "untracked file under server/ → note, not dirty");
+    stop();
+    rmSync(join(COPY, "server", "scratch-untracked.js"));
+  }
+  {
+    // A tracked runtime file edited → dirty (blocking), exactly as before.
+    appendFileSync(join(COPY, "client", "app.js"), "\n// local edit\n");
+    await boot(COPY);
+    const h = await health();
+    ok(h.dirty === true && h.dirtyOther === false, "tracked edit under client/ → dirty, no separate note");
+    const r = hadronCopy(["version"]);
+    ok(r.status === 1 && /uncommitted changes under server\/, bin\/, client\/ or package.json/.test(r.err), "…version exits 1 and says which paths count");
+    stop();
+    git("checkout", "--", "client/app.js");
+  }
+  {
+    // Hadron vendored as a SUBDIRECTORY of a larger repo: git reports paths
+    // relative to the repo root (tools/hadron/server/index.js), which must
+    // still count as a runtime edit — not silently become "other".
+    const { gitInfo } = await import(join(REPO, "server", "provenance.js"));
+    const mono = mkdtempSync(join(tmpdir(), "hadron-mono-"));
+    const sub = join(mono, "tools", "hadron");
+    mkdirSync(join(sub, "server"), { recursive: true });
+    writeFileSync(join(sub, "server", "index.js"), "// hadron\n");
+    writeFileSync(join(mono, "README.md"), "# mono\n");
+    const g = (...a) => execFileSync("git", ["-C", mono, ...a], { stdio: ["ignore", "pipe", "ignore"] });
+    g("init", "-q"); g("add", "."); g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init");
+    ok(gitInfo(sub).dirty === false && gitInfo(sub).dirtyOther === false, "subdirectory install: clean → not dirty");
+    appendFileSync(join(sub, "server", "index.js"), "// edit\n");
+    const gi = gitInfo(sub);
+    ok(gi.dirty === true, `subdirectory install: tracked edit to <sub>/server/index.js → dirty (got ${JSON.stringify(gi)})`);
+    g("checkout", "--", "."); appendFileSync(join(mono, "README.md"), "x\n");
+    const gi2 = gitInfo(sub);
+    ok(gi2.dirty === false && gi2.dirtyOther === true, "subdirectory install: edit elsewhere in the monorepo → note only");
+    g("checkout", "--", "."); g("mv", "tools/hadron/server/index.js", "README.moved");
+    ok(gitInfo(sub).dirty === true, "a runtime file renamed AWAY (staged git mv server/x → docs) is dirty, not a note");
+    rmSync(mono, { recursive: true, force: true });
+  }
 
   console.log("\n[dirty tree + managedBy + stale-server mismatch]");
   appendFileSync(join(COPY, "server", "index.js"), "\n// local edit\n");

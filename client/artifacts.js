@@ -83,12 +83,13 @@ async function showArtifactInContainer(container, session, tabId) {
       cached.el.style.display = "block";
       return;
     }
-    // File-based artifact: check if file changed
-    if (art.type === "file" && cached.mtime) {
+    // File-based artifact: check if file changed (or appeared — a pane rendered
+    // while the file was still missing has mtime null and `missing` set).
+    if (art.type === "file" && (cached.mtime || cached.missing)) {
       try {
         const resp = await fetch(`/api/file?path=${encodeURIComponent(art.value)}`, { method: "HEAD" });
         const mtime = resp.headers.get("X-File-Mtime");
-        if (mtime === cached.mtime) {
+        if (mtime === (cached.mtime || cached.missingMtime || null)) {
           if (cached.el.parentNode !== container) container.appendChild(cached.el);
           cached.el.style.display = "block";
           return;
@@ -115,11 +116,20 @@ async function showArtifactInContainer(container, session, tabId) {
     if (oldEntry?.el?.parentNode) oldEntry.el.parentNode.removeChild(oldEntry.el);
     artifactCache.delete(oldest);
   }
-  artifactCache.set(key, { el: artEl, mtime: null, hasIframe: false, htmlFile: false });
+  artifactCache.set(key, { el: artEl, mtime: null, hasIframe: false, htmlFile: false, missing: false, missingMtime: null });
 
-  renderArtifactView(artEl, art, (mtime, hasIframe, htmlFile = false) => {
+  renderArtifactView(artEl, art, (mtime, hasIframe, htmlFile = false, missingMtime = null) => {
     const entry = artifactCache.get(key);
-    if (entry) { entry.mtime = mtime; entry.hasIframe = hasIframe; entry.htmlFile = htmlFile; }
+    if (!entry) return;
+    entry.mtime = mtime; entry.hasIframe = hasIframe; entry.htmlFile = htmlFile;
+    // A file pane that rendered with no mtime rendered an error/404 — the file
+    // was not there yet (an agent adds the artifact before writing it). The
+    // poller and the tab-switch check treat "now it exists" as a change.
+    // `missingMtime` is what HEAD reported at the failed render (a directory
+    // or unreadable file HEADs fine but can't be read): only a DIFFERENT
+    // mtime counts as "appeared" — never re-render into the same failure.
+    entry.missing = !hasIframe && mtime == null;
+    entry.missingMtime = missingMtime;
   });
 }
 
@@ -198,7 +208,7 @@ function reloadCurrentArtifact() {
   if (cached?.htmlFile) {
     const art = artFromTabId(session, activeTab);
     if (art && cached.el) {
-      reloadHTMLPaneFromDisk(cached.el, art.value, (m) => { cached.mtime = m; });
+      reloadHTMLPaneFromDisk(cached.el, art.value, (m) => { cached.mtime = m; cached.missing = m == null; });
       return;
     }
   }
@@ -225,23 +235,25 @@ function startArtifactMtimePolling() {
   const session = sessions.find(s => s.id === activeSessionId);
   if (!session) return;
 
-  // Tab mode: the active file-based artifact (md/csv/notebooks silently
-  // auto-reload; HTML gets an update pill — see the tick below).
+  // Tab mode: the active file-based artifact (md/csv/static notebooks silently
+  // auto-reload; HTML and live marimo/jupyter iframes get an update pill — see
+  // the tick below). url artifacts have no file to watch.
   let tabTarget = null;
   if (isViewerTab(activeTab)) {
     const art = artFromTabId(session, activeTab);
     const key = `${session.id}:${activeTab}`;
-    if (art?.type === "file" && !artifactCache.get(key)?.hasIframe) tabTarget = { art, key };
+    if (art?.type === "file") tabTarget = { art, key };
   }
 
   // Split mode: HTML panes render outside the artifact cache, so watch them
   // directly. Their iframe was just created from the current file — HEAD now to
-  // record what's on screen as the baseline.
+  // record what's on screen as the baseline (404 → `missing`: the pane shows an
+  // error until the file appears, then reloads silently).
   htmlPaneWatches = Array.from(document.querySelectorAll(".split-pane[data-html-path]"))
-    .map((el) => ({ el, path: el.dataset.htmlPath, mtime: null }));
+    .map((el) => ({ el, path: el.dataset.htmlPath, mtime: null, missing: false }));
   for (const w of htmlPaneWatches) {
     fetch(`/api/file?path=${encodeURIComponent(w.path)}`, { method: "HEAD" })
-      .then((r) => { if (r.ok && w.mtime === null) w.mtime = r.headers.get("X-File-Mtime"); })
+      .then((r) => { if (w.mtime !== null) return; if (r.ok) w.mtime = r.headers.get("X-File-Mtime"); else w.missing = true; })
       .catch(() => {});
   }
 
@@ -253,14 +265,31 @@ function startArtifactMtimePolling() {
         const r = await fetch(`/api/file?path=${encodeURIComponent(tabTarget.art.value)}`, { method: "HEAD" });
         const mtime = r.headers.get("X-File-Mtime");
         const cached = artifactCache.get(tabTarget.key);
-        // cached.mtime null = initial render still in flight (it will paint the
-        // latest content anyway — nothing to compare against yet).
-        if (cached?.mtime && mtime && mtime !== cached.mtime) {
+        if (!cached) {
+          // evicted — fall through to the split-pane watches below
+        } else if (cached.hasIframe) {
+          // Live jupyter editor (proxy URL): the server process holds the
+          // notebook it loaded — an agent rewriting the file on disk is
+          // invisible to it until the page reloads. Same pill as HTML; the
+          // click re-points the iframe at the proxy with a cache-buster.
+          // (marimo iframes are not selected: marimo --watch reloads itself.)
+          const live = liveNotebookIframe(cached.el);
+          if (live && live.dataset.mtime && mtime && mtime !== live.dataset.mtime) {
+            showArtifactUpdatePill(cached.el, () => reloadLiveNotebook(live, tabTarget.art.value));
+          }
+        } else if (cached.missing) {
+          // Rendered as "could not load" / 404: the file has now appeared —
+          // nothing on screen to preserve, paint it. Same mtime as at the
+          // failed render = same failure (e.g. a directory): leave it.
+          if (mtime && mtime !== cached.missingMtime) reloadCurrentArtifact();
+        } else if (cached.mtime && mtime && mtime !== cached.mtime) {
+          // (cached.mtime null = initial render still in flight; it will paint
+          // the latest content anyway — nothing to compare against yet.)
           if (cached.htmlFile) {
             // Live iframe: a silent reload destroys its state (scroll, form
             // input, JS app state) — offer a reload instead of forcing one.
             showArtifactUpdatePill(cached.el, () =>
-              reloadHTMLPaneFromDisk(cached.el, tabTarget.art.value, (m) => { cached.mtime = m; }));
+              reloadHTMLPaneFromDisk(cached.el, tabTarget.art.value, (m) => { cached.mtime = m; cached.missing = m == null; }));
           } else {
             reloadCurrentArtifact();
           }
@@ -268,11 +297,14 @@ function startArtifactMtimePolling() {
       } catch {}
     }
     for (const w of htmlPaneWatches) {
-      if (!w.el.isConnected || w.mtime === null) continue;
+      if (!w.el.isConnected || (w.mtime === null && !w.missing)) continue;
       try {
         const r = await fetch(`/api/file?path=${encodeURIComponent(w.path)}`, { method: "HEAD" });
         const mtime = r.headers.get("X-File-Mtime");
-        if (mtime && mtime !== w.mtime) {
+        if (!mtime) continue;
+        if (w.missing) {
+          reloadHTMLPaneFromDisk(w.el, w.path, (m) => { w.mtime = m; w.missing = m == null; });
+        } else if (mtime !== w.mtime) {
           showArtifactUpdatePill(w.el, () =>
             reloadHTMLPaneFromDisk(w.el, w.path, (m) => { w.mtime = m; }));
         }
@@ -291,12 +323,42 @@ function stopArtifactMtimePolling() {
 // loads whatever is newest).
 function showArtifactUpdatePill(container, onReload) {
   if (!container || container.querySelector(".artifact-update-pill")) return;
+  // The pill is absolutely positioned — anchor it to this pane, not to whatever
+  // positioned ancestor happens to be above (notebook panes are plain divs).
+  if (getComputedStyle(container).position === "static") container.style.position = "relative";
   const pill = document.createElement("button");
   pill.type = "button";
   pill.className = "artifact-update-pill";
   pill.innerHTML = `File updated <span class="aup-action">↻ Reload</span>`;
   pill.addEventListener("click", () => { pill.remove(); onReload(); });
   container.appendChild(pill);
+}
+
+// Live jupyter iframe inside a pane, if the editor has come up. (marimo is
+// launched with --watch and picks up disk writes itself — verified against
+// marimo 0.23: the cell code updates in place and is marked stale — so it
+// gets no Hadron-side pill.)
+function liveNotebookIframe(el) {
+  return el ? el.querySelector("iframe.jupyter-live") : null;
+}
+
+// Stamp a live-notebook iframe with the file's mtime as of when the editor was
+// launched — the poller's change baseline (see startArtifactMtimePolling).
+function headMtime(filePath) {
+  return fetch(`/api/file?path=${encodeURIComponent(filePath)}`, { method: "HEAD" })
+    .then((r) => (r.ok ? r.headers.get("X-File-Mtime") : null))
+    .catch(() => null);
+}
+
+// Re-point a live-notebook iframe at the proxy with a fresh cache-buster so the
+// editor reloads the notebook from disk; the new mtime becomes the baseline.
+function reloadLiveNotebook(iframe, filePath) {
+  headMtime(filePath).then((mtime) => {
+    const base = iframe.dataset.baseSrc || iframe.getAttribute("src");
+    iframe.dataset.baseSrc = base;
+    iframe.dataset.mtime = mtime || "";
+    iframe.src = `${base}${base.includes("?") ? "&" : "?"}_=${encodeURIComponent(mtime || Date.now())}`;
+  });
 }
 
 // HEAD for the current mtime, then re-point the pane's iframe at it.
@@ -875,6 +937,9 @@ function renderArtifactView(container, artifact, onMeta) {
       })
       .catch(() => {
         container.innerHTML = `<div class="artifact-file-error">Could not load file: ${esc(artifact.value)}</div>`;
+        // `missing`: re-render when the file appears — i.e. when HEAD reports
+        // a different mtime than it does right now (null for a true 404).
+        if (onMeta) headMtime(artifact.value).then((m) => onMeta(null, false, false, m));
       });
   }
 }
@@ -1156,17 +1221,22 @@ function renderJupyterNotebook(container, text, filePath, onStatic, onLive) {
     header.appendChild(status);
   }
 
-  startJupyterServer(filePath).then(({ proxyBase }) => {
+  // Baseline mtime taken BEFORE the server reads the file: a write landing
+  // while jupyter starts must still show as an update, not get folded in.
+  const baseMtimeP = headMtime(filePath);
+  startJupyterServer(filePath).then(async ({ proxyBase }) => {
     if (!proxyBase) {
       if (status) status.remove();
       return;
     }
+    if (!container.isConnected) return; // pane closed while the server came up
     const src = `${proxyBase}/notebooks/${encodeURIComponent(fileName)}`;
+    const baseMtime = await baseMtimeP;
     // Even with a live server, surface error outputs from the on-disk notebook
     // above the iframe — catch them without scrolling (data-preview.js).
     let banner = "";
     try { banner = nbErrorBannerHTML(analyzeNotebookCells(JSON.parse(text).cells || [], filePath).errors); } catch {}
-    const iframe = `<iframe class="jupyter-live" src="${src}" style="width:100%;${banner ? "flex:1;" : "height:100%;"}border:none;background:#111" allow="clipboard-read; clipboard-write"></iframe>`;
+    const iframe = `<iframe class="jupyter-live" src="${src}" data-mtime="${esc(baseMtime || "")}" style="width:100%;${banner ? "flex:1;" : "height:100%;"}border:none;background:#111" allow="clipboard-read; clipboard-write"></iframe>`;
     container.innerHTML = banner ? `<div class="jupyter-live-wrap">${banner}${iframe}</div>` : iframe;
     if (onLive) onLive();
   }).catch(() => {

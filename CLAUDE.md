@@ -142,6 +142,10 @@ npm test
 #                            never demoted by a later scrape, survives a restart; a launchd-managed server
 #                            (XPC_SERVICE_NAME) is green like systemd; CLI exits 1 on any red row (incl.
 #                            hand-started server) and reports "server unreachable" first)
+#   + test-watchdog.js      (`hadron watchdog`: heartbeat file + exit-code contract 0/1/2/3; SIGSTOP'd server
+#                            → wedged, --restart SIGKILLs it; every kill guard has a not-killed case)
+#   + test-cli-flags.js     (unknown --flags exit 1 with `unknown option: --x`; `hadron <cmd> --help` prints
+#                            usage instead of running — no server needed)
 ```
 
 ### Reliability gate
@@ -177,7 +181,10 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #   + test/e2e/m6-copy.js        (Copy/Download buttons + tab context menu)
 #   + test/e2e/m7-editor.js      (text/vim editor toggle, save, paste-image flow)
 #   + test/e2e/m8-annotations.js (review loop: comment → send → resolve → reopen)
-#   + test/e2e/m9-artifact-reload.js (mtime poller baseline + HTML update pill, tab & split)
+#   + test/e2e/m9-artifact-reload.js (mtime poller baseline + HTML update pill, tab & split; a tab opened before the
+#                                    file exists paints it when it appears; live jupyter iframes get the pill +
+#                                    cache-busted proxy reload (marimo --watch reloads itself); a directory-as-file
+#                                    artifact is not re-rendered every poll — proxies route-stubbed, no kernels needed)
 #   + test/e2e/m10-clipboard.js  (OSC 52 from pane → browser clipboard; read-request ignored)
 #   + test/e2e/m11-terminal-paths.js (clickable terminal path → resolve vs pane cwd → open as current agent's artifact)
 #   + test/e2e/m12-artifact-folders.js (artifact folder collapse persists across the 3s deck refresh)

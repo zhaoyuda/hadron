@@ -337,7 +337,9 @@ macOS — `~/Library/LaunchAgents/com.hadron.watchdog.plist`:
 </dict></plist>
 ```
 
-`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hadron.watchdog.plist`. Manual recovery without the timer: `hadron watchdog --restart` (or `launchctl kickstart -k gui/$(id -u)/com.hadron.server`).
+`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hadron.watchdog.plist`. Manual recovery without the timer: `hadron watchdog --restart` run from inside the workspace (or `launchctl kickstart -k gui/$(id -u)/com.hadron.server`, using that workspace's server label).
+
+Several workspaces on one machine need one watchdog per workspace, exactly like the server units: the CLI judges the server whose `.hadron/` it finds walking up from its working directory, so each timer/agent gets its own `WorkingDirectory` — on Linux a `hadron-watchdog-<workspace>.service` + `.timer` pair per workspace, on macOS a `com.hadron.watchdog.<workspace>.plist` per workspace with its own `Label`, `WorkingDirectory` and log path (`/tmp/hadron-watchdog-<workspace>.log`). Note that launchd has no `SuccessExitStatus`: a `not running` (1), `wedged` (2) or `cannot judge` (3) verdict is logged by launchd as a failed run of the agent (`last exit code = N` in `launchctl print`, "Service exited with abnormal code: N" in the system log). That is log noise, not a fault — the verdict itself is in the agent's log file — and launchd runs the agent again on the next `StartInterval` regardless.
 
 **Resume constraints worth knowing**
 
