@@ -7,7 +7,8 @@
  * States: idle, working, done, blocked
  */
 
-import { tmux } from "./tmux.js";
+import { tmuxAsync } from "./tmux.js";
+import { warnOnce } from "./log.js";
 
 // Processes that indicate an agent (Claude) is running
 const AGENT_PROCESS_RE = /^(claude[-_]?code|claude|node|npx|bun|deno|\d+\.\d+\.\d+)(\.exe)?$/i;
@@ -577,19 +578,37 @@ export class StateDetector {
     // so "the session's active pane" is unambiguously the agent's pane.
     this.paneTarget = this.tmuxName;
 
-    this.pollTimer = setInterval(() => this._poll(), 1000);
+    // Polls are async (tmuxAsync) so a slow or wedged tmux never stalls the
+    // event loop; at most one poll per detector is in flight — a tick that
+    // arrives while the previous poll is still waiting on tmux is skipped, so a
+    // stuck pane costs itself, not a growing pile of spawns.
+    this.polling = false;
+    this.pollTimer = setInterval(() => { this._poll(); }, 1000);
 
     // Skip first 3 polls (3s — let Claude start up)
     this.skipCount = 3;
   }
 
-  _poll() {
-    if (this.disposed) return;
-
-    if (this.session._manualOverrideUntil && Date.now() < this.session._manualOverrideUntil) {
-      return;
+  // Returns a promise (tests drive it directly with `await det._poll()`); the
+  // timer ignores the result. Every await is followed by a disposed check so a
+  // detector disposed mid-poll never touches its session again.
+  async _poll() {
+    if (this.disposed || this.polling) return;
+    this.polling = true;
+    try {
+      if (this.session._manualOverrideUntil && Date.now() < this.session._manualOverrideUntil) return;
+      await this._pollOnce();
+    } catch (e) {
+      // Every tmux failure is handled inside _pollOnce; anything reaching here
+      // is a programming error that would otherwise silently retire detection
+      // for this agent (silent-failure rule: warn once per agent, keep polling).
+      warnOnce(`poll-error:${this.session.id}`, `[state] poll failed for agent ${this.session.id}: ${e && e.message}`);
+    } finally {
+      this.polling = false;
     }
+  }
 
+  async _pollOnce() {
     let cmd, panePath, altScreen = false;
     try {
       // Target the session name — tmux resolves its current pane inside this one
@@ -599,40 +618,44 @@ export class StateDetector {
       // The two fields that drive state detection come from ONE atomic read so
       // they always describe the same instant. Layout + parsing rules live in
       // parseCmdProbe (pure, unit-tested without tmux).
-      ({ altScreen, cmd } = parseCmdProbe(tmux(
+      ({ altScreen, cmd } = parseCmdProbe(await tmuxAsync(
         ["display-message", "-t", this.paneTarget, "-p", CMD_PROBE_FORMAT],
         { timeout: 2000 }
       )));
     } catch {
       return;
     }
+    if (this.disposed) return;
     // The path is a second, single-field read: it never shares a delimited
     // string with another unbounded field, so no "|" anywhere can shift a
     // parse. It only feeds session.cwd, so a transient failure here must not
     // abort state detection — fall back to "unknown" and keep polling.
     try {
-      panePath = stripLine(tmux(
+      panePath = stripLine(await tmuxAsync(
         ["display-message", "-t", this.paneTarget, "-p", "#{pane_current_path}"],
         { timeout: 2000 }
       )) || null;
     } catch {
       panePath = null;
     }
+    if (this.disposed) return;
 
     // Runtime-checkpoint piggyback (resume.js): the tracker just needs the
     // pane's foreground command each poll. Never let it break detection.
     if (this.onCmd) try { this.onCmd(cmd); } catch {}
 
-    if (panePath && panePath !== this.session.cwd) {
-      this.session.cwd = panePath;
-    }
-
     let rawLines;
     try {
-      const raw = tmux(["capture-pane", "-t", this.paneTarget, "-p"], { timeout: 2000 });
+      const raw = await tmuxAsync(["capture-pane", "-t", this.paneTarget, "-p"], { timeout: 2000 });
       rawLines = raw.split("\n");
     } catch {
       return;
+    }
+    if (this.disposed) return;
+    // All awaits are behind us: from here to the end of the poll is synchronous,
+    // so a detector disposed mid-poll never writes to its session (cwd included).
+    if (panePath && panePath !== this.session.cwd) {
+      this.session.cwd = panePath;
     }
 
     if (this.skipCount > 0) {

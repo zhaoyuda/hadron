@@ -43,7 +43,7 @@ const WS_NAME = WS.split("/").pop().replace(/[^a-zA-Z0-9_-]/g, "");
 // tmux call this file makes passes the same -S, so neither the operator's default
 // server (where prod agents live) nor an inherited $TMUX can be what we inspect.
 const SOCK = join(WS, "tmux.sock");
-const tmuxQ = (args) => execFileSync("tmux", ["-S", SOCK, ...args], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] });
+const tmuxQ = (args) => execFileSync("tmux", ["-S", SOCK, ...args], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000, killSignal: "SIGKILL" });
 let server, TOKEN;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -152,6 +152,58 @@ async function main() {
       catch { return ""; }
     }, "1", 4000);
     ok(utf8, "tmux reports client_utf8=1 for the web terminal's client (attach passes -u)");
+    ws.close();
+    ok(await waitFor(async () => (await health()).livePtys, 0), "close → pty reaped");
+  }
+
+  console.log("\n[a wedged tmux server does not stall the event loop]");
+  {
+    // The agent monitor polls tmux on a timer. Pre-fix those were synchronous
+    // spawns on the main thread, so a tmux server that stops answering (here:
+    // SIGSTOP on the PRIVATE socket's server — never the developer's) blocked
+    // every HTTP request for the length of each poll's timeout, back to back,
+    // and a client that never returned wedged the server for good (macOS,
+    // 2026-09-17). Now the polls are async and bounded: health must keep
+    // answering promptly the whole time, and the in-flight guard must stop
+    // spawns from piling up behind the stuck one.
+    const ws = await connectTerminal("pty-a");            // keeps a monitor polling
+    const tmuxPid = Number(tmuxQ(["display-message", "-p", "#{pid}"]).trim());
+    ok(Number.isInteger(tmuxPid) && tmuxPid > 0, `private tmux server pid resolved (${tmuxPid})`);
+    const before = await health();
+    // If the test is killed mid-window, resume the private server so cleanup
+    // (killTmux) doesn't hang against a stopped tmux.
+    const resume = () => { try { process.kill(tmuxPid, "SIGCONT"); } catch {} };
+    process.once("SIGINT", () => { resume(); process.exit(130); });
+    process.once("SIGTERM", () => { resume(); process.exit(143); });
+    process.kill(tmuxPid, "SIGSTOP");
+    let worst = 0, failures = 0, spawnsPeak = 0;
+    try {
+      const t0 = Date.now();
+      while (Date.now() - t0 < 4500) {
+        const s0 = Date.now();
+        try { await fetch(`${BASE}/api/health`, { signal: AbortSignal.timeout(3000) }); }
+        catch { failures++; }
+        worst = Math.max(worst, Date.now() - s0);
+        try {
+          // tmux retitles its client process to "tmux: client", so match on the
+          // command name, not an exact "tmux"
+          const kids = execFileSync("pgrep", ["-P", String(server.pid)], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }).trim().split("\n").filter(Boolean);
+          const names = kids.length ? execFileSync("ps", ["-o", "comm=", "-p", kids.join(",")], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }) : "";
+          spawnsPeak = Math.max(spawnsPeak, names.split("\n").filter((n) => /(^|\/)tmux/.test(n.trim())).length); // macOS ps prints a path
+        } catch {}
+        await sleep(250);
+      }
+    } finally {
+      process.kill(tmuxPid, "SIGCONT");
+    }
+    ok(failures === 0 && worst < 1000, `health kept answering while tmux was stopped for 4.5s (worst ${worst}ms, ${failures} failures)`);
+    // one poll in flight per monitor (≤ 1 tmux child per live session) plus the
+    // terminal's own attach client — never a growing pile
+    // Positive control: the attached terminal client is a guaranteed tmux child,
+    // so a peak of 0 means the process probe is blind, not that nothing spawned.
+    ok(spawnsPeak >= 1, `process probe sees the attach client (peak ${spawnsPeak}) — not a vacuous count`);
+    ok(spawnsPeak <= before.liveSessions + 1, `tmux spawns did not pile up behind the stuck one (peak ${spawnsPeak} children for ${before.liveSessions} sessions + 1 attach)`);
+    ok((await health()).ok === true, "server healthy after tmux resumed");
     ws.close();
     ok(await waitFor(async () => (await health()).livePtys, 0), "close → pty reaped");
   }

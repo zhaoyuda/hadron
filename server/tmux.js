@@ -1,4 +1,4 @@
-import { execFileSync } from "child_process";
+import { execFileSync, execFile } from "child_process";
 
 // The ONLY way to call tmux. Array args, no shell — eliminates command injection
 // regardless of whether a value was (mis)classified as "safe". stderr is suppressed
@@ -38,6 +38,23 @@ export function tmux(args, opts = {}) {
     timeout: TMUX_TIMEOUT_MS,
     killSignal: "SIGKILL",
     ...opts,
+  });
+}
+
+// Async twin for the paths that run on a timer (the state-detector poll): the
+// same argv guard, socket, timeout and SIGKILL, but the event loop keeps
+// serving while tmux runs. A wedged tmux then costs one agent's poll, not the
+// whole server. Rejects exactly where tmux() throws.
+export function tmuxAsync(args, opts = {}) {
+  return new Promise((resolve, reject) => {
+    // tmuxArgv throws on kill-server; inside the executor that becomes a
+    // rejection, so every failure of tmuxAsync is a rejection (never a sync throw).
+    execFile("tmux", tmuxArgv(args), {
+      encoding: "utf-8",
+      timeout: TMUX_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+      ...opts,
+    }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
   });
 }
 

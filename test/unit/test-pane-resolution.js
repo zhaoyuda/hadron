@@ -37,7 +37,7 @@ const SOCK = join(T, "tmux.sock");
 // Must be set BEFORE importing tmux.js (it reads the env at module load).
 process.env.HADRON_TMUX_SOCKET = SOCK;
 const { StateDetector, parseCmdProbe, stripLine, CMD_PROBE_FORMAT } = await import("../../server/state-detector.js");
-const { tmux, tmuxSafe, TMUX_TIMEOUT_MS } = await import("../../server/tmux.js");
+const { tmux, tmuxSafe, tmuxAsync, TMUX_TIMEOUT_MS } = await import("../../server/tmux.js");
 
 let passed = 0, failed = 0, skipped = 0;
 function ok(cond, msg) {
@@ -108,7 +108,7 @@ function makeDetector(name) {
   det.minStateDuration = 0;       // canTransition always true → deterministic
   return { det, session };
 }
-async function pump(det, n) { for (let i = 0; i < n; i++) { det._poll(); await sleep(20); } }
+async function pump(det, n) { for (let i = 0; i < n; i++) { await det._poll(); await sleep(20); } }
 
 if (!haveTmux) {
   skipped++;
@@ -187,6 +187,15 @@ if (!haveTmux) {
       t0 = Date.now();
       ok(tmuxSafe(["wait-for", "hadron-test-never-signalled"], { timeout: 400 }) === null && Date.now() - t0 < 3000,
         "tmuxSafe reports the hung call as null, like any failed tmux call");
+      // tmuxAsync (the monitor poll path) has the same contract: bounded,
+      // SIGKILL, and every failure — kill-server guard included — is a rejection.
+      t0 = Date.now(); err = null;
+      try { await tmuxAsync(["wait-for", "hadron-test-never-signalled"], { timeout: 400 }); } catch (e) { err = e; }
+      ok(err && err.signal === "SIGKILL" && Date.now() - t0 < 3000, `tmuxAsync rejects with SIGKILL at the timeout (${Date.now() - t0}ms, ${err && err.signal})`);
+      ok((await tmuxAsync(["display-message", "-p", "ok"])).trim() === "ok", "tmuxAsync resolves stdout on the private socket");
+      err = null;
+      try { await tmuxAsync(["kill-server"]); } catch (e) { err = e; }
+      ok(err && /kill-server/.test(err.message), "tmuxAsync(kill-server) rejects (never a sync throw)");
       // The DEFAULT applies when a caller passes no timeout — that is the case
       // every monitor poll and HTTP handler is in.
       // (guarded: on pre-fix code this call would never return, and a test that
