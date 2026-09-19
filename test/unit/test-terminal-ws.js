@@ -212,7 +212,10 @@ async function main() {
   {
     const ws = await connectTerminal("pty-a");
     ok((await health()).livePtys === 1, "connected terminal → livePtys 1");
-    fdOk(ptmxCount(server.pid) === baseline + 1, `one ptmx fd held while connected (${baseline}+1)`);
+    // Poll, don't sample: on macOS `lsof` can lag the spawn by a beat, and a
+    // one-shot read here flaked (fail/pass/fail on a stock checkout, node 24,
+    // Darwin 25) while every leak-catching assertion below passed every time.
+    fdOk(await waitFor(() => ptmxCount(server.pid), baseline + 1, 3000), `one ptmx fd held while connected (${baseline}+1)`);
     ws.close();
     ok(await waitFor(async () => (await health()).livePtys, 0), "close → pty reaped (livePtys back to 0)");
     fdOk(await waitFor(() => ptmxCount(server.pid), baseline), "master fd released back to baseline");
@@ -239,7 +242,7 @@ async function main() {
       await waitFor(async () => (await health()).livePtys, 0);
     }
     ok((await health()).livePtys === 0, "5 cycles → livePtys 0");
-    fdOk(ptmxCount(server.pid) === baseline, `5 cycles → ptmx fds at baseline (${baseline})`);
+    fdOk(await waitFor(() => ptmxCount(server.pid), baseline, 3000), `5 cycles → ptmx fds at baseline (${baseline})`);
   }
 
   console.log(`\n${failed === 0 ? "PASS" : "FAIL"}: ${passed} passed, ${failed} failed`);
