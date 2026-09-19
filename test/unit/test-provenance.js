@@ -12,7 +12,7 @@
 import { spawn, spawnSync, execFileSync } from "child_process";
 import { createServer as createNetServer } from "net";
 import { createServer as createHttpServer } from "http";
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, symlinkSync, mkdirSync, appendFileSync } from "fs";
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, symlinkSync, mkdirSync, appendFileSync, realpathSync } from "fs";
 import { tmpdir } from "os";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -87,7 +87,9 @@ async function main() {
     ok(h.commit === COPY_HEAD, `commit equals git rev-parse HEAD of the repo the server runs from (${COPY_HEAD.slice(0, 7)})`);
     ok(h.dirty === false, "dirty=false right after commit");
     ok(h.version === JSON.parse(readFileSync(join(COPY, "package.json"), "utf-8")).version, "version from package.json");
-    ok(h.repoRoot === COPY, "repoRoot is the tree the server was started from");
+    // realpath both sides: macOS os.tmpdir() is a symlink (/var → /private/var)
+    // and git rev-parse --show-toplevel reports the resolved path.
+    ok(realpathSync(h.repoRoot) === realpathSync(COPY), "repoRoot is the tree the server was started from");
     ok(h.pid === server.pid && h.node === process.version && h.platform === process.platform, "pid / node / platform describe the server process");
     ok(Number.isFinite(Date.parse(h.startedAt)) && Date.now() - Date.parse(h.startedAt) < 60_000, "startedAt is a fresh ISO timestamp");
     ok(h.managedBy === null, "managedBy=null when hand-started (no INVOCATION_ID / XPC_SERVICE_NAME)");

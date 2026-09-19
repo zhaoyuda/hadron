@@ -136,6 +136,24 @@ async function main() {
   const fdOk = (cond, msg) => probe.ok ? ok(cond, msg) : console.log(`  - skip (fd probe unavailable on ${platform()}: ${probe.why}): ${msg}`);
   console.log(probe.ok ? "  ✓ fd probe self-validated (+1/-1 for one pty in this process)" : `  - fd probe unavailable on ${platform()}: ${probe.why} — fd assertions will skip`);
   const baseline = probe.ok ? ptmxCount(server.pid) : -1;
+  // Seeing a pty in THIS process is not proof of seeing one in the SERVER
+  // process (a macOS field report: lsof -p <server> listed no pty at all while
+  // livePtys was 1, so every fd assertion compared 0 === 0). Validate the
+  // measurement where it is taken: the count must rise on the first connect.
+  if (probe.ok) {
+    const ws = await connectTerminal("pty-a");
+    await waitFor(async () => (await health()).livePtys, 1);
+    const seen = await waitFor(() => ptmxCount(server.pid), baseline + 1, 3000);
+    ws.close();
+    await waitFor(async () => (await health()).livePtys, 0);
+    await waitFor(() => ptmxCount(server.pid), baseline, 3000);
+    if (seen) console.log(`  ✓ fd probe sees the server's pty (${baseline} → ${baseline + 1} on connect)`);
+    else {
+      probe.ok = false;
+      probe.why = `server pid ${server.pid} showed ${ptmxCount(server.pid)} pty fds with a terminal connected (livePtys 1) — the probe is blind to this process`;
+      console.log(`  - fd probe unavailable on ${platform()}: ${probe.why} — fd assertions will skip`);
+    }
+  }
 
   console.log("\n[health endpoint]");
   {

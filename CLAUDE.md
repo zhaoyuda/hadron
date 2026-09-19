@@ -87,7 +87,11 @@ PORT=3001 node server/index.js ~/work &    # port 3001
 ## Testing
 
 ```bash
-# Full suite (no external services; spins up a throwaway server + tmux internally)
+# Full suite (no external services; spins up a throwaway server + tmux internally).
+# `npm test` = test/unit/run-all.js: runs EVERY suite below regardless of earlier
+# failures and prints a summary (the old `a && b && …` chain stopped at the first
+# failure and hid the rest); exit non-zero if any suite failed. New suites go in
+# its SUITES list and here.
 npm test
 #   = test-state-eval.js   (detectState snapshot fixtures)
 #   + test-state-machine.js (nextState reducer — temporal transitions)

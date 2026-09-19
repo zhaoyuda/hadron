@@ -1284,7 +1284,7 @@ app.post("/api/sessions/reorder", (req, res) => {
   res.json({ ok: true });
 });
 
-app.delete("/api/sessions/:id", (req, res) => {
+app.delete("/api/sessions/:id", async (req, res) => {
   const { id } = req.params;
   if (!sessions.has(id)) {
     return res.status(404).json({ error: "session not found" });
@@ -1305,7 +1305,10 @@ app.delete("/api/sessions/:id", (req, res) => {
     sessions.delete(id);
     stopMonitor(id);
     killTmuxSession(id);
-    archiveAgent(id);
+    // Persist before answering: `hadron close` followed by a restart must not
+    // resurrect the agent, and a reader of the JSON right after the 200 must
+    // see archived:true (test-agent-ops raced this).
+    await archiveAgent(id);
   }
   res.json({ ok: true });
 });
