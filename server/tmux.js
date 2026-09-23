@@ -15,9 +15,30 @@ export const tmuxSocket = SOCKET;
 // uses. Without it, a test server with HADRON_TMUX_SOCKET creates the agent
 // session on the private socket but the pty attaches on the DEFAULT one —
 // attaching to a stranger (or the developer's real tmux) instead.
+//
+// Targets are EXACT. A bare `-t name` is resolved by tmux as exact-then-prefix
+// match, so with agents "dummy" and "dummy2", every call aimed at a missing or
+// not-yet-created `hadron-ws-dummy` silently lands on `hadron-ws-dummy2`:
+// has-session says it exists (so it is never created), the state detector
+// reads the other agent's pane, and a message is PASTED INTO THE OTHER AGENT
+// (staging, 2026-09-23). tmux's `=` prefix forces an exact match, and the
+// trailing `:` says "this is the SESSION part" — for pane-taking commands
+// (capture-pane, send-keys, paste-buffer) a bare `=name` is read as a window/
+// pane name instead and finds nothing. `=name:` resolves to that session's
+// current window/active pane, exactly what a bare `name` resolved to. Hadron
+// never relies on prefix or pattern targets, so every bare session-name
+// target is rewritten here, in the one place all tmux argv passes through
+// (the WS terminal's attach included). Pane ids (%N), session ids ($N),
+// window/pane targets (name:0.0) and already-exact targets are left alone —
+// so a session name carrying "." or ":" would fall back to prefix matching;
+// Hadron never mints one (workspace basename sanitised, ids are slugs).
+export function exactTarget(t) {
+  return typeof t === "string" && t.length > 0 && !/^[=%$]/.test(t) && !/[:.]/.test(t) ? `=${t}:` : t;
+}
 export function tmuxArgv(args) {
   if (args.includes("kill-server")) throw new Error("tmux kill-server is never issued by Hadron");
-  return SOCKET ? ["-S", SOCKET, ...args] : args;
+  const out = args.map((a, i) => (i > 0 && args[i - 1] === "-t" ? exactTarget(a) : a));
+  return SOCKET ? ["-S", SOCKET, ...out] : out;
 }
 
 // Every tmux call is a SYNCHRONOUS spawn on the main thread (monitor polls,

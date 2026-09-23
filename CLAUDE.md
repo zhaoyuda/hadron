@@ -63,7 +63,7 @@ test/
 
 - **Workspace**: A directory (e.g., `~/work`) containing `.hadron/` config. All agent file paths can be relative to this root.
 - **Agent**: A named unit of work with its own tmux session, artifacts, notes, and state. Persisted as `.hadron/agents/<id>.json`.
-- **State detection**: The server polls each agent's tmux pane every 2s, pattern-matching Claude Code output to determine state (idle/working/blocked/done). See `server/state-detector.js`.
+- **State detection**: Every second the server reads the foreground command / alt-screen / cwd of ALL agent panes in one batched `tmux list-panes -a` (two spawns per tick total, not per agent), then `capture-pane`s each pane and pattern-matches Claude Code output to determine state (idle/working/blocked/done). Quiet panes (content unchanged for 3 captures, state not `working`) are captured only every 5th tick until the command, content, or input changes. See `server/state-detector.js`.
 - **Artifacts**: Files attached to an agent, rendered in the right panel. Paths can be absolute, `~/`-relative, or workspace-relative.
 - **Tmux namespacing**: Sessions are named `hadron-<workspace-basename>-<agent-id>` (the workspace *directory basename*, not the configurable display name) to prevent collisions between multiple Hadron instances.
 

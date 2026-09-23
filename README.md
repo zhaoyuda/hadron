@@ -146,7 +146,9 @@ Hadron automatically detects what each agent is doing by polling its tmux pane:
 | **blocked** | Permission dialog waiting for input, API errors (429, overloaded) |
 | **done** | Claude process exited after a working session |
 
-State detection resolves the actual tmux pane ID at startup (handles `base-index=1`), filters autocomplete suggestions, and ignores non-blocking surveys. Process-level signals are used as a fallback when terminal output formats change.
+State detection targets each agent's tmux *session name* (never a cached pane id, so a recycled `%N` can't alias another agent; `base-index` doesn't matter), filters autocomplete suggestions, and ignores non-blocking surveys. Process-level signals are used as a fallback when terminal output formats change.
+
+Cost: one `tmux list-panes -a` per second reads the foreground command, alt-screen flag and cwd of **every** agent at once (two processes per tick, not per agent), then each pane is `capture-pane`d. A quiet pane (content unchanged for 3 captures, state not `working`) is captured only every 5th tick, and snaps back to full rate the moment its command changes, its content changes, or input arrives (`hadron message`/`send`, terminal keystrokes, a manual state change). With mostly idle agents the steady state is about 2 + N/5 tmux processes per second instead of 3N — this matters on macOS, where every spawn is an endpoint-security policy evaluation.
 
 ### Live Artifacts
 

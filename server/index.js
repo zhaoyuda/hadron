@@ -11,7 +11,7 @@ import { connect as netConnect } from "net";
 import { networkInterfaces, hostname, tmpdir } from "os";
 import { URL } from "url";
 import { randomBytes } from "crypto";
-import { StateDetector, isShellCmd } from "./state-detector.js";
+import { StateDetector, isShellCmd, POLL_INTERVAL_MS } from "./state-detector.js";
 import { probeClaudeCaps, RuntimeTracker, performResume, BOOT, isClaudeCmd, decideResume, verifyAdoption } from "./resume.js";
 import { randomUUID } from "crypto";
 import { loadAgents, loadAgent, saveAgent, saveAgentLocked, archiveAgent, deleteAgent, initWorkspace, getWorkspaceDir, appendAgentField, removeAgentArtifact, isSelfWrite } from "./agent-store.js";
@@ -446,7 +446,7 @@ function tokenPresent(req) {
 // and 5s slack. Older than this = the durable write is not keeping up (or never
 // happened) — a reboot right now would lose the session.
 const RUNTIME_SAVE_INTERVAL_MS = 30000; // checkpoint save throttle (see saveRuntimeCheckpoint)
-const STATE_POLL_MS = 1000;
+const STATE_POLL_MS = POLL_INTERVAL_MS;
 const CHECKPOINT_PERSIST_THRESHOLD_MS = RUNTIME_SAVE_INTERVAL_MS + 2 * STATE_POLL_MS + 5000;
 // A generation value that can never equal a real boot id (those are `boot-*`).
 // Doctor evaluates decideResume against this to SIMULATE the next boot, so the
@@ -954,6 +954,7 @@ app.post("/api/sessions/:id/send-keys", (req, res) => {
   try {
     tmux(["send-keys", "-t", tmuxName, "-l", "--", keys]);
     if (enter) tmux(["send-keys", "-t", tmuxName, "Enter"]);
+    monitors.get(id)?.wake();   // input landed: capture at full rate again
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -996,6 +997,7 @@ app.post("/api/sessions/:id/message", async (req, res) => {
   }
   try {
     await deliverToPane(tmuxName, text, enter, force ? null : shellCheck);
+    monitors.get(id)?.wake();   // input landed: capture at full rate again
   } catch (e) {
     if (e.shell) return res.status(409).json({ error: `agent exited while the message was in flight — pane is now a ${e.shell} prompt; nothing pasted`, shell: e.shell });
     return res.status(500).json({ error: e.message });
@@ -1075,6 +1077,7 @@ function dispatchReviewTrigger(id) {
   const tmuxName = tmuxSessionName(id);
   tmux(["send-keys", "-t", tmuxName, "-l", "--", "/hadron-review"]);
   tmux(["send-keys", "-t", tmuxName, "Enter"]);
+  monitors.get(id)?.wake();
 }
 
 function sendAnnotationResult(res, out, okStatus = 200) {
@@ -2143,6 +2146,7 @@ wss.on("connection", (ws) => {
       const message = JSON.parse(msg.toString());
       if (message.type === "input") {
         pty.write(message.data);
+        monitors.get(sessionId)?.wake();   // keystrokes: end any capture backoff
       } else if (message.type === "resize") {
         const { cols, rows } = message;
         // Resize the pty only — tmux gets SIGWINCH and refits the window to this client

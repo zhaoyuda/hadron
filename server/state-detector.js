@@ -43,6 +43,117 @@ export function parseCmdProbe(out) {
   return { altScreen: line.slice(0, i) === "1", cmd: line.slice(i + 1) };
 }
 
+// ── Batched pane probe (ONE tmux spawn for every agent per tick) ─────────────
+// Per-pane display-message costs a process per agent per field per second; on
+// macOS each spawn is also an endpoint-security policy evaluation (2026-09-23
+// field report: 57 agents → ~185 tmux spawns/s → 1.45 cores of Cyberhaven).
+// `list-panes -a` lists EVERY pane on the tmux server in one process; each
+// line starts with the session name, and detectors look their own name up.
+// The two flag chars ("<window_active><pane_active>") select the session's
+// active pane — the same pane a `-t <session>` target resolves to — so a
+// user-split agent window still reads the pane the agent runs in. No %N pane
+// id is read or reused (see paneTarget in the constructor).
+//
+// Same rules as the single-pane probe: printable separators only (tmux >= 3.5
+// rewrites control characters), and never two unbounded fields in one line —
+// the command line ends in the cmd probe (alternate_on first, then the whole
+// remainder is the command), the path line ends in the path. Hadron's own
+// session names can't contain "|" (workspace basename is sanitised, ids are
+// slugs), but a FOREIGN session on the same tmux server can be named
+// `hadron-ws-x|11` and its line would then parse as a second active pane of
+// agent x. One session has exactly one active pane, so a name that shows up
+// twice is dropped as ambiguous (and warned about, below) rather than letting
+// either line win.
+export const BATCH_CMD_FORMAT = "#{session_name}|#{window_active}#{pane_active}|" + CMD_PROBE_FORMAT;
+export const BATCH_PATH_FORMAT = "#{session_name}|#{window_active}#{pane_active}|#{pane_current_path}";
+const ACTIVE_FLAGS = "11|";
+
+function eachActivePane(out, fn) {
+  for (const line of String(out ?? "").split("\n")) {
+    const i = line.indexOf("|");
+    if (i < 0) continue;
+    const rest = line.slice(i + 1);
+    if (!rest.startsWith(ACTIVE_FLAGS)) continue;   // not the session's active pane
+    fn(line.slice(0, i), rest.slice(ACTIVE_FLAGS.length));
+  }
+}
+
+// Pure: `list-panes` output (cmd lines, path lines) → Map session name →
+// { altScreen, cmd, path }. A session with a cmd line but no path line gets
+// path null (the path read is non-fatal, as it always was); a path line for a
+// session without a cmd line is ignored.
+export function parsePaneList(cmdOut, pathOut) {
+  const panes = new Map();
+  const seen = new Set();
+  eachActivePane(cmdOut, (name, rest) => {
+    if (seen.has(name)) { panes.set(name, { ambiguous: true }); return; }
+    seen.add(name);
+    panes.set(name, { ...parseCmdProbe(rest), path: null });
+  });
+  eachActivePane(pathOut, (name, rest) => {
+    const p = panes.get(name);
+    if (p && !p.ambiguous) p.path = rest || null;
+  });
+  return panes;
+}
+
+// One in-flight batch is shared by every detector that asks while it is
+// running: the shared ticker calls every detector's _poll() in one synchronous
+// loop, so a tick costs exactly two tmux spawns (cmd list + path list) for ALL
+// agents instead of two per agent. A cmd-list failure rejects (every caller
+// returns without a state update, like a failed display-message did); a
+// path-list failure yields null paths (non-fatal, feeds only session.cwd).
+// The two reads run one after the other, not in parallel: a wedged tmux then
+// holds ONE batch client (and no capture-pane ever starts behind it), so a
+// stuck server costs one process, not one per read or per agent
+// (test-terminal-ws pins that peak).
+let probeInflight = null;
+export function probePanes() {
+  if (probeInflight) return probeInflight;
+  probeInflight = (async () => {
+    try {
+      const cmdOut = await tmuxAsync(["list-panes", "-a", "-F", BATCH_CMD_FORMAT], { timeout: 2000 });
+      const pathOut = await tmuxAsync(["list-panes", "-a", "-F", BATCH_PATH_FORMAT], { timeout: 2000 }).catch(() => "");
+      return parsePaneList(cmdOut, pathOut);
+    } finally {
+      probeInflight = null;
+    }
+  })();
+  return probeInflight;
+}
+
+// ── Shared ticker ────────────────────────────────────────────────────────────
+// One interval for all detectors (rather than one per detector at a random
+// phase) is what makes the batch above coalesce: every _poll() of a tick runs
+// in the same synchronous loop and joins the same probePanes() promise.
+export const POLL_INTERVAL_MS = 1000;
+const liveDetectors = new Set();
+let tickTimer = null;
+function registerDetector(d) {
+  liveDetectors.add(d);
+  if (!tickTimer) tickTimer = setInterval(() => { for (const det of liveDetectors) det._poll(); }, POLL_INTERVAL_MS);
+}
+function unregisterDetector(d) {
+  liveDetectors.delete(d);
+  if (liveDetectors.size === 0 && tickTimer) { clearInterval(tickTimer); tickTimer = null; }
+}
+export const livePollerCount = () => liveDetectors.size;
+
+// ── capture-pane backoff for quiet panes ─────────────────────────────────────
+// capture-pane is the one per-agent spawn left. A pane whose content has not
+// changed for QUIET_AFTER_POLLS consecutive captures (an idle prompt, a done
+// agent, a bare shell, a blocked dialog waiting on the user) is captured only
+// every CAPTURE_BACKOFF_POLLS ticks; the cmd/altScreen probe still runs every
+// tick (free, it's in the batch) and any of these wakes the pane back to full
+// rate at once: the foreground command changed, content changed on a backoff
+// capture, input was delivered (hadron message, terminal keystrokes) or the
+// state was set by hand (wake()). A "working" pane never backs off — its
+// quiet stretch IS the settle window the reducer counts down (working → idle
+// needs settleThreshold consecutive quiet polls), and a working agent redraws
+// its spinner every second anyway, so there is nothing to save there.
+export const QUIET_AFTER_POLLS = 3;
+export const CAPTURE_BACKOFF_POLLS = 5;
+
 // Chrome / status bar lines to strip before analysis
 const CHROME_RE = /ctx \[|⏵⏵|Remote Control|Auto-update|^[─━]+$/i;
 
@@ -541,7 +652,7 @@ export function nextState(m, { cmd, snap, contentChanged, canTransition }) {
 }
 
 export class StateDetector {
-  constructor(tmuxSessionName, session) {
+  constructor(tmuxSessionName, session, { poll = true } = {}) {
     this.tmuxName = tmuxSessionName;
     this.session = session;
     this.disposed = false;
@@ -565,9 +676,9 @@ export class StateDetector {
     // Content change detection: hash of last pane content
     this.lastContentHash = null;
 
-    // Pane target is the stable *session name*. Every tmux call in _poll targets
-    // it directly and lets tmux resolve the session's current pane itself, inside
-    // that one call. We deliberately do NOT cache a %N pane id (nor resolve one
+    // Pane target is the stable *session name*. Every per-pane tmux call in
+    // _poll targets it directly (and the batched list is keyed by it) and lets
+    // tmux resolve the session's current pane itself, inside that one call. We deliberately do NOT cache a %N pane id (nor resolve one
     // and thread it across calls): tmux recycles %N ids after a pane dies, so a
     // stale id can silently start pointing at a *different* agent's pane after a
     // tmux-server restart / session recreation — scrambling state across boxes (a
@@ -583,10 +694,28 @@ export class StateDetector {
     // arrives while the previous poll is still waiting on tmux is skipped, so a
     // stuck pane costs itself, not a growing pile of spawns.
     this.polling = false;
-    this.pollTimer = setInterval(() => { this._poll(); }, 1000);
+
+    // capture-pane backoff state (see QUIET_AFTER_POLLS): consecutive captures
+    // with unchanged content, ticks since the last capture, last seen command.
+    this.quietPolls = 0;
+    this.sinceCapture = 0;
+    this.lastCmd = undefined;
 
     // Skip first 3 polls (3s — let Claude start up)
     this.skipCount = 3;
+
+    // Ticks come from the module-wide interval (one for all detectors, so the
+    // pane probe is batched). Tests pass { poll: false } and drive _poll().
+    this.polls = poll;
+    if (poll) registerDetector(this);
+  }
+
+  // Back to full-rate capture on the next tick. Called on input to the pane
+  // (message delivery, terminal keystrokes) and manual state changes — the
+  // moments a quiet pane is most likely to stop being quiet.
+  wake() {
+    this.quietPolls = 0;
+    this.sinceCapture = CAPTURE_BACKOFF_POLLS;
   }
 
   // Returns a promise (tests drive it directly with `await det._poll()`); the
@@ -609,40 +738,51 @@ export class StateDetector {
   }
 
   async _pollOnce() {
-    let cmd, panePath, altScreen = false;
+    // ONE batched read for every agent (probePanes): tmux resolves each
+    // session's active pane inside that one call. No pane id is read back or
+    // reused, so nothing can alias a foreign pane (see the paneTarget note in
+    // the constructor). altScreen + cmd come from one line, so they always
+    // describe the same instant; the path comes from its own line.
+    let panes;
     try {
-      // Target the session name — tmux resolves its current pane inside this one
-      // call. No pane id is read back or reused, so nothing can alias a foreign
-      // pane (see the paneTarget note in the constructor).
-      //
-      // The two fields that drive state detection come from ONE atomic read so
-      // they always describe the same instant. Layout + parsing rules live in
-      // parseCmdProbe (pure, unit-tested without tmux).
-      ({ altScreen, cmd } = parseCmdProbe(await tmuxAsync(
-        ["display-message", "-t", this.paneTarget, "-p", CMD_PROBE_FORMAT],
-        { timeout: 2000 }
-      )));
+      panes = await probePanes();
     } catch {
       return;
     }
     if (this.disposed) return;
-    // The path is a second, single-field read: it never shares a delimited
-    // string with another unbounded field, so no "|" anywhere can shift a
-    // parse. It only feeds session.cwd, so a transient failure here must not
-    // abort state detection — fall back to "unknown" and keep polling.
-    try {
-      panePath = stripLine(await tmuxAsync(
-        ["display-message", "-t", this.paneTarget, "-p", "#{pane_current_path}"],
-        { timeout: 2000 }
-      )) || null;
-    } catch {
-      panePath = null;
+    const pane = panes.get(this.paneTarget);
+    if (!pane || pane.ambiguous) {
+      // No detection and no resume checkpoint for this agent until it comes
+      // back: silent-failure rule — say so once per agent. (A session that is
+      // simply gone used to be a silently failed display-message.)
+      warnOnce(`pane-missing:${this.session.id}`, pane
+        ? `[state] agent ${this.session.id}: more than one tmux session parses as ${this.paneTarget} — state detection suspended for it (a foreign session name containing "|"?)`
+        : `[state] agent ${this.session.id}: tmux session ${this.paneTarget} is not on the server — state detection and resume tracking are idle until it exists`);
+      return;
     }
-    if (this.disposed) return;
+    const { altScreen, cmd, path: panePath } = pane;
 
     // Runtime-checkpoint piggyback (resume.js): the tracker just needs the
-    // pane's foreground command each poll. Never let it break detection.
+    // pane's foreground command each poll (every tick, backoff or not). Never
+    // let it break detection.
     if (this.onCmd) try { this.onCmd(cmd); } catch {}
+
+    // No await between the disposed check above and this write.
+    if (panePath && panePath !== this.session.cwd) {
+      this.session.cwd = panePath;
+    }
+
+    // A foreground change (claude launched / exited, an editor opened) is the
+    // cheapest "something happened" signal there is — it costs nothing extra
+    // and ends any backoff at once.
+    if (cmd !== this.lastCmd) {
+      this.lastCmd = cmd;
+      this.wake();
+    }
+    if (this.skipCount === 0 && this.session.state !== "working" && this.quietPolls >= QUIET_AFTER_POLLS) {
+      if (++this.sinceCapture < CAPTURE_BACKOFF_POLLS) return;   // quiet pane: skip this capture
+    }
+    this.sinceCapture = 0;
 
     let rawLines;
     try {
@@ -653,10 +793,7 @@ export class StateDetector {
     }
     if (this.disposed) return;
     // All awaits are behind us: from here to the end of the poll is synchronous,
-    // so a detector disposed mid-poll never writes to its session (cwd included).
-    if (panePath && panePath !== this.session.cwd) {
-      this.session.cwd = panePath;
-    }
+    // so a detector disposed mid-poll never writes to its session.
 
     if (this.skipCount > 0) {
       this.skipCount--;
@@ -672,6 +809,7 @@ export class StateDetector {
     for (let i = 0; i < contentSample.length; i++) contentHash = ((contentHash << 5) - contentHash + contentSample.charCodeAt(i)) | 0;
     const contentChanged = this.lastContentHash !== null && this.lastContentHash !== contentHash;
     this.lastContentHash = contentHash;
+    this.quietPolls = contentChanged ? 0 : this.quietPolls + 1;
 
     this._applySnap(cmd, detectState(rawLines, { altScreen }), contentChanged);
   }
@@ -732,15 +870,15 @@ export class StateDetector {
   }
 
   resetCooldown() {
-    // Reset transition timer so next poll can transition immediately
+    // Reset transition timer so next poll can transition immediately — and
+    // make sure that next poll actually captures (a manual state change is
+    // input to the pane in every sense that matters here).
     this.stateEnteredAt = 0;
+    this.wake();
   }
 
   dispose() {
     this.disposed = true;
-    if (this.pollTimer) {
-      clearInterval(this.pollTimer);
-      this.pollTimer = null;
-    }
+    if (this.polls) unregisterDetector(this);
   }
 }
