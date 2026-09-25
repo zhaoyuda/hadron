@@ -108,13 +108,27 @@ export function parsePaneList(cmdOut, pathOut) {
 // stuck server costs one process, not one per read or per agent
 // (test-terminal-ws pins that peak).
 let probeInflight = null;
+let lastBatchSize = 0;     // active panes seen by the previous successful batch
+let emptyStreak = 0;
 export function probePanes() {
   if (probeInflight) return probeInflight;
   probeInflight = (async () => {
     try {
       const cmdOut = await tmuxAsync(["list-panes", "-a", "-F", BATCH_CMD_FORMAT], { timeout: 2000 });
       const pathOut = await tmuxAsync(["list-panes", "-a", "-F", BATCH_PATH_FORMAT], { timeout: 2000 }).catch(() => "");
-      return parsePaneList(cmdOut, pathOut);
+      const panes = parsePaneList(cmdOut, pathOut);
+      // Seen once on prod (2026-09-25 12:23:59): a batch with no active pane at
+      // all while every session was alive — the next tick was normal. One such
+      // read is a glitch, not "all agents gone": treat it like a failed probe
+      // (tick skipped, no warnings) unless it repeats. A dead tmux server errors
+      // out above instead, and a genuinely empty server reads empty twice.
+      if (panes.size === 0 && lastBatchSize > 0 && emptyStreak++ === 0) {
+        console.warn(`[state] batch probe returned no active pane (${String(cmdOut).length} bytes, ${String(cmdOut).split("\n").length} lines) right after seeing ${lastBatchSize} — skipping this tick`);
+        throw new Error("empty batch");
+      }
+      emptyStreak = 0;
+      lastBatchSize = panes.size;
+      return panes;
     } finally {
       probeInflight = null;
     }

@@ -1839,11 +1839,12 @@ async function closeSession(sessionId) {
   stopAllArtifactServers(sessionId);
   for (const [key, shell] of shellInstances) {
     if (key.startsWith(sessionId + ":")) {
+      shellInstances.delete(key);   // before closing: no reconnect for a tab that is going away
+      if (shell.reconnectTimer) clearTimeout(shell.reconnectTimer);
       if (shell.ws) { shell.ws.onclose = null; shell.ws.close(); }
       shell.term.dispose();
       if (shell.resizeObserver) shell.resizeObserver.disconnect();
       if (shell.container && shell.container.parentNode) shell.container.remove();
-      shellInstances.delete(key);
     }
   }
   delete openTabsPerSession[sessionId];

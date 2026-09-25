@@ -2041,9 +2041,30 @@ server.on("upgrade", (request, socket, head) => {
   wss.handleUpgrade(request, socket, head, (ws) => {
     ws.sessionId = url.searchParams.get("session") || "planner";
     ws.shellName = url.searchParams.get("shell") || null;
+    ws.ptySize = ptySizeFromQuery(url.searchParams);
     wss.emit("connection", ws, request);
   });
 });
+
+// Initial pty size for a terminal WS, from the client's fitted xterm. Bounded
+// integers only; anything else is the historical 80x24 (the client's first
+// resize message then corrects it). Starting the pty at the real size matters
+// because the window follows the smallest attached client: 80x24 → real size
+// was two window resizes and two full re-renders of the program in the pane
+// (seconds for Claude Code on a long session) on every agent switch.
+const PTY_DEFAULT_SIZE = { cols: 80, rows: 24 };
+function ptySizeFromQuery(params) {
+  // Clamp rather than reject an out-of-range value: a 25%-zoomed browser on a
+  // wide monitor asks for >1000 cols, and falling back to 80x24 there would
+  // silently reinstate the double-resize on exactly the widest clients.
+  const n = (k, lo, hi) => {
+    const v = params.get(k);
+    if (v == null || !/^\d{1,5}$/.test(v)) return null;
+    return Math.min(Math.max(Number(v), lo), hi);
+  };
+  const cols = n("cols", 10, 1000), rows = n("rows", 5, 1000);
+  return cols && rows ? { cols, rows } : { ...PTY_DEFAULT_SIZE };
+}
 
 wss.on("connection", (ws) => {
   ws.isAlive = true;
@@ -2097,8 +2118,8 @@ wss.on("connection", (ws) => {
       tmuxArgv(["-u", "attach-session", "-t", effectiveTmuxName]),
       {
         name: "xterm-256color",
-        cols: 80,
-        rows: 24,
+        cols: (ws.ptySize || PTY_DEFAULT_SIZE).cols,
+        rows: (ws.ptySize || PTY_DEFAULT_SIZE).rows,
         cwd: resolveAgentCwd(sessions.get(sessionId)),
         env: {
           ...process.env,

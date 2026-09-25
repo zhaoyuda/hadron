@@ -115,7 +115,9 @@ npm test
 #                            connections' ptys, /api/health livePtys count, no fd accumulation.
 #                            The OS-level fd probe self-validates (+1/-1 for a pty opened in the
 #                            test's own process) and prints an honest `skip` where it can't see
-#                            ptys — never a vacuous 0 === 0)
+#                            ptys — never a vacuous 0 === 0; the pty starts at the client's fitted
+#                            size (?cols=&rows= on the WS URL, clamped to 10-1000/5-1000, non-numeric → 80x24; shell-tab + primary WS reconnect with 1→4 s backoff) so an agent
+#                            switch is one attach at the window's current size, not 80x24 → resize)
 #   + test-resume-live.js   (auto-resume at the REAL boundary: private tmux server (HADRON_TMUX_SOCKET) +
 #                            a process actually named claude/claude.exe; checkpoint on disk, shared-cwd
 #                            refusal warned once per agent, tombstone, reboot via HADRON_BOOT_ID (same id →
@@ -178,7 +180,8 @@ expects an already-running server on localhost:3000.
 ```bash
 npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #   = test/e2e/m1-onboarding.js  (fresh workspace boots → dashboard paints)
-#   + test/e2e/m2-lifecycle.js   (create agent → terminal connects + round-trips)
+#   + test/e2e/m2-lifecycle.js   (create agent → terminal connects + round-trips; a shell tab's WS reconnects
+#                                 after a drop and keystrokes flow again, closed tabs stay closed)
 #   + test/e2e/m3-agent-mgmt.js  (CLI spawn → group + artifacts + mutual related link)
 #   + test/e2e/m4-artifacts.js   (editor WS close → vim tmux reaped; shells preserved)
 #   + test/e2e/m5-data-preview.js (CSV stats strip + notebook error/changed cells)

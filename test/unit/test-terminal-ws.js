@@ -252,6 +252,33 @@ async function main() {
     try { ws.terminate(); } catch {}
   }
 
+  console.log("\n[pty starts at the size the client asks for]");
+  {
+    // window-size smallest (fitWindowToClients): the window follows its only
+    // client, so the window size right after attach IS the pty's initial size
+    // (minus the one status line: rows 41 → window height 40).
+    const size = () => { try { return tmuxQ(["display-message", "-p", "-t", `=hadron-${WS_NAME}-pty-sz:`, "#{window_width}x#{window_height}"]).trim(); } catch { return "?"; } };
+    const open = (q) => new Promise((res, rej) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws?session=pty-sz${q}&token=${encodeURIComponent(TOKEN)}`);
+      const t = setTimeout(() => { try { ws.close(); } catch {} rej(new Error("no output")); }, 10_000);
+      ws.on("message", () => { clearTimeout(t); res(ws); }); ws.on("error", rej);
+    });
+    // A window keeps its size after its client detaches, so consecutive cases
+    // must expect different sizes — a fallback case right after another fallback
+    // case would pass against the leftover window.
+    const cases = [["&cols=123&rows=41", "123x40", "cols=123&rows=41 → window is 123x40 (41 minus status line) with no resize message"],
+                   ["&cols=12abc&rows=41", "80x23", "malformed cols → 80x24 pty"],
+                   ["&cols=12000&rows=41", "1000x40", "over-range (5-digit) cols → clamped to 1000, not the 80x24 fallback"],
+                   ["", "80x23", "no size → 80x24 pty"],
+                   ["&cols=100&rows=3", "100x4", "under-range rows → clamped up to 5"]];
+    for (const [q, want, msg] of cases) {
+      let ws;
+      try { ws = await open(q); } catch (e) { ok(false, `${msg} — no output within 10 s`); continue; }
+      ok(await waitFor(size, want), `${msg} (got ${size()})`);
+      ws.close(); await waitFor(async () => (await health()).livePtys, 0);
+    }
+  }
+
   console.log("\n[repeated connect/close cycles do not accumulate fds]");
   {
     for (let i = 0; i < 5; i++) {
