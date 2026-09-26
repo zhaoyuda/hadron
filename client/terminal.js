@@ -232,6 +232,13 @@ function wsSizeParam(t) {
 }
 
 function connectWs(sessionId) {
+  if (!sessionId) {
+    // Empty workspace: nothing to attach to. (Used to open /ws?session=null,
+    // which the server minted as an agent literally named "null".)
+    const st = document.getElementById("status");
+    if (st) st.textContent = "no agents";
+    return;
+  }
   if (ws) {
     ws.onclose = null;
     ws.close();
@@ -273,7 +280,14 @@ function connectWs(sessionId) {
     }
   };
 
-  ws.onclose = () => {
+  ws.onclose = (ev) => {
+    if (ev && ev.code === WS_CLOSE_AGENT_GONE) {
+      // The server refused: this agent is archived or gone. Reconnecting would
+      // only be refused again (and, before the server refused, minted a blank
+      // agent in its place) — leave the terminal showing the server's message.
+      if (statusEl) statusEl.textContent = ev.reason === "archived" ? "agent archived" : "agent not found";
+      return;
+    }
     if (statusEl) statusEl.textContent = "disconnected - reconnecting...";
     scheduleReconnect(sessionId, openedAt);
   };
@@ -289,6 +303,7 @@ function connectWs(sessionId) {
 // at once (agent cwd gone, pty exits) must keep backing off, not spawn a pty per
 // second. Returning to the tab / coming back online drops the delay back to 1 s.
 const RECONNECT_MIN_MS = 1000, RECONNECT_MAX_MS = 4000, RECONNECT_STABLE_MS = 5000;
+const WS_CLOSE_AGENT_GONE = 4404;   // server/index.js: no such live agent (archived or unknown)
 let reconnectDelay = RECONNECT_MIN_MS;
 const wasStable = (openedAt) => openedAt && Date.now() - openedAt >= RECONNECT_STABLE_MS;
 function scheduleReconnect(sessionId, openedAt) {
@@ -473,9 +488,10 @@ function connectShellWs(inst, sid, shellId) {
     }
   };
 
-  shellWs.onclose = () => {
+  shellWs.onclose = (ev) => {
     if (inst.ws !== shellWs) return;          // superseded by a newer connection
     if (shellInstances.get(key) !== inst) return;  // tab was closed
+    if (ev && ev.code === WS_CLOSE_AGENT_GONE) return;  // agent archived/gone: server said stop (see connectWs)
     if (inst.reconnectTimer) return;
     const delay = wasStable(openedAt) ? RECONNECT_MIN_MS : inst.reconnectDelay;
     inst.reconnectDelay = Math.min(delay * 2, RECONNECT_MAX_MS);

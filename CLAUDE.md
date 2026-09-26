@@ -117,7 +117,10 @@ npm test
 #                            test's own process) and prints an honest `skip` where it can't see
 #                            ptys — never a vacuous 0 === 0; the pty starts at the client's fitted
 #                            size (?cols=&rows= on the WS URL, clamped to 10-1000/5-1000, non-numeric → 80x24; shell-tab + primary WS reconnect with 1→4 s backoff) so an agent
-#                            switch is one attach at the window's current size, not 80x24 → resize)
+#                            switch is one attach at the window's current size, not 80x24 → resize;
+#                            a WS for an unknown or archived id is refused with close code 4404 — never
+#                            mints an agent, no pty, no shell tmux session, archived record untouched;
+#                            restore → attaches again)
 #   + test-resume-live.js   (auto-resume at the REAL boundary: private tmux server (HADRON_TMUX_SOCKET) +
 #                            a process actually named claude/claude.exe; checkpoint on disk, shared-cwd
 #                            refusal warned once per agent, tombstone, reboot via HADRON_BOOT_ID (same id →
@@ -202,7 +205,7 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #   + test/e2e/m17-annotation-ux.js (annotation UX: FAB follows the selection; cross-block/formatted/duplicate/overlapping selections anchor + paint honestly; hover card edit, sent read-only; CLI excerpt for formatted anchors; marks survive auto-reload — runs at a <560px preview so the P0 surfaces stay authoritative)
 #   + test/e2e/m18-comment-rail.js (comment rail: cards permanently visible at ≥560px previews (width-adaptive 190-260px — split panes qualify), aligned with highlights; rail composer + in-rail edit/delete; mark↔card two-way linking; orphan + doc sections; annRailBusy edit guard; split-layout context derivation; <560px falls back to the P0 hover card)
 #   + test/e2e/m19-artifacts-ux.js (artifacts add/remove UX: Browse popover survives folder clicks (pointerdown close model) + keyboard nav + hidden-files toggle; atomic add with canonical de-dupe; URL validation + escaped labels; remove with 409 drift recovery; dir artifacts — live folder groups where new on-disk files appear automatically; ephemeral file: tabs; add concurrency; viewport clamp)
-#   + test/e2e/m20-agent-ops.js  (agent ops: context-menu Pin → "📌 Pinned" section first in BOTH deck modes, card moved not duplicated, survives 3s refresh + reload; `hadron pin <name>`; `hadron close <name>` → tmux dead + JSON archived + ls --archived + restore; in-pane `hadron message` sender attribution + --raw; ambiguous names exit 1, nothing delivered)
+#   + test/e2e/m20-agent-ops.js  (agent ops: context-menu Pin → "📌 Pinned" section first in BOTH deck modes, card moved not duplicated, survives 3s refresh + reload; `hadron pin <name>`; `hadron close <name>` → tmux dead + JSON archived + ls --archived + restore, with the dashboard left ON the closed agent: its WS is refused (4404), no reconnect loop, record not blanked/resurrected; in-pane `hadron message` sender attribution + --raw; ambiguous names exit 1, nothing delivered)
 ```
 
 `npm run test:e2e` runs `test/e2e/run-all.js`, which executes every `m*.js`

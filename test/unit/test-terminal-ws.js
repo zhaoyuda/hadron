@@ -18,7 +18,7 @@
  * Requires: tmux on PATH.
  */
 import { spawn as spawnProc, execFileSync } from "child_process";
-import { mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync } from "fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync } from "fs";
 import { tmpdir, platform } from "os";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -132,6 +132,12 @@ async function main() {
     await sleep(200);
   }
   TOKEN = readFileSync(join(WS, ".hadron", "token"), "utf-8").trim();
+  // A terminal WS no longer mints an agent for an unknown id (that resurrected
+  // archived agents) — every id this suite attaches to is created first.
+  for (const id of ["pty-a", "pty-b", "pty-sz"]) {
+    const r = await fetch(`${BASE}/api/sessions`, { method: "POST", headers: { "Content-Type": "application/json", "x-hadron-token": TOKEN }, body: JSON.stringify({ name: id, launchCommand: "shell" }) });
+    if (r.status !== 201) throw new Error(`create ${id} → ${r.status}`);
+  }
   const probe = await validateProbe();
   const fdOk = (cond, msg) => probe.ok ? ok(cond, msg) : console.log(`  - skip (fd probe unavailable on ${platform()}: ${probe.why}): ${msg}`);
   console.log(probe.ok ? "  ✓ fd probe self-validated (+1/-1 for one pty in this process)" : `  - fd probe unavailable on ${platform()}: ${probe.why} — fd assertions will skip`);
@@ -277,6 +283,54 @@ async function main() {
       ok(await waitFor(size, want), `${msg} (got ${size()})`);
       ws.close(); await waitFor(async () => (await health()).livePtys, 0);
     }
+  }
+
+  console.log("\n[an unknown or archived id is refused — never minted]");
+  {
+    // Before: wss "connection" created + saved an agent for ANY session id. A
+    // dashboard still open on an agent archived by `hadron close` reconnected
+    // after a restart and brought it back with a blanked record.
+    const agentFile = (id) => join(WS, ".hadron", "agents", `${id}.json`);
+    const live = async () => (await (await fetch(`${BASE}/api/sessions`)).json()).map((s) => s.id);
+    const attach = (q) => new Promise((res) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws?session=${q}&token=${encodeURIComponent(TOKEN)}`);
+      const out = [];
+      const t = setTimeout(() => { try { ws.close(); } catch {} res({ code: "timeout", out }); }, 8000);
+      ws.on("message", (m) => out.push(String(m)));
+      ws.on("close", (code, reason) => { clearTimeout(t); res({ code, reason: String(reason), out }); });
+      ws.on("error", () => {});
+    });
+
+    const r1 = await attach("never-made");
+    ok(r1.code === 4404 && r1.reason === "unknown", `unknown id → closed with 4404 "unknown" (got ${r1.code} ${JSON.stringify(r1.reason)})`);
+    ok(r1.out.some((m) => m.includes("not on this server")), "…after a visible message in the terminal");
+    ok(!existsSync(agentFile("never-made")), "…and no agent JSON was written for it");
+    ok(!(await live()).includes("never-made"), "…and it is not in GET /api/sessions");
+
+    const before = JSON.parse(readFileSync(agentFile("pty-b"), "utf-8"));
+    const del = await fetch(`${BASE}/api/sessions/pty-b`, { method: "DELETE", headers: { "x-hadron-token": TOKEN } });
+    ok(del.status === 200, "archive pty-b (soft DELETE) → 200");
+    const r2 = await attach("pty-b");
+    ok(r2.code === 4404 && r2.reason === "archived", `archived id → closed with 4404 "archived" (got ${r2.code} ${JSON.stringify(r2.reason)})`);
+    const r3 = await attach("pty-b&shell=sh1");
+    ok(r3.code === 4404 && r3.reason === "archived", "…the shell-tab path is refused the same way");
+    let shellTmux = false; try { tmuxQ(["has-session", "-t", `=hadron-${WS_NAME}-pty-b-sh1`]); shellTmux = true; } catch {}
+    ok(!shellTmux, "…and no shell tmux session was created for the archived agent");
+    const after = JSON.parse(readFileSync(agentFile("pty-b"), "utf-8"));
+    ok(after.archived === true && after.name === before.name && after.group === before.group,
+      `archived record intact after the refused connects (name ${JSON.stringify(after.name)}, archived:${after.archived})`);
+    ok(!(await live()).includes("pty-b"), "…archived agent still absent from GET /api/sessions");
+    ok(await waitFor(async () => (await health()).livePtys, 0), "…no pty was spawned for any refused connect");
+
+    const rs = await fetch(`${BASE}/api/sessions/pty-b/restore`, { method: "POST", headers: { "x-hadron-token": TOKEN } });
+    ok(rs.status === 200, "restore pty-b → 200");
+    // A refused connect ALSO emits one message (the yellow line) before 4404,
+    // so "got a message" alone would not prove the attach — require a live pty
+    // and an open socket.
+    const ws = await connectTerminal("pty-b");
+    ok(await waitFor(async () => (await health()).livePtys, 1) && ws.readyState === WebSocket.OPEN,
+      "…restored agent's terminal attaches again (livePtys 1, socket still open — not a 4404 refusal)");
+    ws.close(); await waitFor(async () => (await health()).livePtys, 0);
   }
 
   console.log("\n[repeated connect/close cycles do not accumulate fds]");

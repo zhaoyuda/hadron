@@ -163,6 +163,13 @@ try {
   await api("PATCH", `/api/sessions/${B}`, { name: "Beta Two" });
 
   // ── 3. close → archived on disk, tmux dead; ls --archived; restore → back ──
+  // The dashboard stays on B's terminal while B is closed: the primary WS must
+  // be refused (4404) and stay closed. Before, the reconnect minted a blank
+  // "beta-two" agent, resurrecting it with name/group/artifacts wiped.
+  await page.locator(`.dk[data-sid="${B}"]`).first().click();
+  r.ok(await until(async () => await page.evaluate((b) => activeSessionId === b && ws && ws.readyState === WebSocket.OPEN, B)),
+    "dashboard is on B with its terminal WS open");
+  const wsBefore = await page.evaluateHandle(() => ws);
   const closeOut = hadron(["close", "Beta Two"]);
   r.ok(/archived Beta Two \(beta-two\)/.test(closeOut), "hadron close resolves the name and archives");
   r.ok(await until(async () => (await page.locator(`.dk[data-sid="${B}"]`).count()) === 0),
@@ -170,6 +177,21 @@ try {
   r.ok(!tmuxAlive(B), "tmux session is actually gone (has-session fails)");
   r.ok(existsSync(join(env.ws, ".hadron", "agents", `${B}.json`)) && agentJson(B).archived === true,
     "agent JSON kept on disk with archived:true");
+  r.ok(await until(async () => await page.evaluate((w) => w.readyState === WebSocket.CLOSED, wsBefore)),
+    "B's terminal WS closed when B was archived (tmux killed)");
+  // The pty's own exit closes the WS normally, so the client retries once —
+  // that retry is the connect the server must refuse (4404), after which the
+  // client stops for good.
+  r.ok(await until(async () => await page.evaluate(() => document.getElementById("status")?.textContent === "agent archived")),
+    "…the retry was refused: status bar says 'agent archived'");
+  const wsRefused = await page.evaluateHandle(() => ws);
+  await wait(6000);   // longer than the reconnect backoff cap (4 s)
+  r.ok(await page.evaluate((w) => ws === w && ws.readyState === WebSocket.CLOSED, wsRefused),
+    "…and no further reconnect after the refusal (no retry loop)");
+  r.ok(agentJson(B).archived === true && agentJson(B).name === "Beta Two" && agentJson(B).group === "Workers",
+    "archived record intact after the open dashboard tried to reconnect (was: blanked + resurrected)");
+  r.ok(!(await (await fetch(`${env.baseUrl}/api/sessions`)).json()).some((s) => s.id === B),
+    "B still absent from GET /api/sessions");
 
   const lsOut = hadron(["ls", "--archived"]);
   r.ok(lsOut.includes(B) && lsOut.includes("Beta Two"), "hadron ls --archived lists the closed agent");
@@ -178,6 +200,10 @@ try {
   r.ok(/restored Beta Two \(beta-two\)/.test(restoreOut), "hadron restore resolves against the ARCHIVED list");
   r.ok(await until(async () => (await page.locator(`.dk[data-sid="${B}"]`).count()) === 1),
     "restored agent is back in the deck");
+  await page.locator(`.dk[data-sid="${A}"]`).first().click();
+  await page.locator(`.dk[data-sid="${B}"]`).first().click();
+  r.ok(await until(async () => await page.evaluate((b) => activeSessionId === b && ws && ws.readyState === WebSocket.OPEN, B)),
+    "switching to the restored agent attaches its terminal again");
   await shot("after-restore");
 
   r.ok(pageErrors.length === 0, `zero page errors${pageErrors.length ? ` (got: ${pageErrors.join(" | ")})` : ""}`);

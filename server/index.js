@@ -2053,6 +2053,9 @@ server.on("upgrade", (request, socket, head) => {
 // was two window resizes and two full re-renders of the program in the pane
 // (seconds for Claude Code on a long session) on every agent switch.
 const PTY_DEFAULT_SIZE = { cols: 80, rows: 24 };
+// WS close code for "no such live agent" — application range (4000-4999);
+// client/terminal.js stops reconnecting on it instead of retrying forever.
+const WS_CLOSE_AGENT_GONE = 4404;
 function ptySizeFromQuery(params) {
   // Clamp rather than reject an out-of-range value: a 25%-zoomed browser on a
   // wide monitor asks for >1000 cols, and falling back to 80x24 there would
@@ -2078,15 +2081,19 @@ wss.on("connection", (ws) => {
 
   ensureDefaults();
   if (!sessions.has(sessionId)) {
-    const session = {
-      id: sessionId,
-      name: sessionId,
-      group: "Workers",
-      task: null,
-      state: "idle",
-    };
-    sessions.set(sessionId, session);
-    saveAgent(session);
+    // Never mint an agent from a terminal connect. A dashboard left open on an
+    // agent that was later archived (`hadron close`) reconnects its terminal
+    // after a server restart; minting here resurrected the agent AND blanked
+    // its stored record (name, group, artifacts → defaults). Refuse with a
+    // close code the client recognises (4404) so it stops reconnecting.
+    const onDisk = isValidId(sessionId) ? loadAgent(sessionId) : null;
+    const reason = onDisk?.archived ? "archived" : "unknown";
+    console.warn(`[ws] refusing terminal for ${reason} agent ${sessionId}${isShell ? ` (shell: ${shellName})` : ""} — not minting`);
+    if (ws.readyState === ws.OPEN) {
+      ws.send(JSON.stringify({ type: "output", data: `\r\n\x1b[33mThis agent is ${reason === "archived" ? "archived" : "not on this server"} — terminal closed.\x1b[0m\r\n` }));
+      ws.close(WS_CLOSE_AGENT_GONE, reason);
+    }
+    return;
   }
 
   if (isShell) {
