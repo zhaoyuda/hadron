@@ -62,8 +62,16 @@ const EXPECTED = {
   // ── Background agents / shells ──
   "working-background-agents":             { state: "working", substatus: { type: "agents" } },
   "working-background-agents-with-prompt": { state: "working", substatus: { type: "agents" } },
-  "working-shells":                        { state: "working", substatus: { type: "shell" } },
-  "working-shells-chrome":                 { state: "working", substatus: { type: "shell" } },
+  "working-shells":                        { state: "working", substatus: { type: "shell", count: 1 } },
+  // A background shell at an EMPTY prompt is idle, not working (a dev server
+  // left in a shell tab kept a Mac agent "working · 1 shell" for ten days); the
+  // count survives as substatus so the deck still shows it.
+  "idle-shells-chrome":                    { state: null, promptVisible: true, substatus: { type: "shell", count: 2 } },
+  "idle-shell-still-running":              { state: null, promptVisible: true, substatus: { type: "shell", count: 1 } },
+  // …and a permission dialog with a shell in the chrome is blocked, not working.
+  "blocked-permission-with-shell":         { state: "blocked", blockReason: "Needs input" },
+  // …and local agents sharing the chrome line with a shell still mean working.
+  "working-local-agents-with-shell":       { state: "working", substatus: { type: "agents", count: 3 } },
   "working-dynamic-workflow":              { state: "working", substatus: { type: "agents" } },
   "working-local-agents":                  { state: "working", substatus: { type: "agents" } },
   "working-task-progress":                 { state: "working", substatus: { type: "agents" } },

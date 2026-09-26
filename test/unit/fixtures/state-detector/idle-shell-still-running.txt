@@ -1,0 +1,11 @@
+● Bash(npm run dev)
+  ⎿  Running in the background (down arrow to manage)
+
+⏺ The dev server is running in a background shell. Tell me when you want me to check its output.
+
+1 shell still running
+
+───────────────────────────────────────────
+❯
+───────────────────────────────────────────
+bypass permissions  ctx [default]  · 1 shell  ⏵⏵

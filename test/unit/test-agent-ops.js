@@ -407,12 +407,35 @@ async function main() {
     ok((await req("DELETE", `/api/sessions/${F}`)).status === 200 && !tmuxHas(tmuxName(F)), "archive foo kills hadron-<ws>-foo");
     ok(tmuxHas(tmuxName(F1)) && (await liveList()).some((s) => s.id === F1), "…but NOT agent foo-sh1's own main session (it is a known agent, not a shell tab)");
 
+    // whoami from inside such an agent's own pane must resolve to THAT agent,
+    // not to the shorter id its name happens to extend (foo-sh1 → foo, and,
+    // now that -vim-N is stripped too, foo-vim-3 → foo).
+    const F3 = await createAgent("Foo vim 3");
+    const who1 = await (await fetch(`${BASE}/api/whoami?tmuxSession=${tmuxName(F1)}`)).json();
+    const who3 = await (await fetch(`${BASE}/api/whoami?tmuxSession=${tmuxName(F3)}`)).json();
+    ok(F3 === "foo-vim-3" && who1.id === F1 && who3.id === F3,
+      `whoami keeps a real agent id that ends in a sub-session suffix (${who1.id}, ${who3.id})`);
+    const whoTab = await (await fetch(`${BASE}/api/whoami?tmuxSession=${tmuxName(F3)}-vim-1758000000001`)).json();
+    ok(whoTab.id === F3, "…and a real vim pane of that agent still maps back to it");
+    // …also when that agent is archived and its own main session outlived the
+    // archive: adopting it must restore foo-vim-3, not mint/restore foo.
+    await req("PATCH", `/api/sessions/${F3}`, { task: "vim3 task" });
+    ok((await req("DELETE", `/api/sessions/${F3}`)).status === 200 && !tmuxHas(tmuxName(F3)), "archive foo-vim-3");
+    tmuxNew(tmuxName(F3));
+
     // Now the world the bug left behind: sessions that survived an archive
     // (recreated by hand), plus a tmux session for an id with no record at all.
     const P = await createAgent("Orphan Pig");
     await req("PATCH", `/api/sessions/${P}`, { group: "Reviewers", task: "keep me too", notes: "pig notes" });
     ok((await req("DELETE", `/api/sessions/${P}`)).status === 200, "archive Orphan Pig");
+    // An editor pane (client/markdown.js opens vim in hadron-<ws>-<id>-vim-<ts>)
+    // that outlived its archived agent. adopt used to strip only -shN, so this
+    // adopted as a blank agent literally named "<id>-vim-1758…".
+    const V = await createAgent("Orphan Vole");
+    await req("PATCH", `/api/sessions/${V}`, { group: "Reviewers", task: "vole task" });
+    ok((await req("DELETE", `/api/sessions/${V}`)).status === 200, "archive Orphan Vole");
     tmuxNew(`${tmuxName(P)}-sh1`);   // surviving shell tab of an archived agent
+    tmuxNew(`${tmuxName(V)}-vim-1758000000000`); // surviving editor pane of an archived agent
     tmuxNew(tmuxName(O));            // main session of an archived agent
     tmuxNew(tmuxName("nobody"));     // no record on disk at all
     server.kill("SIGKILL");
@@ -423,11 +446,13 @@ async function main() {
     await waitForServer();
     const orphans = await (await fetch(`${BASE}/api/orphans`)).json();
     const names = orphans.map((o) => o.tmuxSession);
-    ok([`${tmuxName(P)}-sh1`, tmuxName(O), tmuxName("nobody")].every((n) => names.includes(n)),
-      `boot lists all three as orphans (${orphans.length} pending)`);
+    ok([`${tmuxName(P)}-sh1`, `${tmuxName(V)}-vim-1758000000000`, tmuxName(O), tmuxName("nobody")].every((n) => names.includes(n)),
+      `boot lists all four as orphans (${orphans.length} pending)`);
+    ok(names.includes(tmuxName(F3)), "…and the archived foo-vim-3's own session as a fifth");
     ok(!(await liveList()).some((s) => s.id === P || s.id === O), "…and neither archived agent is live before any adopt");
     ok(!names.includes(tmuxName(F1)) && (await liveList()).some((s) => s.id === F1),
       "the live agent foo-sh1's own session is not listed as an orphan of archived foo");
+
 
     const a1 = await req("POST", `/api/orphans/${tmuxName(P)}-sh1/adopt`);
     ok(a1.status === 200 && (await a1.json()).agentId === P, `adopt <id>-sh1 → agentId ${P}`);
@@ -437,6 +462,19 @@ async function main() {
     ok(pj.archived === undefined && pj.archivedAt === undefined, "…and cleared archived/archivedAt (adopt == restore)");
     const pl = (await liveList()).find((s) => s.id === P);
     ok(pl && pl.name === "Orphan Pig" && pl.group === "Reviewers", "…live session carries the restored name/group, not the id");
+
+    const av = await req("POST", `/api/orphans/${tmuxName(V)}-vim-1758000000000/adopt`);
+    ok(av.status === 200 && (await av.json()).agentId === V, `adopt <id>-vim-<ts> → agentId ${V} (suffix stripped like -shN)`);
+    const vj = readAgentFile(V);
+    ok(vj.name === "Orphan Vole" && vj.group === "Reviewers" && vj.task === "vole task" && vj.archived === undefined,
+      "…record restored and un-archived");
+    ok(!existsSync(join(WS, ".hadron", "agents", `${V}-vim-1758000000000.json`)) && !(await liveList()).some((s) => s.id.startsWith(`${V}-vim`)),
+      "…and no blank \"<id>-vim-<ts>\" agent was minted");
+
+    const a3 = await req("POST", `/api/orphans/${tmuxName(F3)}/adopt`);
+    ok(a3.status === 200 && (await a3.json()).agentId === F3, `adopt the archived agent's own session hadron-<ws>-foo-vim-3 → agentId ${F3}, not foo`);
+    ok(readAgentFile(F3).task === "vim3 task" && readAgentFile(F3).archived === undefined && readAgentFile(F).archived === true,
+      "…foo-vim-3 restored with its task, archived foo untouched");
 
     const a2 = await req("POST", "/api/orphans/adopt-all");
     const adopted = (await a2.json()).adopted || [];

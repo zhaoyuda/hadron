@@ -492,11 +492,21 @@ export function detectState(rawLines, opts = {}) {
     return { state: "working", substatus: { type: "agents" } };
   }
 
-  // 4b. Background shells or local agents (check content + chrome status bar)
+  // 4b. Background shells or local agents (check content + chrome status bar).
+  // A background shell is NOT by itself "working": Claude Code shows the
+  // "· N shells" chrome for as long as the shell lives, and a dev server left
+  // in one keeps it there for days (a Mac agent read "working · 1 shell" at an
+  // empty prompt for ten days, and blocked every "no agent working" check).
+  // The count is remembered and decided in step 6: prompt visible and nothing
+  // else going on → idle, with the count as substatus so the deck still shows
+  // "· 1 shell"; no prompt → working; a blocked dialog (step 5) wins over both.
+  let shellSub = null;
   for (const line of tail) {
     const sm = line.match(SHELL_RUNNING_RE) || line.match(SHELL_CHROME_RE);
     if (sm) {
-      return { state: "working", substatus: { type: "shell", count: parseInt(sm[1]) } };
+      shellSub = { type: "shell", count: parseInt(sm[1]) };
+      // no `continue`: the chrome puts "· 1 shell  · 3 local agents" on ONE
+      // line, and running local agents must still read as working below.
     }
     const am = line.match(LOCAL_AGENT_RE) || line.match(LOCAL_AGENT_CHROME_RE);
     if (am) {
@@ -536,7 +546,11 @@ export function detectState(rawLines, opts = {}) {
 
   // ── Step 6: Final state ──
   if (hasPrompt) {
-    return { state: null, substatus: null };
+    // Idle; a lingering background shell rides along as substatus (see 4b).
+    return { state: null, promptVisible: true, substatus: shellSub };
+  }
+  if (shellSub) {
+    return { state: "working", substatus: shellSub };
   }
   return { state: "inconclusive", substatus: null };
 }
@@ -560,7 +574,7 @@ function _findToolName(lines, fromIdx) {
  * Kept side-effect-free (only mutates the passed-in `m`) so it can be unit-tested
  * without tmux. The class wrapper applies decisions via _setState.
  *
- * `m` fields: current, blockReason, notWorking, inconclusive, blockedHits,
+ * `m` fields: current, blockReason, substatus, notWorking, inconclusive, blockedHits,
  *             shellHits, settleThreshold (default 8), inconclusiveThreshold (2).
  * inputs: cmd, snap (from detectState), contentChanged, canTransition.
  */
@@ -656,11 +670,22 @@ export function nextState(m, { cmd, snap, contentChanged, canTransition }) {
   if (current === "working") {
     if (contentChanged) { m.notWorking = 0; return null; }
     m.notWorking++;
-    if (m.notWorking >= settleThreshold && canTransition) { return { state: "done" }; }
+    if (m.notWorking >= settleThreshold && canTransition) { return { state: "done", substatus: snap.substatus }; }
     return null;
   }
   if (current === "blocked" && canTransition) {
-    return { state: m.blockReason === "Needs input" ? "idle" : "done" };
+    return { state: m.blockReason === "Needs input" ? "idle" : "done", substatus: snap.substatus };
+  }
+  // Idle/done at the prompt: an at-prompt snap can still carry a background
+  // substatus (a shell left running — detectState step 4b/6). Keep the state
+  // and refresh only the substatus, and only when it actually changed, so a
+  // quiet pane produces no decision at all.
+  if (current === "idle" || current === "done") {
+    const want = snap.substatus || null;
+    const have = m.substatus || null;
+    if ((want?.type ?? null) !== (have?.type ?? null) || (want?.count ?? null) !== (have?.count ?? null)) {
+      return { substatus: want };
+    }
   }
   return null;
 }
@@ -835,6 +860,7 @@ export class StateDetector {
     const m = {
       current: this.session.state || "idle",
       blockReason: this.session.blockReason,
+      substatus: this.session.substatus || null,
       notWorking: this.notWorkingCount,
       inconclusive: this.inconclusiveCount,
       blockedHits: this.blockedCount,

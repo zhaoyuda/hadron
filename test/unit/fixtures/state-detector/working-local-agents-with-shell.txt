@@ -1,0 +1,6 @@
+⏺ Three subagents are auditing the modules; the dev server runs in a background shell.
+
+───────────────────────────────────────────
+❯
+───────────────────────────────────────────
+bypass permissions  ctx [default]  · 1 shell  · 3 local agents  ⏵⏵

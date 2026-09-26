@@ -166,5 +166,42 @@ console.log("\n[canTransition gating]");
   ok(T(m, { cmd: "node", snap: sToolStrong, canTransition: false }) === null, "no transition before min-duration elapses");
 }
 
+console.log("\n[background shell at the prompt is idle, with the count as substatus]");
+{
+  // detectState reports an at-prompt snap that still carries a shell count
+  // (step 4b/6). The reducer must keep idle and only refresh the substatus.
+  const sPromptShell1 = { state: null, promptVisible: true, substatus: { type: "shell", count: 1 } };
+  const sPromptShell2 = { state: null, promptVisible: true, substatus: { type: "shell", count: 2 } };
+  const m = machine("idle");
+  let d = T(m, { cmd: "node", snap: sPromptShell1 });
+  ok(d && d.state === undefined && d.substatus?.type === "shell" && d.substatus.count === 1,
+    "idle + shell snap → substatus-only refresh (no state change)");
+  m.substatus = d.substatus;
+  ok(T(m, { cmd: "node", snap: sPromptShell1 }) === null, "same shell count again → no decision (quiet pane)");
+  d = T(m, { cmd: "node", snap: sPromptShell2 });
+  ok(d && d.state === undefined && d.substatus.count === 2, "count 1 → 2 → substatus refreshed");
+  m.substatus = d.substatus;
+  d = T(m, { cmd: "node", snap: sPrompt });
+  ok(d && d.state === undefined && d.substatus === null, "shell gone → substatus cleared, still idle");
+  m.substatus = null;
+  ok(T(m, { cmd: "node", snap: sPrompt }) === null, "plain prompt with no substatus → no decision");
+
+  // A turn that ends while its background shell keeps running settles to done
+  // exactly like any other turn (8 stable prompt polls) — the shell no longer
+  // pins the agent in "working" forever.
+  const w = machine("working", { settleThreshold: 8 });
+  let done = null;
+  for (let i = 0; i < 8; i++) done = T(w, { cmd: "node", snap: sPromptShell1 });
+  ok(done && done.state === "done" && done.substatus?.type === "shell", "working + 8 shell-prompt polls → done, shell count carried");
+  const dn = machine("done", { substatus: { type: "shell", count: 1 } });
+  ok(T(dn, { cmd: "node", snap: sPromptShell1 }) === null, "done with the same shell count → no decision");
+  ok(T(dn, { cmd: "node", snap: sPrompt })?.substatus === null, "done, shell exits → substatus cleared");
+
+  // A strong working snap still wins over a lingering shell substatus.
+  const i2 = machine("idle", { substatus: { type: "shell", count: 1 } });
+  const dw = T(i2, { cmd: "node", snap: sToolStrong });
+  ok(dw && dw.state === "working" && dw.substatus.type === "tool", "idle(shell) + tool snap → working [tool]");
+}
+
 console.log(`\n${failed === 0 ? "PASS" : "FAIL"}: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

@@ -93,8 +93,11 @@ PORT=3001 node server/index.js ~/work &    # port 3001
 # failure and hid the rest); exit non-zero if any suite failed. New suites go in
 # its SUITES list and here.
 npm test
-#   = test-state-eval.js   (detectState snapshot fixtures)
-#   + test-state-machine.js (nextState reducer — temporal transitions)
+#   = test-state-eval.js   (detectState snapshot fixtures; a background shell at an empty prompt is idle
+#                            with substatus {type:"shell",count} — not working — and a permission dialog
+#                            with a shell in the chrome is blocked)
+#   + test-state-machine.js (nextState reducer — temporal transitions; idle/done refresh a shell substatus
+#                            in place, a turn ending with a shell still running settles to done)
 #   + test-security.js      (auth, cwd policy, injection, concurrency over HTTP)
 #   + test-annotations.js / test-message.js / test-upload.js (v0.8 surfaces; message to a
 #                            bare-shell pane is refused 409 unless force — no paste into zsh)
@@ -112,7 +115,10 @@ npm test
 #                            atomic PATCH merge; /api/file .hadron write jail; restart persistence; archive kills
 #                            the agent's shell/vim sub-sessions too, and adopting an orphan tmux session of an
 #                            agent that has a record on disk restores that record (name/group/task/notes,
-#                            un-archived) instead of saving a blank one over it)
+#                            un-archived) instead of saving a blank one over it — for -shN and -vim-<ts>
+#                            leftovers alike, never minting "<id>-vim-<ts>"; whoami/adopt try the full
+#                            suffix as an id first, so a real agent foo-vim-3 (live or archived) is never
+#                            read as a vim pane of foo)
 #   + test-terminal-ws.js   (terminal pty lifecycle — the macOS ptmx-exhaustion class: normal close
 #                            releases the master fd (kill+destroy), ws heartbeat reaps half-open
 #                            connections' ptys, /api/health livePtys count, no fd accumulation.
@@ -123,7 +129,8 @@ npm test
 #                            switch is one attach at the window's current size, not 80x24 → resize;
 #                            a WS for an unknown or archived id is refused with close code 4404 — never
 #                            mints an agent, no pty, no shell tmux session, archived record untouched;
-#                            restore → attaches again)
+#                            restore → attaches again; ?shell= must be sh<N> or vim-<ts> (the client's
+#                            shapes) or the upgrade is refused with 400 — no pty, no tmux session)
 #   + test-resume-live.js   (auto-resume at the REAL boundary: private tmux server (HADRON_TMUX_SOCKET) +
 #                            a process actually named claude/claude.exe; checkpoint on disk, shared-cwd
 #                            refusal warned once per agent, tombstone, reboot via HADRON_BOOT_ID (same id →

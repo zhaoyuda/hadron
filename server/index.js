@@ -357,6 +357,23 @@ function ensureTmuxSession(sessionId, cwd) {
   return created;
 }
 
+// Sub-sessions of an agent: shell tabs (`sh<N>`, client/terminal.js) and editor
+// panes (`vim-<ts>`, client/markdown.js) live in their own tmux sessions named
+// hadron-<ws>-<id>-<sub>. Every place that maps a tmux name back to an agent id
+// first tries the full suffix as an id (ids are slugified names, so "Foo vim 3"
+// is a real agent foo-vim-3) and only then strips this suffix. The terminal WS
+// refuses any other `?shell=` — an arbitrary name would attach agent foo to
+// hadron-<ws>-foo-<name>, i.e. another agent's own session when that agent's id
+// happens to be foo-<name>.
+const SUB_SESSION_SUFFIX_RE = /-(sh\d+|vim-\d+)$/;
+const SHELL_NAME_RE = /^(sh\d+|vim-\d+)$/;
+// tmux-name suffix → agent id: the full suffix if that is a known agent (live
+// or archived on disk — an archived "foo-vim-3" whose session outlived the
+// archive must adopt as itself, not as foo), else with the suffix stripped.
+function agentIdFromSuffix(suffix) {
+  return sessions.has(suffix) || (isValidId(suffix) && loadAgent(suffix)) ? suffix : suffix.replace(SUB_SESSION_SUFFIX_RE, "");
+}
+
 function killTmuxSession(sessionId) {
   const tmuxName = tmuxSessionName(sessionId);
   tmuxSafe(["kill-session", "-t", tmuxName]);
@@ -368,7 +385,7 @@ function killTmuxSession(sessionId) {
   // end in -shN / -vim-N (ids are slugified names, so "Foo sh1" → foo-sh1).
   const output = tmuxSafe(["ls", "-F", "#{session_name}"]) || "";
   for (const name of output.trim().split("\n")) {
-    if (!name.startsWith(`${tmuxName}-`) || !/-(sh\d+|vim-\d+)$/.test(name)) continue;
+    if (!name.startsWith(`${tmuxName}-`) || !SUB_SESSION_SUFFIX_RE.test(name)) continue;
     const asId = name.slice(TMUX_PREFIX.length + 1);
     if (sessions.has(asId) || loadAgent(asId)) continue;
     tmuxSafe(["kill-session", "-t", name]);
@@ -403,9 +420,9 @@ function detectOrphanedTmuxSessions() {
       // A known agent's own session first — an id can end in -shN/-vim-N
       // ("Foo sh1" → foo-sh1) and must not be read as a shell tab of foo.
       if (knownIds.has(suffix)) continue;
-      const subMatch = suffix.match(/^(.+)-(sh\d+|vim-\d+)$/);
-      if (subMatch) {
-        if (knownIds.has(subMatch[1])) {
+      const owner = suffix.replace(SUB_SESSION_SUFFIX_RE, "");
+      if (owner !== suffix) {
+        if (knownIds.has(owner)) {
           // Auto-kill orphaned vim sessions for known agents (editor leftovers)
           if (/vim-\d+$/.test(suffix)) {
             tmuxSafe(["kill-session", "-t", name]);
@@ -703,7 +720,7 @@ app.get("/api/whoami", (req, res) => {
   if (!sessionName.startsWith(`${TMUX_PREFIX}-`)) {
     return res.status(404).json({ error: "not a hadron-managed tmux session", tmuxPrefix: TMUX_PREFIX });
   }
-  const id = sessionName.slice(TMUX_PREFIX.length + 1).replace(/-(sh\d+)$/, "");
+  const id = agentIdFromSuffix(sessionName.slice(TMUX_PREFIX.length + 1));
   const session = sessions.get(id);
   if (!session) return res.status(404).json({ error: "agent not found", id });
   res.json(session);
@@ -792,7 +809,7 @@ app.post("/api/orphans/:tmuxSession/adopt", (req, res) => {
   const idx = pendingOrphans.findIndex(o => o.tmuxSession === tmuxSession);
   if (idx === -1) return res.status(404).json({ error: "orphan not found" });
   const orphan = pendingOrphans[idx];
-  const id = orphan.agentId.replace(/-(sh\d+)$/, "");
+  const id = agentIdFromSuffix(orphan.agentId);
   if (!isValidId(id)) return res.status(400).json({ error: "invalid agent id" });
   adoptOrphanId(id);
   pendingOrphans.splice(idx, 1);
@@ -811,7 +828,7 @@ app.post("/api/orphans/:tmuxSession/kill", (req, res) => {
 app.post("/api/orphans/adopt-all", (req, res) => {
   const adopted = [];
   for (const orphan of [...pendingOrphans]) {
-    const id = orphan.agentId.replace(/-(sh\d+)$/, "");
+    const id = agentIdFromSuffix(orphan.agentId);
     if (!isValidId(id)) continue;
     adoptOrphanId(id);
     adopted.push(id);
@@ -1341,7 +1358,7 @@ app.delete("/api/sessions/:id", async (req, res) => {
 // ═══ SHELL CLEANUP API ═══
 app.delete("/api/sessions/:id/shells/:shellName", (req, res) => {
   const { id, shellName } = req.params;
-  if (!isValidId(id) || !/^[a-z0-9-]+$/.test(shellName)) {
+  if (!isValidId(id) || !SHELL_NAME_RE.test(shellName)) {
     return res.status(400).json({ error: "invalid id or shell name" });
   }
   const tmuxName = `${TMUX_PREFIX}-${id}-${shellName}`;
@@ -2060,9 +2077,17 @@ server.on("upgrade", (request, socket, head) => {
     socket.destroy();
     return;
   }
+  const shellParam = url.searchParams.get("shell") || null;
+  if (shellParam && !SHELL_NAME_RE.test(shellParam)) {
+    const sid = url.searchParams.get("session") || "planner";
+    console.warn(`[ws] refusing terminal upgrade for ${isValidId(sid) ? sid : "<invalid id>"}: invalid shell name`);
+    socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
+    socket.destroy();
+    return;
+  }
   wss.handleUpgrade(request, socket, head, (ws) => {
     ws.sessionId = url.searchParams.get("session") || "planner";
-    ws.shellName = url.searchParams.get("shell") || null;
+    ws.shellName = shellParam;
     ws.ptySize = ptySizeFromQuery(url.searchParams);
     wss.emit("connection", ws, request);
   });

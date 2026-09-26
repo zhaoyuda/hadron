@@ -331,6 +331,25 @@ async function main() {
     ok(await waitFor(async () => (await health()).livePtys, 1) && ws.readyState === WebSocket.OPEN,
       "…restored agent's terminal attaches again (livePtys 1, socket still open — not a 4404 refusal)");
     ws.close(); await waitFor(async () => (await health()).livePtys, 0);
+
+    // `?shell=` names the tmux sub-session hadron-<ws>-<id>-<shell>; only the
+    // client-generated shapes (sh<N>, vim-<ts>) are accepted. Anything else is
+    // refused at the upgrade — `?shell=bar` on agent pty-b would otherwise
+    // attach to hadron-<ws>-pty-b-bar, the OWN session of an agent named that.
+    for (const bad of ["bar", "sh1x", "vim-", "..%2F..", "sh1%2Fx"]) {
+      const r = await attach(`pty-b&shell=${bad}`);
+      ok(r.code !== 4404 && r.code !== "timeout" && r.out.length === 0 && r.code !== 1000,
+        `?shell=${decodeURIComponent(bad)} → upgrade refused (close ${r.code}, no output)`);
+    }
+    const sessionsNow = tmuxQ(["ls", "-F", "#{session_name}"]).split("\n");
+    ok(!sessionsNow.some((n) => n.startsWith(`hadron-${WS_NAME}-pty-b-`)),
+      "…and no hadron-<ws>-pty-b-* tmux session was created by the refused names");
+    ok((await health()).livePtys === 0, "…and no pty was spawned");
+    const good = await connectTerminal("pty-b&shell=sh7");
+    ok(await waitFor(async () => (await health()).livePtys, 1) && good.readyState === WebSocket.OPEN,
+      "?shell=sh7 (the client's shape) still attaches (livePtys 1)");
+    good.close(); await waitFor(async () => (await health()).livePtys, 0);
+    tmuxQ(["kill-session", "-t", `=hadron-${WS_NAME}-pty-b-sh7`]);
   }
 
   console.log("\n[repeated connect/close cycles do not accumulate fds]");

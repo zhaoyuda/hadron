@@ -268,10 +268,10 @@ function renderWorkHeader() {
   const avBg = state === "working" ? "#1a2332" : state === "done" ? "#1a2e1a" : state === "blocked" ? "#2a1318" : "#363c46";
 
   let stateLabel, stateClass;
-  if (state === "done") { stateLabel = "needs review"; stateClass = "wh-state-done"; }
+  if (state === "done") { stateLabel = "needs review" + formatBackgroundSuffix(s); stateClass = "wh-state-done"; }
   else if (state === "blocked") { stateLabel = isExplorationTheme() ? rpgBlockedLine(s) : (s.blockReason || "blocked"); stateClass = "wh-state-blocked"; }
   else if (state === "working") { stateLabel = formatWorkingSubstatus(s); stateClass = "wh-state-working"; }
-  else { stateLabel = "idle"; stateClass = "wh-state-idle"; }
+  else { stateLabel = "idle" + formatBackgroundSuffix(s); stateClass = "wh-state-idle"; }
 
   const canClose = s.deletable !== false;
 
@@ -960,13 +960,13 @@ function mkDeckCard(s, idx, allowDrag = true) {
   const avatar = `<div class="dk-av" style="background:${avBg}">${avatarInner}</div>`;
 
   let sub, subClass;
-  if (state === "done") { sub = "needs review"; subClass = "dk-sub-done"; }
+  if (state === "done") { sub = "needs review" + formatBackgroundSuffix(s); subClass = "dk-sub-done"; }
   else if (state === "blocked") {
     sub = isExplorationTheme() ? rpgBlockedLine(s) : esc(s.blockReason || "blocked");
     subClass = "dk-sub-blocked";
   }
   else if (state === "working") { sub = formatWorkingSubstatus(s); subClass = "dk-sub-working"; }
-  else { sub = "idle"; subClass = "dk-sub-idle"; }
+  else { sub = "idle" + formatBackgroundSuffix(s); subClass = "dk-sub-idle"; }
 
   const draggable = allowDrag ? ` draggable="true"` : "";
   const pin = s.pinned ? `<span class="dk-pin" title="Pinned">📌</span>` : "";
@@ -1453,6 +1453,16 @@ function shortenPath(p) {
 function formatDuration(ms) {
   const m = Math.floor(ms / 60000);
   return m < 60 ? m + "m" : Math.floor(m / 60) + "h" + (m % 60) + "m";
+}
+
+// Idle/done agents can still carry a background shell (a dev server left in a
+// Claude Code shell tab); the detector reports it as substatus without calling
+// the agent "working". Shown as a suffix so the count stays visible on the deck.
+function formatBackgroundSuffix(s) {
+  const sub = s.substatus;
+  if (!sub || sub.type !== "shell") return "";
+  const n = Number(sub.count) || 1;
+  return n > 1 ? ` · ${n} shells` : " · 1 shell";
 }
 
 function formatWorkingSubstatus(s) {
