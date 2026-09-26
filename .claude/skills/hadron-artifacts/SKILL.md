@@ -33,6 +33,19 @@ Keep artifact **labels concise** — a few words at most. The file type is alrea
 hadron artifacts ls
 ```
 
+## Freshness — what live-updates and what doesn't
+
+The viewer polls each open artifact's mtime every 3s and reacts per type:
+
+- **Markdown / text / CSV / code** re-render silently. Editing the file on disk is enough —
+  no reopen needed.
+- **HTML and Jupyter tabs** render in an iframe and are NOT silently re-rendered (that would
+  wipe scroll/interaction state). Instead a **"File updated ↻ Reload"** pill appears on the
+  tab; the user clicks it to see the new render. After regenerating one, tell the user to
+  click the pill (or close and reopen the tab) — otherwise they're looking at the old render
+  and will think your fix didn't land.
+- **marimo** is launched with `--watch` and reloads its own cells; no pill, nothing to do.
+
 ## When to use this
 
 - You just produced a report, notebook, chart, or summary → add it so the user sees it.

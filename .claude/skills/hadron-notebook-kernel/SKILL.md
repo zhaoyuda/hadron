@@ -1,64 +1,67 @@
 ---
 name: hadron-notebook-kernel
-description: Configure which Python environment (venv) Hadron uses to launch marimo and Jupyter notebooks in this workspace. Detects existing venvs, optionally creates one, and saves the choice.
+description: Configure which Python environment (venv) Hadron launches marimo and Jupyter notebooks from, in this workspace. Use when notebooks won't open, open with the wrong interpreter, or a package is missing inside a notebook.
 ---
 
 # Notebook Kernel
 
-Hadron launches marimo and Jupyter using a venv recorded in `.hadron/config.json` under `kernels`:
+Hadron launches marimo and Jupyter from a venv recorded per workspace. If unset, it falls
+back to the workspace's `.venv/` — and if that doesn't exist, notebooks simply don't open.
 
-```json
-{ "kernels": { "marimo": "/abs/path/.venv", "jupyter": "/abs/path/.venv" } }
-```
-
-If unset, it falls back to the workspace's `.venv/`. marimo and Jupyter can share one env or use different ones.
-
-## 1. Find the workspace + current config
+## 1. See what's configured
 
 ```bash
-WORKSPACE=$(find ~ -maxdepth 3 -name ".hadron" -type d 2>/dev/null | head -1 | xargs dirname)
-echo "Workspace: $WORKSPACE"
-curl -s http://localhost:${HADRON_PORT:-3000}/api/kernels
+hadron kernels
 ```
 
-## 2. Scan for usable venvs
+`no kernels configured` + no `.venv/` in the workspace root is the usual cause of "the
+notebook tab does nothing."
+
+## 2. Find a venv that has the package
+
+The venv must actually contain the runtime you're pointing it at — `marimo` for marimo,
+`jupyter` for Jupyter. Check candidates directly:
 
 ```bash
-for d in .venv venv env; do
-  p="$WORKSPACE/$d"
-  [ -x "$p/bin/python3" ] && { echo "FOUND: $p"; "$p/bin/python3" -m pip list 2>/dev/null | grep -iE "marimo|jupyter"; }
-done
-command -v uv >/dev/null && echo "uv available"
+ls /path/to/.venv/bin/marimo /path/to/.venv/bin/jupyter
 ```
 
-## 3. Create one if needed
-
-Prefer `uv`; fall back to stdlib. Always `python3`, never `python`:
+Look at the workspace root first, then any shared venv the project already standardises on
+(check the project's CLAUDE.md — many workspaces share one env rather than having a local
+`.venv/`). Create one only if nothing suitable exists:
 
 ```bash
-cd "$WORKSPACE"
-uv venv .venv && uv pip install marimo jupyter altair pandas   # preferred
-# or:
-python3 -m venv .venv && .venv/bin/python3 -m pip install marimo jupyter altair pandas
+uv venv /path/to/.venv
+uv pip install --python /path/to/.venv/bin/python3 marimo jupyter altair pandas
 ```
 
-## 4. Save the choice
-
-The kernels route is a mutating endpoint, so it needs the workspace token (read from `.hadron/token`). No Origin header is sent by curl, so the token alone authorizes it:
+## 3. Set it
 
 ```bash
-TOKEN=$(cat "$WORKSPACE/.hadron/token")
-curl -s -X PUT http://localhost:${HADRON_PORT:-3000}/api/kernels \
-  -H "Content-Type: application/json" \
-  -H "x-hadron-token: $TOKEN" \
-  -d "{\"marimo\": \"$WORKSPACE/.venv\", \"jupyter\": \"$WORKSPACE/.venv\"}"
+hadron kernels set --marimo /abs/path/.venv --jupyter /abs/path/.venv
 ```
 
-## 5. Confirm
+- They can share one venv or point at different ones.
+- Either flag alone is fine — the other entry is preserved (the CLI merges; the underlying
+  API replaces wholesale, which is why you should not hand-roll this with curl).
+- A path without `bin/python3` is rejected up front. This matters: the *server* silently
+  falls back to `.venv/` when a configured path doesn't resolve, so a typo would otherwise
+  look like the setting simply didn't take.
 
-Tell the user the kernel is set and that **already-open** marimo/Jupyter tabs must be closed and reopened to pick up the new env. They can verify in the dashboard's **Kernel** menu.
+## 4. Confirm
 
-## Notes
+Run `hadron kernels` to read it back, then tell the user: **already-open marimo/Jupyter tabs
+must be closed and reopened** to pick up the new env. They can verify in the dashboard's
+**Kernel** menu.
 
-- Paths must be absolute or `~/`-prefixed.
-- The chosen venv must actually have the package installed (`marimo` for marimo, `jupyter` for Jupyter).
+## Don't hand-roll the workspace lookup
+
+Earlier versions of this skill discovered the workspace with
+`find ~ -maxdepth 3 -name .hadron | head -1` and curled `localhost:3000` with a hand-read
+token. In any multi-workspace setup that is wrong in three ways at once: `head -1` picks a
+fixed directory regardless of where you are, the hardcoded port belongs to a *different*
+server, and the token then doesn't match that server, so the write is rejected. It never
+worked — both workspaces had an empty `kernels` for two months.
+
+`hadron` resolves the port and token together from the nearest `.hadron/` walking up from
+cwd, so they're always a matched pair. Use the CLI.
