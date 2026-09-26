@@ -378,6 +378,79 @@ async function main() {
     ok(live?.state === "idle", "restart still resets state to idle (loader contract intact)");
   }
 
+  console.log("\n[archive kills shell sub-sessions; orphan adopt restores a record instead of blanking it]");
+  {
+    // A shell tab is its own tmux session (hadron-<ws>-<id>-sh1). Before this
+    // fix `hadron close` killed only the main session; the survivor showed up
+    // as an orphan at the next boot and adopting it saved a BLANK record over
+    // the archived one (name/group/task/artifacts gone, agent resurrected).
+    const tmuxName = (n) => `hadron-${WS_NAME}-${n}`;
+    // Exact-name check: `has-session -t X` prefix-matches X-sh1, which would
+    // report the main session alive as long as the shell survives.
+    const tmuxHas = (n) => { try { return execFileSync("tmux", ["ls", "-F", "#{session_name}"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }).split("\n").includes(n); } catch { return false; } };
+    const tmuxNew = (n) => execFileSync("tmux", ["new-session", "-d", "-s", n, "sleep 600"], { stdio: "ignore" });
+
+    const O = await createAgent("Orphan Owl");
+    await req("PATCH", `/api/sessions/${O}`, { group: "Reviewers", task: "keep me" });
+    tmuxNew(`${tmuxName(O)}-sh1`);
+    ok(tmuxHas(`${tmuxName(O)}-sh1`), "fixture: shell sub-session hadron-<ws>-<id>-sh1 exists alongside the agent");
+    const dO = await req("DELETE", `/api/sessions/${O}`);
+    ok(dO.status === 200 && !tmuxHas(tmuxName(O)), "soft DELETE (archive) kills the main tmux session");
+    ok(!tmuxHas(`${tmuxName(O)}-sh1`), "…and the shell sub-session too (no orphan left for the next boot)");
+    ok(readAgentFile(O).archived === true && readAgentFile(O).group === "Reviewers", "record archived, group intact");
+
+    // Name-space collision: an agent whose id ends in -sh1 looks like a shell
+    // sub-session of the shorter id. Archiving the short one must not kill it.
+    const F = await createAgent("Foo");
+    const F1 = await createAgent("Foo sh1");
+    ok(F === "foo" && F1 === "foo-sh1" && tmuxHas(tmuxName(F1)), "fixture: agents foo and foo-sh1 both live");
+    ok((await req("DELETE", `/api/sessions/${F}`)).status === 200 && !tmuxHas(tmuxName(F)), "archive foo kills hadron-<ws>-foo");
+    ok(tmuxHas(tmuxName(F1)) && (await liveList()).some((s) => s.id === F1), "…but NOT agent foo-sh1's own main session (it is a known agent, not a shell tab)");
+
+    // Now the world the bug left behind: sessions that survived an archive
+    // (recreated by hand), plus a tmux session for an id with no record at all.
+    const P = await createAgent("Orphan Pig");
+    await req("PATCH", `/api/sessions/${P}`, { group: "Reviewers", task: "keep me too", notes: "pig notes" });
+    ok((await req("DELETE", `/api/sessions/${P}`)).status === 200, "archive Orphan Pig");
+    tmuxNew(`${tmuxName(P)}-sh1`);   // surviving shell tab of an archived agent
+    tmuxNew(tmuxName(O));            // main session of an archived agent
+    tmuxNew(tmuxName("nobody"));     // no record on disk at all
+    server.kill("SIGKILL");
+    server = spawn("node", [join(REPO, "server", "index.js"), WS], {
+      env: { ...process.env, PORT: String(PORT), HADRON_HOST: "127.0.0.1" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    await waitForServer();
+    const orphans = await (await fetch(`${BASE}/api/orphans`)).json();
+    const names = orphans.map((o) => o.tmuxSession);
+    ok([`${tmuxName(P)}-sh1`, tmuxName(O), tmuxName("nobody")].every((n) => names.includes(n)),
+      `boot lists all three as orphans (${orphans.length} pending)`);
+    ok(!(await liveList()).some((s) => s.id === P || s.id === O), "…and neither archived agent is live before any adopt");
+    ok(!names.includes(tmuxName(F1)) && (await liveList()).some((s) => s.id === F1),
+      "the live agent foo-sh1's own session is not listed as an orphan of archived foo");
+
+    const a1 = await req("POST", `/api/orphans/${tmuxName(P)}-sh1/adopt`);
+    ok(a1.status === 200 && (await a1.json()).agentId === P, `adopt <id>-sh1 → agentId ${P}`);
+    const pj = readAgentFile(P);
+    ok(pj.name === "Orphan Pig" && pj.group === "Reviewers" && pj.task === "keep me too" && pj.notes === "pig notes",
+      `adopt kept the record: name ${JSON.stringify(pj.name)}, group ${pj.group}, task, notes`);
+    ok(pj.archived === undefined && pj.archivedAt === undefined, "…and cleared archived/archivedAt (adopt == restore)");
+    const pl = (await liveList()).find((s) => s.id === P);
+    ok(pl && pl.name === "Orphan Pig" && pl.group === "Reviewers", "…live session carries the restored name/group, not the id");
+
+    const a2 = await req("POST", "/api/orphans/adopt-all");
+    const adopted = (await a2.json()).adopted || [];
+    ok(a2.status === 200 && adopted.includes(O) && adopted.includes("nobody") && !adopted.includes(F),
+      `adopt-all adopted the rest and nothing else (${adopted.join(", ")})`);
+    ok(readAgentFile(F).archived === true && !(await liveList()).some((s) => s.id === F), "…archived foo stays archived (not resurrected via foo-sh1)");
+    const oj = readAgentFile(O);
+    ok(oj.name === "Orphan Owl" && oj.group === "Reviewers" && oj.task === "keep me" && oj.archived === undefined,
+      "adopt-all restored Orphan Owl's record (name/group/task) and un-archived it");
+    const nj = readAgentFile("nobody");
+    ok(nj.name === "nobody" && nj.group === "Workers", "an id with no record still gets a fresh blank one (name = id, Workers)");
+    ok((await (await fetch(`${BASE}/api/orphans`)).json()).length === 0, "no orphans pending afterwards");
+  }
+
   console.log(`\n${failed === 0 ? "PASS" : "FAIL"}: ${passed} passed, ${failed} failed`);
 }
 

@@ -109,7 +109,10 @@ npm test
 #                            archive/restore lifecycle over HTTP, CLI pin/unpin/close/restore/ls --archived
 #                            with name→id resolution — ambiguous names exit 1 with candidates; custom
 #                            launchers incl. argv quoting; Bearer alias; bulk close; kernels CLI with
-#                            atomic PATCH merge; /api/file .hadron write jail; restart persistence)
+#                            atomic PATCH merge; /api/file .hadron write jail; restart persistence; archive kills
+#                            the agent's shell/vim sub-sessions too, and adopting an orphan tmux session of an
+#                            agent that has a record on disk restores that record (name/group/task/notes,
+#                            un-archived) instead of saving a blank one over it)
 #   + test-terminal-ws.js   (terminal pty lifecycle — the macOS ptmx-exhaustion class: normal close
 #                            releases the master fd (kill+destroy), ws heartbeat reaps half-open
 #                            connections' ptys, /api/health livePtys count, no fd accumulation.

@@ -360,6 +360,19 @@ function ensureTmuxSession(sessionId, cwd) {
 function killTmuxSession(sessionId) {
   const tmuxName = tmuxSessionName(sessionId);
   tmuxSafe(["kill-session", "-t", tmuxName]);
+  // Shell tabs (hadron-<ws>-<id>-sh1) and editor sessions (-vim-N) are
+  // separate tmux sessions. Leaving them alive after an archive made the next
+  // boot list them as orphans of an agent that no longer exists, and adopting
+  // one resurrected the agent.
+  // Never touch a session that belongs to another agent whose id happens to
+  // end in -shN / -vim-N (ids are slugified names, so "Foo sh1" → foo-sh1).
+  const output = tmuxSafe(["ls", "-F", "#{session_name}"]) || "";
+  for (const name of output.trim().split("\n")) {
+    if (!name.startsWith(`${tmuxName}-`) || !/-(sh\d+|vim-\d+)$/.test(name)) continue;
+    const asId = name.slice(TMUX_PREFIX.length + 1);
+    if (sessions.has(asId) || loadAgent(asId)) continue;
+    tmuxSafe(["kill-session", "-t", name]);
+  }
 }
 
 function tmuxSessionHasProcesses(sessionName) {
@@ -387,6 +400,9 @@ function detectOrphanedTmuxSessions() {
     for (const name of tmuxSessions) {
       if (!name.startsWith(`${TMUX_PREFIX}-`)) continue;
       const suffix = name.slice(TMUX_PREFIX.length + 1);
+      // A known agent's own session first — an id can end in -shN/-vim-N
+      // ("Foo sh1" → foo-sh1) and must not be read as a shell tab of foo.
+      if (knownIds.has(suffix)) continue;
       const subMatch = suffix.match(/^(.+)-(sh\d+|vim-\d+)$/);
       if (subMatch) {
         if (knownIds.has(subMatch[1])) {
@@ -397,8 +413,6 @@ function detectOrphanedTmuxSessions() {
           }
           continue;
         }
-      } else {
-        if (knownIds.has(suffix)) continue;
       }
       const hasProcs = tmuxSessionHasProcesses(name);
       pendingOrphans.push({ tmuxSession: name, agentId: suffix, hasRunningProcesses: hasProcs });
@@ -755,6 +769,24 @@ app.get("/api/orphans", (req, res) => {
   res.json(pendingOrphans);
 });
 
+// Adopting an orphan tmux session must never blank an existing record: if the
+// agent is on disk (typically archived — `hadron close` while a shell tab's
+// tmux session survived), this is a restore that keeps name/group/task/
+// artifacts/notes. Only an id with no record at all gets a fresh blank one.
+function adoptOrphanId(id) {
+  if (!isValidId(id) || sessions.has(id)) return;
+  const existing = loadAgent(id);
+  const session = existing
+    ? { ...existing, state: "idle", blockReason: undefined, tmuxSession: tmuxSessionName(id) }
+    : { id, name: id, group: "Workers", task: null, state: "idle", tmuxSession: tmuxSessionName(id), artifacts: [], relatedAgents: [], notes: "" };
+  delete session.archived;
+  delete session.archivedAt;
+  if (existing) console.log(`[orphans] adopted ${id}: restored existing record${existing.archived ? " (was archived)" : ""}`);
+  sessions.set(id, session);
+  saveAgent(session);
+  startMonitor(id);
+}
+
 app.post("/api/orphans/:tmuxSession/adopt", (req, res) => {
   const { tmuxSession } = req.params;
   const idx = pendingOrphans.findIndex(o => o.tmuxSession === tmuxSession);
@@ -762,12 +794,7 @@ app.post("/api/orphans/:tmuxSession/adopt", (req, res) => {
   const orphan = pendingOrphans[idx];
   const id = orphan.agentId.replace(/-(sh\d+)$/, "");
   if (!isValidId(id)) return res.status(400).json({ error: "invalid agent id" });
-  if (!sessions.has(id)) {
-    const session = { id, name: id, group: "Workers", task: null, state: "idle", tmuxSession: tmuxSessionName(id), artifacts: [], relatedAgents: [], notes: "" };
-    sessions.set(id, session);
-    saveAgent(session);
-    startMonitor(id);
-  }
+  adoptOrphanId(id);
   pendingOrphans.splice(idx, 1);
   res.json({ ok: true, agentId: id });
 });
@@ -786,12 +813,7 @@ app.post("/api/orphans/adopt-all", (req, res) => {
   for (const orphan of [...pendingOrphans]) {
     const id = orphan.agentId.replace(/-(sh\d+)$/, "");
     if (!isValidId(id)) continue;
-    if (!sessions.has(id)) {
-      const session = { id, name: id, group: "Workers", task: null, state: "idle", tmuxSession: tmuxSessionName(id), artifacts: [], relatedAgents: [], notes: "" };
-      sessions.set(id, session);
-      saveAgent(session);
-      startMonitor(id);
-    }
+    adoptOrphanId(id);
     adopted.push(id);
   }
   pendingOrphans.length = 0;
