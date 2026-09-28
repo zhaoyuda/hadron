@@ -28,7 +28,7 @@ import { randomUUID } from "crypto";
 import { tmuxSafe, shellQuoteArgv } from "./tmux.js";
 import { warnOnce } from "./log.js";
 
-const UUID_RE = /^[0-9a-fA-F][0-9a-fA-F-]{7,63}$/; // strict enough to be shell-inert
+export const UUID_RE = /^[0-9a-fA-F][0-9a-fA-F-]{7,63}$/; // strict enough to be shell-inert (and path-inert)
 export const RESUME_TTL_MS = 7 * 24 * 3600 * 1000;
 
 // ── boot generation ──────────────────────────────────────────────────────

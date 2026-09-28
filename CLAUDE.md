@@ -165,6 +165,17 @@ npm test
 #                            → wedged, --restart SIGKILLs it; every kill guard has a not-killed case)
 #   + test-cli-flags.js     (unknown --flags exit 1 with `unknown option: --x`; `hadron <cmd> --help` prints
 #                            usage instead of running — no server needed)
+#   + test-transcript.js    (server/transcript.js — the tier-0 "last reply" reader over claude's own transcript
+#                            jsonl: last prompt / last reply (all text blocks of the last assistant message) /
+#                            lastActivityAt; sidechain, tool_result carriers, isMeta, compaction summaries and
+#                            slash-command envelopes are never prompts or replies; tail-only stat-gated reads,
+#                            torn lines dropped, no session id in the summary; a tail of pure tool traffic
+#                            carries the known reply forward (fresh cache: widens the window backwards);
+#                            transcriptWire clips to WIRE_TEXT + `truncated`. The wire-form contract
+#                            (`transcript` on /api/sessions only for a token-bearing GET and only for an
+#                            adopted/correlated session id, absent for a shell agent; full text at
+#                            /api/sessions/:id/transcript, 401 without token; doctor row transcriptPreview)
+#                            is in test-doctor.js)
 ```
 
 ### Reliability gate

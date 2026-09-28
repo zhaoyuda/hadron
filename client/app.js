@@ -251,6 +251,7 @@ function syncGroupList() {
 function render() {
   renderDeck();
   renderWorkHeader();
+  renderLastReply();
   renderWorkContent();
   renderRightPanel();
   renderShortcutBar();
@@ -968,9 +969,17 @@ function mkDeckCard(s, idx, allowDrag = true) {
   else if (state === "working") { sub = formatWorkingSubstatus(s); subClass = "dk-sub-working"; }
   else { sub = "idle" + formatBackgroundSuffix(s); subClass = "dk-sub-idle"; }
 
+  // Age of the last transcript activity (claude's own record, see
+  // server/transcript.js) — only when the agent isn't mid-turn; a working
+  // agent's substatus already says what it is doing right now.
+  const age = state !== "working" ? timeAgo(s.transcript?.lastActivityAt) : "";
+  if (age) sub += ` · ${age}`;
+
   const draggable = allowDrag ? ` draggable="true"` : "";
   const pin = s.pinned ? `<span class="dk-pin" title="Pinned">📌</span>` : "";
-  return `<div class="dk${stateClass}${activeClass}" data-sid="${s.id}"${draggable} oncontextmenu="showCtxMenu(event,'${s.id}')">${avatar}<div class="dk-info"><div class="dk-name">${esc(name)}${pin}</div><div class="dk-sub ${subClass}">${sub}</div></div></div>`;
+  const tip = transcriptTooltip(s);
+  const titleAttr = tip ? ` title="${esc(tip)}"` : "";
+  return `<div class="dk${stateClass}${activeClass}" data-sid="${s.id}"${draggable}${titleAttr} oncontextmenu="showCtxMenu(event,'${s.id}')">${avatar}<div class="dk-info"><div class="dk-name">${esc(name)}${pin}</div><div class="dk-sub ${subClass}">${sub}</div></div></div>`;
 }
 
 // ═══ DRAG AND DROP ═══
@@ -1453,6 +1462,104 @@ function shortenPath(p) {
 function formatDuration(ms) {
   const m = Math.floor(ms / 60000);
   return m < 60 ? m + "m" : Math.floor(m / 60) + "h" + (m % 60) + "m";
+}
+
+// "3m" / "2h" / "5d" since an ISO timestamp; "" when unknown or in the future.
+function timeAgo(iso) {
+  if (!iso) return "";
+  const ms = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(ms) || ms < 0) return "";
+  const m = Math.floor(ms / 60000);
+  if (m < 1) return "now";
+  if (m < 60) return m + "m";
+  const h = Math.floor(m / 60);
+  if (h < 48) return h + "h";
+  return Math.floor(h / 24) + "d";
+}
+
+function firstLine(text, max = 160) {
+  const line = String(text || "").split("\n").map((l) => l.trim()).find((l) => l) || "";
+  return line.length > max ? line.slice(0, max - 1) + "…" : line;
+}
+
+// Card tooltip: what the agent was asked and what it last said (transcript
+// summary from the server; absent for shell agents and unknown sessions).
+function transcriptTooltip(s) {
+  const t = s.transcript;
+  if (!t) return "";
+  const parts = [];
+  if (t.title) parts.push(t.title);
+  if (t.lastPrompt) parts.push(`› ${firstLine(t.lastPrompt.text, 200)}`);
+  if (t.lastReply) parts.push(firstLine(t.lastReply.text, 300) + (t.lastReply.truncated && !firstLine(t.lastReply.text, 300).endsWith("…") ? "…" : ""));
+  return parts.join("\n");
+}
+
+// ═══ LAST REPLY STRIP ═══
+// One line under the work header: age + the first line of the agent's last
+// reply (from claude's transcript). Click to expand the full text — the
+// "where was I" view for an agent you come back to after a while.
+// The session list carries the first 300 chars of the reply (`truncated` when
+// clipped); the expanded strip fetches the full text once per reply and keeps
+// it in lastReplyFull. Re-rendering is keyed on content so the 3-s poll never
+// wipes a selection or the scroll position of an open strip. Returns true when
+// the strip's height may have changed (appeared, vanished, toggled) — the
+// caller refits the terminal then, and only then.
+let lastReplyOpen = false;
+let lastReplyKey = "";
+let lastReplyHeight = 0;
+let lastReplyFull = null; // { id, at, text }
+// The strip's height is what the terminal cares about (an open strip grows
+// with its content, up to 40vh), so "changed" is measured, not inferred.
+function heightChanged(el) {
+  const h = el.hidden ? 0 : el.offsetHeight;
+  const changed = h !== lastReplyHeight;
+  lastReplyHeight = h;
+  return changed;
+}
+function renderLastReply() {
+  const el = document.getElementById("last-reply");
+  if (!el) return false;
+  const s = sessions.find((x) => x.id === activeSessionId);
+  const t = s && s.transcript;
+  const reply = t && t.lastReply;
+  if (!reply || !reply.text) {
+    el.hidden = true; el.innerHTML = ""; lastReplyKey = "";
+    return heightChanged(el);
+  }
+  const full = lastReplyFull && lastReplyFull.id === s.id && lastReplyFull.at === reply.at ? lastReplyFull.text : null;
+  const age = timeAgo(reply.at || t.lastActivityAt);
+  const who = t.lastPrompt && t.lastPrompt.at && reply.at && t.lastPrompt.at > reply.at
+    ? "you" : "agent"; // a prompt newer than the reply: the agent hasn't answered it yet
+  const metaText = `${who === "you" ? "waiting on reply" : "last reply"}${age ? ` · ${age}` : ""}`;
+  const key = [s.id, reply.at, reply.text.length, full ? full.length : 0, who, lastReplyOpen].join("|");
+  if (key === lastReplyKey && !el.hidden) {
+    const m = el.querySelector(".lr-meta"); // only the age ticked: touch that span, keep the DOM
+    if (m && m.textContent !== metaText) m.textContent = metaText;
+    return false;
+  }
+  lastReplyKey = key;
+  const meta = `<span class="lr-meta">${esc(metaText)}</span>`;
+  const text = full || reply.text;
+  const body = lastReplyOpen
+    ? `<div class="lr-full">${esc(text)}${!full && reply.truncated ? "…" : ""}</div>`
+    : `<span class="lr-line">${esc(firstLine(text))}</span>`;
+  el.hidden = false;
+  el.classList.toggle("open", lastReplyOpen);
+  el.innerHTML = `<div class="lr-head">${meta}${lastReplyOpen ? "" : body}<span class="lr-toggle">${lastReplyOpen ? "▴" : "▾"}</span></div>${lastReplyOpen ? body : ""}`;
+  el.querySelector(".lr-head").onclick = () => { lastReplyOpen = !lastReplyOpen; renderLastReply(); deferredFit(); };
+  if (lastReplyOpen && reply.truncated && !full) fetchLastReplyFull(s.id, reply.at);
+  return heightChanged(el);
+}
+
+async function fetchLastReplyFull(id, at) {
+  try {
+    const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/transcript`);
+    if (!r.ok) return;
+    const t = await r.json();
+    if (!t || !t.lastReply || t.lastReply.at !== at) return; // a newer reply landed; the poll re-fetches
+    lastReplyFull = { id, at, text: t.lastReply.text };
+    if (renderLastReply()) deferredFit(); // the full body is taller than the clipped one
+  } catch {}
 }
 
 // Idle/done agents can still carry a background shell (a dev server left in a
@@ -2430,6 +2537,7 @@ setInterval(async () => {
   await fetchSessions();
   detectStateChanges(oldStates, sessions);
   renderDeck();
+  if (renderLastReply()) deferredFit(); // strip appeared/vanished → terminal rows changed
   renderRightPanel();
 }, 3000);
 

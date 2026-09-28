@@ -20,7 +20,7 @@
  * Run: node test/unit/test-doctor.js      Requires: tmux, bash.
  */
 import { spawn, execFileSync } from "child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync, existsSync } from "fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync, existsSync, appendFileSync } from "fs";
 import { tmpdir } from "os";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -270,6 +270,44 @@ async function main() {
   ok(FA("doc-shared-b").level === "green" && /resumes as manual/.test(FA("doc-shared-b").message), `CLI-adopted agent → green "resumes as manual" (${FA("doc-shared-b").level}: ${FA("doc-shared-b").message})`);
   ok(!FA("doc-shared-a").crossCheck && !FA("doc-shared-b").crossCheck, "manual rows pass the decideResume cross-check");
   ok(!JSON.stringify(docA).includes(shASid) && !JSON.stringify(docA).includes(shBSid), "doctor still leaks no adopted session id");
+
+  // ── transcript summary on the wire form (server/transcript.js) ─────────────
+  // An adopted (or correlated) session id is what licenses reading claude's
+  // transcript for an agent; the last prompt/reply then ride /api/sessions as
+  // `transcript` (never persisted, no session id inside). Appending a reply to
+  // the seeded file must show up within a couple of polls; an agent with no
+  // session id (the plain shell agent) never gets a transcript field.
+  console.log("\ntranscript summary via adopted session id");
+  {
+    const file = join(HOME, ".claude", "projects", claudeProjectDir(sharedCwd), `${shASid}.jsonl`);
+    const at = new Date().toISOString();
+    appendFileSync(file, JSON.stringify({ type: "user", sessionId: shASid, cwd: sharedCwd, timestamp: at, message: { role: "user", content: "what is the status?" } }) + "\n"
+      + JSON.stringify({ type: "assistant", sessionId: shASid, cwd: sharedCwd, timestamp: at, message: { id: "msg_1", role: "assistant", content: [{ type: "text", text: "All green.\nDetails below." }] } }) + "\n");
+    let wire = null;
+    const t0 = Date.now();
+    while (Date.now() - t0 < 10000) {
+      const list = await (await fetch(`${BASE}/api/sessions`, { headers: { "x-hadron-token": TOKEN } })).json();
+      wire = list.find((x) => x.id === shA);
+      if (wire?.transcript?.lastReply) break;
+      await sleep(300);
+    }
+    ok(wire?.transcript?.lastReply?.text === "All green.\nDetails below.", `adopted agent's /api/sessions carries transcript.lastReply from claude's file (${JSON.stringify(wire?.transcript?.lastReply?.text)})`);
+    ok(wire?.transcript?.lastPrompt?.text === "what is the status?" && wire.transcript.lastActivityAt === at, "…and lastPrompt + lastActivityAt");
+    ok(!JSON.stringify(wire.transcript).includes(shASid), "transcript summary carries no session id");
+    const list = await (await fetch(`${BASE}/api/sessions`, { headers: { "x-hadron-token": TOKEN } })).json();
+    const shellWire = list.find((x) => x.id === shellId);
+    ok(shellWire && !("transcript" in shellWire), "shell agent (no session id) has no transcript field");
+    // API GETs are open on the bound host; the conversation is not.
+    const anon = await (await fetch(`${BASE}/api/sessions`)).json();
+    ok(anon.every((x) => !("transcript" in x)), "GET /api/sessions without the token carries no transcript for any agent");
+    const fullAnon = await fetch(`${BASE}/api/sessions/${shA}/transcript`);
+    ok(fullAnon.status === 401, `GET /api/sessions/:id/transcript without the token → 401 (${fullAnon.status})`);
+    const full = await (await fetch(`${BASE}/api/sessions/${shA}/transcript`, { headers: { "x-hadron-token": TOKEN } })).json();
+    ok(full?.lastReply?.text === "All green.\nDetails below." && !JSON.stringify(full).includes(shASid), "…with the token: full summary, no session id");
+    const docTx = await (await fetch(`${BASE}/api/doctor`, { headers: { "x-hadron-token": TOKEN } })).json();
+    ok(docTx.agents.find((a) => a.id === shA)?.transcriptPreview === "ok" && docTx.agents.find((a) => a.id === shellId)?.transcriptPreview === null,
+      "doctor row: transcriptPreview \"ok\" for the adopted agent, null for the shell agent");
+  }
   ok(onDisk(shA).runtime.sessionId === shASid && onDisk(shB).runtime.sessionId === shBSid, "manual ids survived further tracker polls (no scrape demotion)");
 
   // ── disk-seed + restart: a nominally-green row decideResume refuses ───────

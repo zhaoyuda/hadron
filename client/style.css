@@ -2745,3 +2745,32 @@ mark.ann-mark.ann-mark-flash { background: rgba(210, 153, 34, .8); outline: 1px 
   background: var(--bg3); border: 1px solid var(--border);
   border-radius: 3px; padding: 0 4px; font-family: inherit;
 }
+
+/* ── Last reply strip (under the work header) ── */
+#last-reply {
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text2);
+  flex-shrink: 0;
+}
+#last-reply .lr-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 10px;
+  cursor: pointer;
+  min-width: 0;
+}
+#last-reply .lr-head:hover { background: #161b22; }
+#last-reply .lr-meta { color: var(--text3); white-space: nowrap; flex-shrink: 0; }
+#last-reply .lr-line { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#last-reply .lr-toggle { color: var(--text3); margin-left: auto; flex-shrink: 0; }
+#last-reply .lr-full {
+  padding: 4px 10px 8px;
+  max-height: 40vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.45;
+}

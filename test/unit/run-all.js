@@ -20,7 +20,7 @@ const SUITES = [
   "test-state-eval.js", "test-state-machine.js", "test-pane-resolution.js", "test-security.js",
   "test-annotations.js", "test-message.js", "test-upload.js", "test-resume.js", "test-file-revision.js",
   "test-artifacts.js", "test-agent-ops.js", "test-terminal-ws.js", "test-provenance.js",
-  "test-resume-live.js", "test-doctor.js", "test-watchdog.js", "test-cli-flags.js",
+  "test-resume-live.js", "test-doctor.js", "test-watchdog.js", "test-cli-flags.js", "test-transcript.js",
 ];
 
 const results = [];

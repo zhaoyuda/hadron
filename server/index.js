@@ -12,13 +12,15 @@ import { networkInterfaces, hostname, tmpdir } from "os";
 import { URL } from "url";
 import { randomBytes } from "crypto";
 import { StateDetector, isShellCmd, POLL_INTERVAL_MS } from "./state-detector.js";
-import { probeClaudeCaps, RuntimeTracker, performResume, BOOT, isClaudeCmd, decideResume, verifyAdoption } from "./resume.js";
+import { probeClaudeCaps, RuntimeTracker, performResume, BOOT, isClaudeCmd, decideResume, verifyAdoption, UUID_RE } from "./resume.js";
 import { randomUUID } from "crypto";
 import { loadAgents, loadAgent, saveAgent, saveAgentLocked, archiveAgent, deleteAgent, initWorkspace, getWorkspaceDir, appendAgentField, removeAgentArtifact, isSelfWrite } from "./agent-store.js";
 import { resolve } from "path";
 import { tmux, tmuxSafe, isValidId, shellQuoteArgv, tmuxArgv } from "./tmux.js";
 import { syncSkills } from "./skills.js";
 import { collectProvenance } from "./provenance.js";
+import { transcriptPath, readTranscriptSummary, transcriptWire } from "./transcript.js";
+import { warnOnce } from "./log.js";
 import { startHeartbeat } from "./heartbeat.js";
 import {
   listAnnotations, createAnnotation, updateAnnotation, deleteAnnotation,
@@ -619,6 +621,8 @@ app.get("/api/doctor", async (req, res) => {
       if (!d.resume) {
         finding.level = "red";
         finding.message = `would not resume — ${d.reason}`;
+      } else if (transcriptPreviewStatus(session) === "unreadable") {
+        finding.message += " · transcript file unreadable (no last-reply preview)";
       }
     }
     return {
@@ -639,6 +643,7 @@ app.get("/api/doctor", async (req, res) => {
       restoreState: safeRestoreState(rt.restoreAttempt ? rt.restoreAttempt.state : null),
       lastObservedAt: safeTimestamp(rt.lastObservedAt, now),
       lastPersistedAt: safeTimestamp(rt.lastPersistedAt, now),
+      transcriptPreview: transcriptPreviewStatus(session),
       finding,
     };
   });
@@ -690,7 +695,16 @@ app.get("/api/sessions", (req, res) => {
     if (aSort !== bSort) return aSort - bSort;
     return a.id.localeCompare(b.id);
   });
-  res.json(sorted.map(resolvedSession));
+  const withTranscript = tokenPresent(req);
+  res.json(sorted.map((s) => resolvedSession(s, { withTranscript })));
+});
+
+// Full last prompt/reply text for one agent (the list carries WIRE_TEXT chars).
+app.get("/api/sessions/:id/transcript", (req, res) => {
+  if (!tokenPresent(req)) return res.status(401).json({ error: "invalid or missing token" });
+  const s = sessions.get(req.params.id);
+  if (!s || s.archived) return res.status(404).json({ error: "agent not found" });
+  res.json(s.transcript || null);
 });
 
 // The wire form of a session: stored artifact values are canonical (workspace-
@@ -698,9 +712,16 @@ app.get("/api/sessions", (req, res) => {
 // sees them resolved to absolute. Every endpoint that hands a session (or its
 // artifacts) to the client goes through this, so the client-side identity of an
 // artifact is ONE form.
-function resolvedSession(s) {
+// `transcript` (the agent's last prompt/reply, see pollTranscripts) rides the
+// list only for a token-bearing reader — API GETs are otherwise open on the
+// bound host, and the conversation is not for anyone who can reach the port —
+// and only in its short form (transcriptWire); the full text is
+// GET /api/sessions/:id/transcript.
+function resolvedSession(s, { withTranscript = false } = {}) {
+  const { transcript, ...rest } = s;
   return {
-    ...s,
+    ...rest,
+    ...(withTranscript && transcript ? { transcript: transcriptWire(transcript) } : {}),
     artifacts: (s.artifacts || []).map(a => ({
       ...a,
       value: a.value ? resolveFilePath(a.value) : a.value
@@ -723,7 +744,8 @@ app.get("/api/whoami", (req, res) => {
   const id = agentIdFromSuffix(sessionName.slice(TMUX_PREFIX.length + 1));
   const session = sessions.get(id);
   if (!session) return res.status(404).json({ error: "agent not found", id });
-  res.json(session);
+  const { transcript, ...rest } = session; // the agent's own conversation isn't whoami data (open GET)
+  res.json(rest);
 });
 
 app.get("/api/sessions/archived", (req, res) => {
@@ -1977,7 +1999,49 @@ function stopMonitor(sessionId) {
   runtimeTrackers.delete(sessionId);
   clearTimeout(runtimeSaveTimers.get(sessionId));
   runtimeSaveTimers.delete(sessionId);
+  transcriptCaches.delete(sessionId);
 }
+
+// ── Transcript summaries (last prompt / last reply / activity) ─────────────
+// Read from claude's own transcript for every monitored agent whose session id
+// the resume machinery correlated or the operator adopted (session.runtime.
+// sessionId — never attributed by cwd alone; see server/transcript.js). Served
+// as `transcript` on the wire form, never persisted, no session id inside.
+// One stat per agent per poll; the tail is re-read only when the file changed.
+const TRANSCRIPT_POLL_MS = 3000;
+const transcriptCaches = new Map(); // agent id -> { file, size, mtimeMs, summary }
+function pollTranscripts() {
+  for (const id of monitors.keys()) {
+    const s = sessions.get(id);
+    if (!s) { transcriptCaches.delete(id); continue; }
+    const sid = s.runtime?.sessionId;
+    if (s.archived || !s.cwd || typeof sid !== "string" || !UUID_RE.test(sid)) {
+      delete s.transcript;
+      transcriptCaches.delete(id);
+      continue;
+    }
+    const file = transcriptPath(s.cwd, sid);
+    let c = transcriptCaches.get(id);
+    if (!c || c.file !== file) { c = { file }; transcriptCaches.set(id, c); }
+    const summary = readTranscriptSummary(file, c);
+    if (summary) { s.transcript = summary; continue; }
+    delete s.transcript;
+    // Silent-failure rule: a checkpointed session whose transcript can't be read
+    // (deleted/rotated, cwd mapping to another claude project dir, EACCES) turns
+    // the preview off without breaking anything — warn once per agent and let
+    // `hadron doctor` show it (transcriptPreview on the row). No session id in
+    // the message: the directory is enough to look.
+    warnOnce(`transcript:${id}`, `[${id}] transcript for the checkpointed session is unreadable under ${dirname(file)} — last-reply preview off`);
+  }
+}
+// For `hadron doctor`: "ok" | "unreadable" | null (no checkpointed session).
+function transcriptPreviewStatus(session) {
+  const c = transcriptCaches.get(session.id);
+  if (!c) return null;
+  return session.transcript ? "ok" : "unreadable";
+}
+const transcriptTimer = setInterval(pollTranscripts, TRANSCRIPT_POLL_MS);
+transcriptTimer.unref();
 
 // ═══ WebSocket server ═══
 const wss = new WebSocketServer({ noServer: true });
