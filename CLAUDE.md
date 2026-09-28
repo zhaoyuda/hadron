@@ -101,7 +101,8 @@ npm test
 #   + test-security.js      (auth, cwd policy, injection, concurrency over HTTP)
 #   + test-annotations.js / test-message.js / test-upload.js (v0.8 surfaces; message to a
 #                            bare-shell pane is refused 409 unless force — no paste into zsh)
-#   + test-resume.js        (v0.9 auto-resume gate: checkpoint, tombstone, scrape validation;
+#   + test-resume.js        (v0.9 auto-resume gate: checkpoint, tombstone, scrape validation; tracker
+#                            drops a correlated id whose transcript is gone (injectable fileExists);
 #                            pane_current_command "claude.exe" (macOS) normalizes to claude)
 #   + test-file-revision.js (conditional /api/file writes: revision, 409 conflict, atomicity)
 #   + test-artifacts.js     (browse + suggest jail (per-level realpath revalidation, hidden files, no
@@ -149,7 +150,11 @@ npm test
 #                            malformed-id AND exhausted-attempts checkpoints loaded on restart with a live
 #                            pane are demoted green→red by the decideResume cross-check (evaluated against a
 #                            SIMULATED next boot, so "already attempted this boot" can't mask "attempts
-#                            exhausted"); free-string checkpoint fields (confidence/observed/desiredRuntime/
+#                            exhausted"); a VALID correlated id whose transcript file is missing under the
+#                            agent's cwd (doc-nofile — prod 2026-09-28) is red "checkpoint transcript
+#                            missing" before the tracker settles and red "no session id" after it (the
+#                            tracker drops the id, re-scrapes in an exclusive cwd, never in a shared one;
+#                            pinned ids are never re-validated); free-string checkpoint fields (confidence/observed/desiredRuntime/
 #                            restoreState) are allowlisted before emission so a corrupt on-disk value (e.g. a
 #                            token in confidence) can never leak in a field or refusal message; the three
 #                            timestamp fields (cleanExitAt/lastObserved/lastPersistedAt) run through

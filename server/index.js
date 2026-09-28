@@ -12,7 +12,7 @@ import { networkInterfaces, hostname, tmpdir } from "os";
 import { URL } from "url";
 import { randomBytes } from "crypto";
 import { StateDetector, isShellCmd, POLL_INTERVAL_MS } from "./state-detector.js";
-import { probeClaudeCaps, RuntimeTracker, performResume, BOOT, isClaudeCmd, decideResume, verifyAdoption, UUID_RE } from "./resume.js";
+import { probeClaudeCaps, RuntimeTracker, performResume, BOOT, isClaudeCmd, decideResume, verifyAdoption, UUID_RE, PINNED_CONFIDENCE, sessionFileExists, claudeProjectDir } from "./resume.js";
 import { randomUUID } from "crypto";
 import { loadAgents, loadAgent, saveAgent, saveAgentLocked, archiveAgent, deleteAgent, initWorkspace, getWorkspaceDir, appendAgentField, removeAgentArtifact, isSelfWrite } from "./agent-store.js";
 import { resolve } from "path";
@@ -565,6 +565,13 @@ function classifyAgentHealth(session, { paneExists, paneCmd, cwdShared, now }) {
     }
     if (rt.restoreAttempt && rt.restoreAttempt.state === "failed") {
       return { level: "red", message: "last resume failed — claude TUI did not come up" };
+    }
+    // A correlated id whose transcript is gone from the current cwd's project
+    // dir would fail `claude --resume`; the tracker drops it within 5 min (see
+    // RuntimeTracker.observe) — until then, or at a boot before it settles,
+    // say so instead of green. Pinned ids are exempt (file appears on first turn).
+    if (!PINNED_CONFIDENCE.has(rt.confidence) && session.cwd && UUID_RE.test(String(rt.sessionId)) && !sessionFileExists(session.cwd, rt.sessionId)) {
+      return { level: "red", message: `checkpoint transcript missing under ${claudeProjectDir(session.cwd)} — \`claude --resume\` would fail; the tracker drops the id at its next check, then re-scrapes (or run \`hadron adopt <agent> --session-id <uuid>\`)` };
     }
     return { level: "green", message: `resumes as ${safeConfidence(rt.confidence) || "ambiguous"}` };
   }

@@ -173,6 +173,59 @@ console.log("\n[RuntimeTracker — manual (hadron adopt) id is never demoted; un
   ok(calls === 0 && !noCwd.runtime.sessionId, `unset cwd → scrape never called, no id (calls=${calls})`);
 }
 
+console.log("\n[RuntimeTracker — a correlated id whose transcript is gone is dropped (prod 2026-09-28: two green agents that could not resume)]");
+{
+  const oldId = "11111111-2222-4333-8444-555555555555";
+  const newId = "33333333-4444-4555-8666-777777777777";
+  let scrapes = 0;
+  const scrape = () => { scrapes++; return { sessionId: newId, confidence: "correlated" }; };
+  const settle = (tr) => { tr.observe("claude"); tr.observe("claude"); tr.observe("claude"); };
+  // Exclusive cwd, file gone: drop, then the scrape refills with the current session.
+  const corr = { id: "c1", cwd: "/some/cwd", runtime: { sessionId: oldId, confidence: "correlated" } };
+  settle(new RuntimeTracker(corr, { save: () => {}, cwdShared: () => false, scrape, fileExists: () => false }));
+  ok(corr.runtime.sessionId === newId && corr.runtime.confidence === "correlated" && scrapes === 1, "exclusive cwd: stale correlated id dropped and re-scraped in the same poll");
+  // Urgency: the settle poll is urgent on its own, so prove the flag on a LATER
+  // poll — the file vanishes after settle, the 5-min clock is forced due, and
+  // that one save must be urgent (a bare heartbeat rides the 30 s trailing write;
+  // a crash in that window would reboot on the checkpoint just proven a lie).
+  {
+    let exists = true;
+    const saves = [];
+    const late = { id: "c1b", cwd: "/some/cwd", runtime: { sessionId: oldId, confidence: "correlated" } };
+    const tr = new RuntimeTracker(late, { save: (s, u) => saves.push(!!u), cwdShared: () => true, scrape, fileExists: () => exists });
+    settle(tr);
+    saves.length = 0;
+    tr.observe("claude");
+    ok(saves.length === 1 && saves[0] === false && late.runtime.sessionId === oldId, "control: a later poll with the file present is a plain heartbeat (not urgent)");
+    exists = false;
+    tr.observe("claude");
+    ok(late.runtime.sessionId === oldId, "…and the check runs on its own 5-min clock, not every poll");
+    tr.lastCheckAt = 0;
+    saves.length = 0;
+    tr.observe("claude");
+    ok(late.runtime.sessionId === null && saves.length === 1 && saves[0] === true, "drop on a later poll is persisted urgently");
+  }
+  // Shared cwd, file gone: drop and stay empty — never a sibling's session.
+  scrapes = 0;
+  const shared = { id: "c2", cwd: "/some/cwd", runtime: { sessionId: oldId, confidence: "correlated" } };
+  settle(new RuntimeTracker(shared, { save: () => {}, cwdShared: () => true, scrape, fileExists: () => false }));
+  ok(shared.runtime.sessionId === null && !("confidence" in shared.runtime) && scrapes === 0, "shared cwd: stale id dropped, no scrape, no id (doctor goes red 'no session id')");
+  // File present: untouched (control).
+  const fine = { id: "c3", cwd: "/some/cwd", runtime: { sessionId: oldId, confidence: "correlated" } };
+  settle(new RuntimeTracker(fine, { save: () => {}, cwdShared: () => true, scrape, fileExists: () => true }));
+  ok(fine.runtime.sessionId === oldId, "control: a correlated id whose file exists is kept");
+  // Pinned ids are never re-validated: Hadron chose them; the file appears on the first turn.
+  for (const conf of ["authoritative", "manual"]) {
+    const pinned = { id: `p-${conf}`, cwd: "/some/cwd", runtime: { sessionId: oldId, confidence: conf } };
+    settle(new RuntimeTracker(pinned, { save: () => {}, cwdShared: () => false, scrape, fileExists: () => false }));
+    ok(pinned.runtime.sessionId === oldId && pinned.runtime.confidence === conf, `${conf} id survives a missing file`);
+  }
+  // A malformed id is not this check's business (decideResume reports it).
+  const bad = { id: "c4", cwd: "/some/cwd", runtime: { sessionId: "not-a-uuid", confidence: "correlated" } };
+  settle(new RuntimeTracker(bad, { save: () => {}, cwdShared: () => true, scrape, fileExists: () => false }));
+  ok(bad.runtime.sessionId === "not-a-uuid", "malformed id left for decideResume to report, not silently dropped");
+}
+
 console.log("\n[performResume — resumes through the agent's launcher argv]");
 {
   // deliver mock throws after recording: aborts before the 60s TUI poll loop,
@@ -188,6 +241,18 @@ console.log("\n[performResume — resumes through the agent's launcher argv]");
     return calls;
   };
   ok((await run(["cc-kimi"]))[0] === `cc-kimi --resume ${SID}`, "claude-kind wrapper argv resumes through the wrapper, not bare claude");
+  // Doctor and the decider agree: a correlated id with no transcript under the
+  // agent's cwd is refused before anything is typed into the pane.
+  for (const [conf, want] of [["correlated", false], ["authoritative", true], ["manual", true]]) {
+    const sess = { id: "y", cwd: "/some/cwd", runtime: { ...base, confidence: conf, lastObservedAt: new Date(Date.now() - 60_000).toISOString() } };
+    const calls = [];
+    const r = await performResume(sess, "tmux-y", {
+      deliver: (t, text) => { calls.push(text); throw new Error("abort-after-deliver"); },
+      save: () => {}, generation: "boot-pr-test", log: () => {}, fileExists: () => false,
+    }).catch(() => null);
+    ok(want ? calls.length === 1 : (calls.length === 0 && r?.reason === "transcript missing" && !sess.runtime.restoreAttempt),
+      `${conf} id, transcript missing → ${want ? "resumes anyway (pinned)" : "refused, no attempt burned"}`);
+  }
   ok((await run(null))[0] === `claude --resume ${SID}`, "default launchArgv stays bare claude");
   ok((await run(["cc-kimi", "--profile", "two words"]))[0] === `cc-kimi --profile 'two words' --resume ${SID}`,
     "argv boundaries survive resume (spaced element single-quoted)");

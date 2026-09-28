@@ -120,6 +120,17 @@ export function validateSessionFile(file, expectSessionId, expectCwd) {
   return false;
 }
 
+// Does the transcript for a checkpointed id still exist under the agent's
+// CURRENT cwd? A correlated id is only as good as that file: claude deletes
+// old transcripts (cleanupPeriodDays), and an agent that scraped its id while
+// cd'd elsewhere carries an id whose file lives under another project dir —
+// `claude --resume` fails for both. (Seen on prod 2026-09-28: two green
+// "resumes as correlated" agents whose files were gone.)
+export function sessionFileExists(cwd, sessionId, { projectsRoot = join(homedir(), ".claude", "projects") } = {}) {
+  if (!cwd || typeof sessionId !== "string" || !UUID_RE.test(sessionId)) return false;
+  return existsSync(join(projectsRoot, claudeProjectDir(cwd), `${sessionId}.jsonl`));
+}
+
 // Newest transcript in the agent-cwd's project dir, content-validated.
 // Returns {sessionId, confidence} or null. Never returns an unvalidated guess.
 export function scrapeSessionId(cwd, { projectsRoot = join(homedir(), ".claude", "projects") } = {}) {
@@ -191,10 +202,11 @@ function warnClaudeish(cmd, agentId) {
 const SETTLE_POLLS = 3; // claude must be foreground this long before we track it
 
 export class RuntimeTracker {
-  constructor(session, { save, cwdShared, scrape = scrapeSessionId }) {
+  constructor(session, { save, cwdShared, scrape = scrapeSessionId, fileExists = sessionFileExists }) {
     this.session = session;
     this.save = save; // (session, urgent) => void — urgent flushes immediately
     this.scrape = scrape; // (cwd) => { sessionId, confidence } | null — injectable for tests
+    this.fileExists = fileExists; // (cwd, sessionId) => boolean — injectable for tests
     // cwdShared(): does any OTHER agent share this agent's cwd right now?
     // Shared-cwd transcripts validate identically for every sharer (the head
     // only proves the cwd, not which agent owns the session), so scraping
@@ -202,6 +214,7 @@ export class RuntimeTracker {
     this.cwdShared = cwdShared || (() => false);
     this.claudePolls = 0;
     this.lastScrapeAt = 0;
+    this.lastCheckAt = 0; // last transcript-exists validation of a correlated id
   }
 
   // Called from the state detector's poll with the pane's foreground command.
@@ -237,9 +250,26 @@ export class RuntimeTracker {
         if (shared && !rt.sessionId) {
           warnOnce(`sharedcwd:${this.session.id}`, `[resume] agent ${this.session.id}: cwd ${JSON.stringify(this.session.cwd || null)} is shared with another agent (or unset) — its claude session id cannot be scraped, auto-resume is off for it until it is launched by Hadron with --session-id`);
         }
+        const due = !rt.sessionId || now - this.lastScrapeAt > 5 * 60 * 1000;
+        // Re-validate a correlated id every 5 min (its own clock — a shared cwd
+        // never advances lastScrapeAt): its transcript must still exist under
+        // the CURRENT cwd, or the checkpoint is a lie that `hadron doctor` would
+        // show green and a reboot would fail on. Drop it (a fresh scrape follows
+        // when the cwd is exclusive; a shared cwd goes red "no session id" —
+        // honest, and `hadron adopt` fixes it). Pinned ids are never touched:
+        // Hadron chose them, and the file appears only once claude writes the
+        // first turn.
+        const checkDue = now - this.lastCheckAt > 5 * 60 * 1000;
+        if (checkDue && UUID_RE.test(String(rt.sessionId)) && !PINNED_CONFIDENCE.has(rt.confidence) && this.session.cwd) this.lastCheckAt = now;
+        if (checkDue && UUID_RE.test(String(rt.sessionId)) && !PINNED_CONFIDENCE.has(rt.confidence) && this.session.cwd && !this.fileExists(this.session.cwd, rt.sessionId)) {
+          warnOnce(`stalesid:${this.session.id}`, `[resume] agent ${this.session.id}: the correlated session's transcript no longer exists under ${claudeProjectDir(this.session.cwd)} (deleted, or scraped while the pane was in another cwd) — checkpoint dropped${shared ? "; cwd is shared, so it cannot be re-scraped: run `hadron adopt <agent> --session-id <uuid>`" : ", re-scraping"}`);
+          rt.sessionId = null;
+          delete rt.confidence;
+          urgent = true;
+        }
         // cwdShared() already returns true for an unset cwd (the server's own
         // cwd would attribute a foreign transcript), so no process.cwd() fallback.
-        if ((!rt.sessionId || now - this.lastScrapeAt > 5 * 60 * 1000) && !shared && this.session.cwd) {
+        if (due && !shared && this.session.cwd) {
           this.lastScrapeAt = now;
           const hit = this.scrape(this.session.cwd);
           // Never demote an authoritative or manually adopted id with a scrape guess.
@@ -310,10 +340,18 @@ export function readyPollsFrom(raw) {
 }
 const READY_POLLS = readyPollsFrom(process.env.HADRON_RESUME_READY_POLLS);
 
-export async function performResume(session, tmuxName, { deliver, save, generation = BOOT_GENERATION, log = console.log, launchArgv = ["claude"], readyPolls = READY_POLLS }) {
+export async function performResume(session, tmuxName, { deliver, save, generation = BOOT_GENERATION, log = console.log, launchArgv = ["claude"], readyPolls = READY_POLLS, fileExists = sessionFileExists }) {
   const rt = session.runtime;
   const decision = decideResume(rt, { generation });
   if (!decision.resume) return decision;
+  // Same check `hadron doctor` makes (doctor must never disagree with the code
+  // that decides): a correlated id whose transcript is gone from the agent's cwd
+  // would burn the 60 s readiness wait and an attempt on a `--resume` that
+  // cannot succeed. Pinned ids are exempt — Hadron chose them before any file.
+  if (!PINNED_CONFIDENCE.has(rt.confidence) && session.cwd && !fileExists(session.cwd, decision.sessionId)) {
+    log(`[resume] ${session.id}: not resuming — the correlated session's transcript is missing under ${claudeProjectDir(session.cwd)}`);
+    return { resume: false, reason: "transcript missing" };
+  }
 
   rt.restoreAttempt = { generation, state: "started", attempts: (rt.restoreAttempt?.attempts || 0) + 1, at: new Date().toISOString() };
   save(session);

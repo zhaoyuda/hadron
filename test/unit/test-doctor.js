@@ -52,7 +52,7 @@ const FIX = join(T, "bin");
 const WS = join(T, "ws");
 const ARGV_LOG = join(T, "argv.log");
 const WS_NAME = WS.split("/").pop().replace(/[^a-zA-Z0-9_-]/g, "");
-for (const d of [HOME, FIX, WS, join(WS, "shell"), join(WS, "green"), join(WS, "shared"), join(WS, "untracked"), join(WS, "seed"), join(WS, "exhausted"), join(WS, "badconf"), join(WS, "badts")]) mkdirSync(d, { recursive: true });
+for (const d of [HOME, FIX, WS, join(WS, "shell"), join(WS, "green"), join(WS, "shared"), join(WS, "untracked"), join(WS, "seed"), join(WS, "exhausted"), join(WS, "badconf"), join(WS, "badts"), join(WS, "nofile")]) mkdirSync(d, { recursive: true });
 writeFileSync(join(HOME, ".profile"), `export PATH="${FIX}:$PATH"\n`);
 writeFileSync(join(HOME, ".bashrc"), `export PATH="${FIX}:$PATH"\n`);
 mkdirSync(join(WS, ".hadron"), { recursive: true });
@@ -351,11 +351,21 @@ async function main() {
   const bcId = await createAgent("doc-badconf", bcCwd);
   const btCwd = join(WS, "badts");
   const btId = await createAgent("doc-badts", btCwd);   // stays a bare shell (no claude launched)
+  //   doc-nofile    — a VALID correlated checkpoint whose transcript does not exist
+  //     under the agent's cwd (claude cleaned it up, or it was scraped while the
+  //     pane was cd'd elsewhere — prod 2026-09-28, two agents). `claude --resume`
+  //     would fail. Doctor must red it before the tracker settles, and the
+  //     tracker must drop the id at settle (exclusive cwd, nothing to re-scrape →
+  //     red "no session id"), so the on-disk checkpoint stops lying.
+  const nfCwd = join(WS, "nofile");
+  const nfId = await createAgent("doc-nofile", nfCwd);
   await sleep(1500);
   sendLine(seedId, "claude");
   sendLine(exhId, "claude");
   sendLine(bcId, "claude");
+  sendLine(nfId, "claude");
   await sleep(6000);
+  ok(paneCmd(nfId) === "claude", `nofile pane is claude (${paneCmd(nfId)})`);
   ok(paneCmd(seedId) === "claude", `seed pane is claude (${paneCmd(seedId)})`);
   ok(paneCmd(exhId) === "claude", `exhausted pane is claude (${paneCmd(exhId)})`);
   ok(paneCmd(bcId) === "claude", `badconf pane is claude (${paneCmd(bcId)})`);
@@ -364,8 +374,11 @@ async function main() {
   await killServer();
   // Overwrite the on-disk runtimes with the inconsistent checkpoints. The panes
   // survive on the private tmux socket, so the reboot sees created=false (no
-  // auto-resume overwrite) and — no transcript in either cwd — the settling
-  // tracker cannot scrape a real id over the seeds.
+  // auto-resume overwrite). doc-seed has no transcript (its id is malformed, the
+  // tracker's file check skips it); doc-exhausted/doc-badconf carry a seeded
+  // transcript for their VALID id so the file check keeps it — the exclusive-cwd
+  // scrape then finds that same id and the `rt.sessionId !== hit.sessionId`
+  // guard leaves the seeded fields (attempts, corrupt confidence) untouched.
   const seedNow = new Date().toISOString();
   const seedDisk = onDisk(seedId);
   seedDisk.runtime = {
@@ -396,6 +409,7 @@ async function main() {
     restoreAttempt: { generation: "boot-doctor", attempts: 3, state: "ready", at: seedNow },
   };
   writeFileSync(join(WS, ".hadron", "agents", `${exhId}.json`), JSON.stringify(exhDisk, null, 2));
+  seedTranscript(exhCwd, exhSid); // the id is real: only the attempts are the defect
 
   const bcSid = randomUUID();
   const badConfToken = `leaked-secret-${randomUUID()}`; // a corrupt confidence value doctor must never echo
@@ -411,6 +425,21 @@ async function main() {
     lastPersistedAt: seedNow,
   };
   writeFileSync(join(WS, ".hadron", "agents", `${bcId}.json`), JSON.stringify(bcDisk, null, 2));
+  seedTranscript(bcCwd, bcSid); // the id is real: only the confidence is the defect
+
+  const nfSid = randomUUID(); // valid, correlated, and NO transcript under nfCwd
+  const nfDisk = onDisk(nfId);
+  nfDisk.runtime = {
+    ...(nfDisk.runtime || {}),
+    desiredRuntime: "claude",
+    observedRuntime: "claude",
+    cleanExitAt: null,
+    sessionId: nfSid,
+    confidence: "correlated",
+    lastObservedAt: seedNow,
+    lastPersistedAt: seedNow,
+  };
+  writeFileSync(join(WS, ".hadron", "agents", `${nfId}.json`), JSON.stringify(nfDisk, null, 2));
 
   // Untrusted timestamp fields on a shell pane (tracker won't heal them). Two
   // non-parseable tokens + one materially-future value; doctor must emit all
@@ -434,7 +463,19 @@ async function main() {
   bootServer({ XPC_SERVICE_NAME: "com.example.hadron" });
   await waitForServer();
   TOKEN = readFileSync(join(WS, ".hadron", "token"), "utf-8").trim();
-  await sleep(6000); // let the tracker re-settle on the still-live panes (no transcript → keeps the seeds)
+  // Before the tracker settles (3 one-second polls; this fetch follows the
+  // health probe immediately), the doctor's own file check must already refuse
+  // to call the missing-transcript checkpoint green — strictly its message, so
+  // the classifier branch cannot be deleted behind the tracker's later drop.
+  const docEarly = await (await fetch(`${BASE}/api/doctor`, { headers: { "x-hadron-token": TOKEN } })).json();
+  const nfEarly = docEarly.agents.find((a) => a.name === "doc-nofile")?.finding || {};
+  ok(nfEarly.level === "red" && /checkpoint transcript missing/.test(nfEarly.message),
+    `missing-transcript checkpoint is never green, even before the tracker settles (${nfEarly.level}: ${nfEarly.message})`);
+  await sleep(6000); // let the tracker re-settle on the still-live panes (seeded transcripts → keeps those seeds)
+  const nfRow = (await (await fetch(`${BASE}/api/doctor`, { headers: { "x-hadron-token": TOKEN } })).json()).agents.find((a) => a.name === "doc-nofile") || {};
+  ok(nfRow.finding?.level === "red" && /no session id \(scrape found nothing/.test(nfRow.finding?.message) && nfRow.hasCheckpointId === false,
+    `after settle the tracker dropped the stale id: red "no session id", hasCheckpointId=false (${nfRow.finding?.level}: ${nfRow.finding?.message})`);
+  ok(onDisk(nfId).runtime.sessionId === null, "…and the on-disk checkpoint no longer carries the dead id");
 
   const doc2 = await (await fetch(`${BASE}/api/doctor`, { headers: { "x-hadron-token": TOKEN } })).json();
   const seedFinding = doc2.agents.find((a) => a.name === "doc-seed")?.finding || {};
@@ -449,7 +490,7 @@ async function main() {
     `corrupt-confidence checkpoint → red with SANITIZED reason (${bcFinding.level}: ${bcFinding.message})`);
   ok(bcRow.confidence === "invalid", `corrupt confidence is emitted as "invalid", not the raw token (${bcRow.confidence})`);
   const seedRaw = JSON.stringify(doc2);
-  ok(!/sessionId/.test(seedRaw) && !seedRaw.includes("not-a-uuid") && !seedRaw.includes(exhSid) && !seedRaw.includes(bcSid),
+  ok(!/sessionId/.test(seedRaw) && !seedRaw.includes("not-a-uuid") && !seedRaw.includes(exhSid) && !seedRaw.includes(bcSid) && !seedRaw.includes(nfSid),
     "reboot doctor response still leaks no session id (key or value, malformed or valid)");
   ok(!seedRaw.includes(badConfToken) && !seedRaw.includes("leaked-secret"),
     "reboot doctor response never echoes the corrupt confidence token");
