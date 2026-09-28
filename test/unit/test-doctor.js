@@ -52,7 +52,7 @@ const FIX = join(T, "bin");
 const WS = join(T, "ws");
 const ARGV_LOG = join(T, "argv.log");
 const WS_NAME = WS.split("/").pop().replace(/[^a-zA-Z0-9_-]/g, "");
-for (const d of [HOME, FIX, WS, join(WS, "shell"), join(WS, "green"), join(WS, "shared"), join(WS, "untracked"), join(WS, "seed"), join(WS, "exhausted"), join(WS, "badconf"), join(WS, "badts"), join(WS, "nofile")]) mkdirSync(d, { recursive: true });
+for (const d of [HOME, FIX, WS, join(WS, "shell"), join(WS, "green"), join(WS, "shared"), join(WS, "untracked"), join(WS, "seed"), join(WS, "exhausted"), join(WS, "badconf"), join(WS, "badts"), join(WS, "nofile"), join(WS, "pinmiss"), join(WS, "pinnew")]) mkdirSync(d, { recursive: true });
 writeFileSync(join(HOME, ".profile"), `export PATH="${FIX}:$PATH"\n`);
 writeFileSync(join(HOME, ".bashrc"), `export PATH="${FIX}:$PATH"\n`);
 mkdirSync(join(WS, ".hadron"), { recursive: true });
@@ -150,6 +150,34 @@ function seedTranscript(cwd, sid) {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, `${sid}.jsonl`), JSON.stringify({ type: "summary", sessionId: sid, cwd }) + "\n" + JSON.stringify({ type: "user", sessionId: sid, cwd, message: { role: "user", content: "hi" } }) + "\n");
 }
+// Claude's session registry (~/.claude/sessions/<pid>.json, under the test
+// HOME) — written here exactly as claude writes it for a live process: the
+// fixture claude's own pid + kernel start time, and the pane's exact
+// `session:@window.%pane` target. The fixture is `exec -a claude sleep`, so
+// argv[0] is claude (what tmux and processIdentity both read) and the pid is
+// the pane shell's child.
+const REG = join(HOME, ".claude", "sessions");
+function fixturePid(id) {
+  const panePid = tmuxSafe(["display-message", "-t", paneOf(id), "-p", "#{pane_pid}"]);
+  const kids = readFileSync(`/proc/${panePid}/task/${panePid}/children`, "utf-8").trim().split(/\s+/).filter(Boolean);
+  const claude = kids.find((k) => { try { return readFileSync(`/proc/${k}/cmdline`, "utf-8").split("\0")[0] === "claude"; } catch { return false; } });
+  if (!claude) throw new Error(`no claude child under pane pid ${panePid} (children: ${kids.join(",")})`);
+  return Number(claude);
+}
+function procStartOf(pid) {
+  const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+  return Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19]);
+}
+function writeRegistryRecord(id, sid, { pid = fixturePid(id), procStart = procStartOf(pid), tmux = `${paneOf(id)}:${tmuxSafe(["display-message", "-t", paneOf(id), "-p", "#{window_id}.#{pane_id}"])}` } = {}) {
+  mkdirSync(REG, { recursive: true });
+  // pidDomain as claude writes it: linux:<machine-id>:pid:[<ns>] — a machine id, NOT the boot id
+  writeFileSync(join(REG, `${pid}.json`), JSON.stringify({
+    pid, procStart, pidDomain: `linux:${randomUUID().replace(/-/g, "")}:pid:[4026531836]`, sessionId: sid, cwd: onDisk(id).cwd, tmux,
+    status: "idle", updatedAt: new Date().toISOString(), startedAt: new Date().toISOString(), version: "2.1.283", kind: "interactive", entrypoint: "cli",
+  }, null, 2));
+  return pid;
+}
+
 // Run the REAL CLI. cwd=WS so it finds .hadron/{token,runtime.json}; token+port
 // via env so discovery never depends on a running server for the down-case.
 function runCli(args, { withServer = true } = {}) {
@@ -185,15 +213,31 @@ async function main() {
   const shB = await createAgent("doc-shared-b", sharedCwd);
 
   const untrackedId = await createAgent("doc-untracked", join(WS, "untracked"));
+  // doc-registry: a THIRD claude in the shared cwd — unscrapable like its
+  // siblings, but claude's session registry names its pane, so the tracker
+  // takes the id from there (confidence registry) and doctor goes green.
+  const regSid = randomUUID();
+  seedTranscript(sharedCwd, regSid);
+  const regId = await createAgent("doc-registry", sharedCwd);
 
   await sleep(1500);
   sendLine(greenId, "claude");
   sendLine(shA, "claude");
   sendLine(shB, "claude");
   sendLine(untrackedId, "claude.exe");
+  sendLine(regId, "claude");
   // green must reach a scraped sessionId; the others just need to settle (~3 polls)
   await waitDisk(greenId, (a) => a.runtime?.sessionId, 12000);
   await sleep(6000);
+  ok(paneCmd(regId) === "claude" && !onDisk(regId).runtime?.sessionId, `registry agent settled with no id (shared cwd, no record yet) (${paneCmd(regId)})`);
+  const regPid = writeRegistryRecord(regId, regSid);
+  // a record for the GREEN agent's pane whose pid is gone: must read as stale, never matched
+  const deadPid = (() => { const r = execFileSync("bash", ["-c", "sleep 0.01 & echo $!"], { encoding: "utf-8" }).trim(); return Number(r); })();
+  execFileSync("sleep", ["0.3"]);
+  writeRegistryRecord(greenId, randomUUID(), { pid: deadPid, procStart: 1 });
+  const regDisk = await waitDisk(regId, (a) => a.runtime?.confidence === "registry", 15000);
+  ok(regDisk.runtime?.sessionId === regSid && regDisk.runtime?.confidence === "registry", `tracker took the registry's id for the shared-cwd agent within the no-id poll interval (confidence ${regDisk.runtime?.confidence})`);
+  ok(onDisk(greenId).runtime?.confidence === "correlated", "a stale record (dead pid) never replaced the green agent's scraped id");
 
   ok(paneCmd(greenId) === "claude", `green pane is claude (${paneCmd(greenId)})`);
   ok(paneCmd(untrackedId) === "claude.exe", `untracked pane is claude.exe (${paneCmd(untrackedId)})`);
@@ -221,6 +265,14 @@ async function main() {
   const sharedFinding = F("doc-shared-a").level === "red" ? F("doc-shared-a") : F("doc-shared-b");
   ok(sharedFinding.level === "red" && /shared cwd/.test(sharedFinding.message), `shared-cwd claude → red "shared cwd" (${sharedFinding.level}: ${sharedFinding.message})`);
   ok(F("doc-untracked").level === "red" && /untracked/.test(F("doc-untracked").message), `claude.exe (recognition disabled) → red "untracked" (${F("doc-untracked").level}: ${F("doc-untracked").message})`);
+  ok(F("doc-registry").level === "green" && /resumes as registry/.test(F("doc-registry").message) && !F("doc-registry").crossCheck, `registry-named shared-cwd claude → green "resumes as registry" (${F("doc-registry").level}: ${F("doc-registry").message})`);
+  ok(byName["doc-registry"].registry === "matched" && byName["doc-registry"].confidence === "registry", `row: registry=matched, confidence=registry (${byName["doc-registry"].registry}/${byName["doc-registry"].confidence})`);
+  ok(byName["doc-registry"].registryAgrees === true && byName["doc-green"].registryAgrees === null && byName["doc-shell"].registryAgrees === null, `registryAgrees: true when matched with the checkpoint id, null otherwise (${byName["doc-registry"].registryAgrees}/${byName["doc-green"].registryAgrees})`);
+  ok(byName["doc-green"].registry === "stale", `row: green agent's dead-pid record reads as registry=stale (${byName["doc-green"].registry})`);
+  ok(sharedFinding && /session registry has no record for this pane/.test(sharedFinding.message) && (byName["doc-shared-a"].registry === "none" || byName["doc-shared-b"].registry === "none"), "shared-cwd red row says the registry had no record before blaming the scrape; row registry=none");
+  ok(byName["doc-shell"].registry === null, "a shell pane has registry=null (not consulted)");
+  ok(doc.sessionRegistry && doc.sessionRegistry.available === true && doc.sessionRegistry.entries === 2 && typeof doc.sessionRegistry.root === "string", `payload summarises the registry: available, 2 records (${JSON.stringify(doc.sessionRegistry)})`);
+  ok(!raw.includes(regSid) && !raw.includes(String(regPid)), "doctor response leaks neither the registry session id nor the pid");
 
   // PATH column: fresh-shell PATH resolves `claude` to the fixture
   ok(byName["doc-green"].pathResolvesClaudeTo === join(FIX, "claude"), `green pathResolvesClaudeTo = fixture claude (${byName["doc-green"].pathResolvesClaudeTo})`);
@@ -232,9 +284,11 @@ async function main() {
   console.log("\nCLI hadron doctor");
   const cli = runCli(["doctor"]);
   ok(cli.code === 1, `hadron doctor exits 1 when red rows exist (exit ${cli.code})`);
-  ok(/no session id \(shared cwd/.test(cli.stdout), "CLI output shows the shared-cwd red row");
+  ok(/no session id \(.*shared cwd cannot be scraped/.test(cli.stdout), "CLI output shows the shared-cwd red row");
   ok(/untracked/.test(cli.stdout), "CLI output shows the untracked red row");
   ok(/resumes as correlated/.test(cli.stdout), "CLI output shows the green row");
+  ok(/resumes as registry/.test(cli.stdout) && /· registry: matched/.test(cli.stdout) && /^registry \d+ live claude records in /m.test(cli.stdout), "CLI shows the registry-green row, per-row registry status and the registry header line");
+  ok(!cli.stdout.includes(regSid), "CLI leaks no registry session id");
   ok(/will NOT restart after a reboot/.test(cli.stdout), "CLI flags the hand-started server as red (won't survive reboot)");
   ok(/tmux session PATH resolves claude to/.test(cli.stdout), "CLI prints the PATH-resolves-claude column for claude panes");
   const cliJson = runCli(["doctor", "--json"]);
@@ -359,13 +413,27 @@ async function main() {
   //     red "no session id"), so the on-disk checkpoint stops lying.
   const nfCwd = join(WS, "nofile");
   const nfId = await createAgent("doc-nofile", nfCwd);
+  //   doc-pinmiss   — a MANUAL (pinned) id whose transcript does not exist. The
+  //     identity is kept (never demoted), but it is not resumable: doctor must
+  //     red it and keep the id on disk (astra review 2026-09-28, finding 3).
+  const pmCwd = join(WS, "pinmiss");
+  const pmId = await createAgent("doc-pinmiss", pmCwd);
+  //   doc-pinnew    — a MANUAL id whose transcript was NEVER seen (claude has not
+  //     written the first turn — every Hadron spawn passes through this): yellow,
+  //     not a false alarm (Opus review 2026-09-28, finding 3).
+  const pnCwd = join(WS, "pinnew");
+  const pnId = await createAgent("doc-pinnew", pnCwd);
   await sleep(1500);
   sendLine(seedId, "claude");
   sendLine(exhId, "claude");
   sendLine(bcId, "claude");
   sendLine(nfId, "claude");
+  sendLine(pmId, "claude");
+  sendLine(pnId, "claude");
   await sleep(6000);
   ok(paneCmd(nfId) === "claude", `nofile pane is claude (${paneCmd(nfId)})`);
+  ok(paneCmd(pmId) === "claude", `pinmiss pane is claude (${paneCmd(pmId)})`);
+  ok(paneCmd(pnId) === "claude", `pinnew pane is claude (${paneCmd(pnId)})`);
   ok(paneCmd(seedId) === "claude", `seed pane is claude (${paneCmd(seedId)})`);
   ok(paneCmd(exhId) === "claude", `exhausted pane is claude (${paneCmd(exhId)})`);
   ok(paneCmd(bcId) === "claude", `badconf pane is claude (${paneCmd(bcId)})`);
@@ -441,6 +509,15 @@ async function main() {
   };
   writeFileSync(join(WS, ".hadron", "agents", `${nfId}.json`), JSON.stringify(nfDisk, null, 2));
 
+  const pmSid = randomUUID(); // valid, MANUAL (pinned), transcript SEEN before and NO transcript under pmCwd now
+  const pmDisk = onDisk(pmId);
+  pmDisk.runtime = { ...(pmDisk.runtime || {}), desiredRuntime: "claude", observedRuntime: "claude", cleanExitAt: null, sessionId: pmSid, confidence: "manual", transcriptSeen: true, lastObservedAt: seedNow, lastPersistedAt: seedNow };
+  writeFileSync(join(WS, ".hadron", "agents", `${pmId}.json`), JSON.stringify(pmDisk, null, 2));
+  const pnSid = randomUUID(); // valid, MANUAL, transcript never seen (first turn not written)
+  const pnDisk = onDisk(pnId);
+  pnDisk.runtime = { ...(pnDisk.runtime || {}), desiredRuntime: "claude", observedRuntime: "claude", cleanExitAt: null, sessionId: pnSid, confidence: "manual", lastObservedAt: seedNow, lastPersistedAt: seedNow };
+  writeFileSync(join(WS, ".hadron", "agents", `${pnId}.json`), JSON.stringify(pnDisk, null, 2));
+
   // Untrusted timestamp fields on a shell pane (tracker won't heal them). Two
   // non-parseable tokens + one materially-future value; doctor must emit all
   // three as null and never leak the raw strings.
@@ -473,9 +550,29 @@ async function main() {
     `missing-transcript checkpoint is never green, even before the tracker settles (${nfEarly.level}: ${nfEarly.message})`);
   await sleep(6000); // let the tracker re-settle on the still-live panes (seeded transcripts → keeps those seeds)
   const nfRow = (await (await fetch(`${BASE}/api/doctor`, { headers: { "x-hadron-token": TOKEN } })).json()).agents.find((a) => a.name === "doc-nofile") || {};
-  ok(nfRow.finding?.level === "red" && /no session id \(scrape found nothing/.test(nfRow.finding?.message) && nfRow.hasCheckpointId === false,
+  ok(nfRow.finding?.level === "red" && /no session id \(.*scrape found nothing/.test(nfRow.finding?.message) && nfRow.hasCheckpointId === false,
     `after settle the tracker dropped the stale id: red "no session id", hasCheckpointId=false (${nfRow.finding?.level}: ${nfRow.finding?.message})`);
   ok(onDisk(nfId).runtime.sessionId === null, "…and the on-disk checkpoint no longer carries the dead id");
+  const pmEarly = docEarly.agents.find((a) => a.name === "doc-pinmiss")?.finding || {};
+  ok(pmEarly.level === "red" && /checkpoint transcript missing/.test(pmEarly.message) && /manual id is kept \(its transcript existed before\)/.test(pmEarly.message),
+    `pinned (manual) id whose transcript was seen and is gone → red, identity kept, not resumable (${pmEarly.level}: ${pmEarly.message})`);
+  const pnEarly = docEarly.agents.find((a) => a.name === "doc-pinnew")?.finding || {};
+  ok(pnEarly.level === "yellow" && /identity known \(manual\), not resumable yet/.test(pnEarly.message) && !pnEarly.message.includes(pnSid),
+    `pinned id whose transcript was never seen → yellow "not written yet", no id in the text (${pnEarly.level}: ${pnEarly.message})`);
+  const pmRow = (await (await fetch(`${BASE}/api/doctor`, { headers: { "x-hadron-token": TOKEN } })).json()).agents.find((a) => a.name === "doc-pinmiss") || {};
+  ok(pmRow.finding?.level === "red" && /checkpoint transcript missing/.test(pmRow.finding?.message) && pmRow.hasCheckpointId === true && pmRow.confidence === "manual",
+    `after settle the pinned id is still there and still red (${pmRow.finding?.level}: hasCheckpointId=${pmRow.hasCheckpointId}, ${pmRow.confidence})`);
+  ok(onDisk(pmId).runtime.sessionId === pmSid && onDisk(pmId).runtime.confidence === "manual", "…on disk: manual id never dropped for a missing file");
+  const pnRow = (await (await fetch(`${BASE}/api/doctor`, { headers: { "x-hadron-token": TOKEN } })).json()).agents.find((a) => a.name === "doc-pinnew") || {};
+  ok(pnRow.finding?.level === "yellow" && pnRow.hasCheckpointId === true && onDisk(pnId).runtime.sessionId === pnSid && onDisk(pnId).runtime.transcriptSeen === undefined,
+    `after settle the never-seen pinned id is still yellow and still on disk (${pnRow.finding?.level})`);
+  // now the transcript appears (first turn written) → green, and the tracker's next check will record transcriptSeen
+  seedTranscript(pnCwd, pnSid);
+  const pnGreen = (await (await fetch(`${BASE}/api/doctor`, { headers: { "x-hadron-token": TOKEN } })).json()).agents.find((a) => a.name === "doc-pinnew") || {};
+  ok(pnGreen.finding?.level === "green" && /resumes as manual/.test(pnGreen.finding?.message), `…and green the moment the transcript exists (${pnGreen.finding?.level}: ${pnGreen.finding?.message})`);
+  const regReboot = (await (await fetch(`${BASE}/api/doctor`, { headers: { "x-hadron-token": TOKEN } })).json()).agents.find((a) => a.name === "doc-registry") || {};
+  ok(regReboot.finding?.level === "green" && /resumes as registry/.test(regReboot.finding?.message) && regReboot.registry === "matched",
+    `registry id survives a server restart and re-matches (${regReboot.finding?.level}: ${regReboot.finding?.message})`);
 
   const doc2 = await (await fetch(`${BASE}/api/doctor`, { headers: { "x-hadron-token": TOKEN } })).json();
   const seedFinding = doc2.agents.find((a) => a.name === "doc-seed")?.finding || {};
@@ -490,7 +587,7 @@ async function main() {
     `corrupt-confidence checkpoint → red with SANITIZED reason (${bcFinding.level}: ${bcFinding.message})`);
   ok(bcRow.confidence === "invalid", `corrupt confidence is emitted as "invalid", not the raw token (${bcRow.confidence})`);
   const seedRaw = JSON.stringify(doc2);
-  ok(!/sessionId/.test(seedRaw) && !seedRaw.includes("not-a-uuid") && !seedRaw.includes(exhSid) && !seedRaw.includes(bcSid) && !seedRaw.includes(nfSid),
+  ok(!/sessionId/.test(seedRaw) && !seedRaw.includes("not-a-uuid") && !seedRaw.includes(exhSid) && !seedRaw.includes(bcSid) && !seedRaw.includes(nfSid) && !seedRaw.includes(pmSid) && !seedRaw.includes(regSid),
     "reboot doctor response still leaks no session id (key or value, malformed or valid)");
   ok(!seedRaw.includes(badConfToken) && !seedRaw.includes("leaked-secret"),
     "reboot doctor response never echoes the corrupt confidence token");

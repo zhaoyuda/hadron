@@ -691,6 +691,10 @@ async function main() {
         console.log(`caps     ${c.probed ? `claude --session-id: ${c.supportsSessionId ? "yes" : "no"}  --resume: ${c.resume ? "yes" : "no"}` : "claude not found on the server's PATH"}   (server-side probe)`);
         console.log(`boot     ${doctor.bootGeneration} (source: ${doctor.bootIdSource})`);
       }
+      if (doctor && doctor.sessionRegistry) {
+        const r = doctor.sessionRegistry;
+        console.log(`registry ${r.available ? `${r.entries} live claude record${r.entries === 1 ? "" : "s"} in ${r.root}${r.malformed ? ` (${r.malformed} unreadable)` : ""}` : `${r.root} ${r.reason || "unavailable"} — claude's session registry is the deterministic pane→session source (claude ≥ 2.1.26x); falling back to transcript scraping`}`);
+      }
 
       console.log("\nLocal:");
       for (const f of local) console.log(`  ${icon[f.level]} ${f.message}`);
@@ -700,7 +704,7 @@ async function main() {
       for (const a of agents) {
         console.log(`  ${icon[a.finding.level]} ${a.name}${a.group ? ` [${a.group}]` : ""}  ${a.paneCommand || "(no pane)"}  — ${a.finding.message}${a.finding.crossCheck ? `  [${a.finding.crossCheck}]` : ""}`);
         if (/^claude/i.test(a.paneCommand || "")) {
-          console.log(`      tmux session PATH resolves claude to: ${a.pathResolvesClaudeTo || "(not on the fresh-shell PATH)"}   (a shell rc file may change it)`);
+          console.log(`      tmux session PATH resolves claude to: ${a.pathResolvesClaudeTo || "(not on the fresh-shell PATH)"}   (a shell rc file may change it)${a.registry ? `  · registry: ${a.registry}${a.registryAgrees === false ? " (its id differs from the checkpoint — the tracker reconciles within 30 s)" : ""}` : ""}`);
         }
       }
 

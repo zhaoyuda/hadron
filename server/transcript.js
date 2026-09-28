@@ -11,8 +11,8 @@
 // Only the tail of the file is read (TAIL_BYTES), re-read only when size/mtime
 // change. The summary carries no session id and nothing is persisted.
 import { openSync, readSync, closeSync, statSync } from "fs";
+import { CLAUDE_PROJECTS_ROOT } from "./session-registry.js";
 import { join } from "path";
-import { homedir } from "os";
 import { claudeProjectDir } from "./resume.js";
 
 export const TAIL_BYTES = 256 * 1024;
@@ -23,7 +23,7 @@ export const MAX_TEXT = 4000; // chars kept per prompt/reply (the card shows the
 export const MAX_SCAN_BYTES = 4 * 1024 * 1024;
 export const WIRE_TEXT = 300; // chars of prompt/reply on the session list (full text via /transcript)
 
-export function transcriptPath(cwd, sessionId, { projectsRoot = join(homedir(), ".claude", "projects") } = {}) {
+export function transcriptPath(cwd, sessionId, { projectsRoot = CLAUDE_PROJECTS_ROOT } = {}) {
   return join(projectsRoot, claudeProjectDir(cwd), `${sessionId}.jsonl`);
 }
 

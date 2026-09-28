@@ -17,6 +17,7 @@ import { randomUUID } from "crypto";
 import { loadAgents, loadAgent, saveAgent, saveAgentLocked, archiveAgent, deleteAgent, initWorkspace, getWorkspaceDir, appendAgentField, removeAgentArtifact, isSelfWrite } from "./agent-store.js";
 import { resolve } from "path";
 import { tmux, tmuxSafe, isValidId, shellQuoteArgv, tmuxArgv } from "./tmux.js";
+import { findRegistrySession, readRegistry, REGISTRY_ROOT, REGISTRY_STATUSES } from "./session-registry.js";
 import { syncSkills } from "./skills.js";
 import { collectProvenance } from "./provenance.js";
 import { transcriptPath, readTranscriptSummary, transcriptWire } from "./transcript.js";
@@ -493,13 +494,14 @@ const DOCTOR_SIM_GENERATION = `doctor-sim-reboot-${randomUUID()}`;
 // so every free-string checkpoint field is allowlisted to its known set here;
 // anything else collapses to the literal "invalid" (which also keeps such a
 // checkpoint out of the "green" verdict — "invalid" is below every resume policy).
-const CONFIDENCE_VALUES = new Set(["authoritative", "correlated", "ambiguous", "manual"]);
+const CONFIDENCE_VALUES = new Set(["authoritative", "correlated", "ambiguous", "manual", "registry"]);
 const RUNTIME_VALUES = new Set(["claude", "shell"]);
 const RESTORE_STATES = new Set(["started", "ready", "failed"]);
 const allowlist = (set) => (v) => (v == null || v === "" ? null : set.has(v) ? v : "invalid");
 const safeConfidence = allowlist(CONFIDENCE_VALUES);
 const safeRuntime = allowlist(RUNTIME_VALUES);
 const safeRestoreState = allowlist(RESTORE_STATES);
+const safeRegistryStatus = allowlist(REGISTRY_STATUSES);
 // Untrusted on-disk timestamp strings. A corrupted checkpoint could place a
 // token in one, or a materially-future value that defeats every "is it fresh /
 // durable?" check (now - future < 0 passes both the durability threshold and
@@ -542,7 +544,7 @@ function resolveClaudeInPath(pathStr) {
 
 // The classifier — the row-classification table from the reliability plan. Order
 // matters: earlier rows win. decideResume() is only a cross-check on green rows.
-function classifyAgentHealth(session, { paneExists, paneCmd, cwdShared, now }) {
+function classifyAgentHealth(session, { paneExists, paneCmd, cwdShared, now, registry = null }) {
   const rt = session.runtime || {};
   if (!paneExists) return { level: "red", message: "no pane — tmux session missing" };
   const looksClaude = /^claude/i.test((paneCmd || "").trim());
@@ -559,19 +561,30 @@ function classifyAgentHealth(session, { paneExists, paneCmd, cwdShared, now }) {
       return { level: "red", message: "checkpoint not persisted — no durable write within threshold (a reboot would lose it)" };
     }
     if (!rt.sessionId) {
+      // The registry is the deterministic source; say why it did not answer
+      // before blaming the scrape (which is only the fallback).
+      const reg = { none: "claude's session registry has no record for this pane (claude too old?)", stale: "claude's session registry names this pane only for exited processes", ambiguous: "claude's session registry has two live claudes for this pane", unavailable: "claude's session registry is unavailable", unverified: "claude's session registry names this pane but the pid's start time is not checkable here — the tracker takes it at scrape grade on its next poll" }[registry] || "claude's session registry was not consulted";
       return cwdShared
-        ? { level: "red", message: "no session id (shared cwd — cannot be scraped; run `hadron adopt <agent> --session-id <uuid>`, or relaunch through Hadron)" }
-        : { level: "red", message: "no session id (scrape found nothing — run `hadron adopt <agent> --session-id <uuid>` if you know it)" };
+        ? { level: "red", message: `no session id (${reg}; shared cwd cannot be scraped — run \`hadron adopt <agent> --session-id <uuid>\`, or relaunch through Hadron)` }
+        : { level: "red", message: `no session id (${reg}; scrape found nothing — run \`hadron adopt <agent> --session-id <uuid>\` if you know it)` };
     }
     if (rt.restoreAttempt && rt.restoreAttempt.state === "failed") {
       return { level: "red", message: "last resume failed — claude TUI did not come up" };
     }
-    // A correlated id whose transcript is gone from the current cwd's project
-    // dir would fail `claude --resume`; the tracker drops it within 5 min (see
-    // RuntimeTracker.observe) — until then, or at a boot before it settles,
-    // say so instead of green. Pinned ids are exempt (file appears on first turn).
-    if (!PINNED_CONFIDENCE.has(rt.confidence) && session.cwd && UUID_RE.test(String(rt.sessionId)) && !sessionFileExists(session.cwd, rt.sessionId)) {
-      return { level: "red", message: `checkpoint transcript missing under ${claudeProjectDir(session.cwd)} — \`claude --resume\` would fail; the tracker drops the id at its next check, then re-scrapes (or run \`hadron adopt <agent> --session-id <uuid>\`)` };
+    // An id whose transcript is gone from the current cwd's project dir would
+    // fail `claude --resume`, whatever its confidence — identity (who chose the
+    // id) and resumability (is the file there) are separate questions, and
+    // performResume refuses the same way. A correlated id is dropped by the
+    // tracker within 5 min and re-scraped; a pinned one is kept (the file
+    // appears once claude writes the first turn, or it was deleted).
+    if (session.cwd && UUID_RE.test(String(rt.sessionId)) && !sessionFileExists(session.cwd, rt.sessionId)) {
+      const pinned = PINNED_CONFIDENCE.has(rt.confidence);
+      // A pinned id whose file was never seen is a fresh conversation claude
+      // has not written yet (every Hadron spawn passes through this for a few
+      // seconds; a prompt-less one until the first turn): yellow, not a false
+      // alarm. Seen before and gone now → red, identity kept, not resumable.
+      if ((pinned && !rt.transcriptSeen) || rt.transcriptSeen === false) return { level: "yellow", message: `identity known (${safeConfidence(rt.confidence)}), not resumable yet — claude has not written the transcript under ${claudeProjectDir(session.cwd)} (first turn pending); if it never appears, re-adopt` };
+      return { level: "red", message: `checkpoint transcript missing under ${claudeProjectDir(session.cwd)} — \`claude --resume\` would fail; ${pinned ? `the ${safeConfidence(rt.confidence)} id is kept (its transcript existed before): re-adopt or relaunch` : "the tracker drops the id at its next check, then re-scrapes (or run `hadron adopt <agent> --session-id <uuid>`)"}` };
     }
     return { level: "green", message: `resumes as ${safeConfidence(rt.confidence) || "ambiguous"}` };
   }
@@ -590,6 +603,7 @@ app.get("/api/doctor", async (req, res) => {
   const now = Date.now();
   const live = [...sessions.values()].filter((s) => !s.archived);
 
+  const registrySnapshot = readRegistry();
   const agents = live.map((session) => {
     const tmuxName = tmuxSessionName(session.id);
     const paneExists = tmuxSafe(["has-session", "-t", tmuxName]) !== null;
@@ -599,8 +613,17 @@ app.get("/api/doctor", async (req, res) => {
     // disagree with the code that actually decides.
     const cwdShared = isCwdShared(session.id);
     const pathEnv = paneExists ? tmuxSessionPathEnv(tmuxName) : null;
-    const finding = classifyAgentHealth(session, { paneExists, paneCmd, cwdShared, now });
+    // Fresh registry lookup for claude panes (the same function the tracker
+    // uses), so the row says what the registry knows NOW, not at the last poll.
+    const regHit = paneExists && /^claude/i.test((paneCmd || "").trim()) ? registryLookupFor(session.id, registrySnapshot)() : null;
+    const registry = regHit ? regHit.status : null;
+    // The row's checkpoint id vs what the registry says NOW: false for the
+    // ≤30 s window before the tracker reconciles a /clear (or before it
+    // settles after a restart) — otherwise "matched" next to a stale id reads
+    // like agreement. Booleans only; never the ids.
     const rt = session.runtime || {};
+    const registryAgrees = regHit && (regHit.status === "matched" || regHit.status === "unverified") ? regHit.sessionId === rt.sessionId : null;
+    const finding = classifyAgentHealth(session, { paneExists, paneCmd, cwdShared, now, registry });
     // Cross-check: a green row MUST also satisfy decideResume — it is the code
     // that actually fires on reboot. Doctor asks "if the machine reboots NOW,
     // does this come back?", so it evaluates decideResume against a SIMULATED
@@ -646,6 +669,8 @@ app.get("/api/doctor", async (req, res) => {
       desiredRuntime: safeRuntime(rt.desiredRuntime),
       hasCheckpointId: !!rt.sessionId,  // boolean only — never the id itself (no "sessionId" key)
       confidence: safeConfidence(rt.confidence),
+      registry: safeRegistryStatus(registry), // matched | unverified | none | stale | ambiguous | unavailable | null (not a claude pane)
+      registryAgrees, // boolean when the registry named an id (does it equal the checkpoint's?), else null — never the ids
       cleanExitAt: safeTimestamp(rt.cleanExitAt, now),
       restoreState: safeRestoreState(rt.restoreAttempt ? rt.restoreAttempt.state : null),
       lastObservedAt: safeTimestamp(rt.lastObservedAt, now),
@@ -666,6 +691,9 @@ app.get("/api/doctor", async (req, res) => {
     // key named "sessionId" anywhere (a grep-for-leaks invariant the test holds).
     claudeCaps: { probed: caps.probed, resume: caps.resume, supportsSessionId: caps.sessionId },
     checkpointPersistThresholdMs: CHECKPOINT_PERSIST_THRESHOLD_MS,
+    // Claude's own pane → session registry (~/.claude/sessions): the
+    // deterministic id source. Counts only — no ids, no pids.
+    sessionRegistry: { root: REGISTRY_ROOT, available: registrySnapshot.available, reason: registrySnapshot.reason, entries: registrySnapshot.entries.length, malformed: registrySnapshot.malformed },
     agents,
   });
 });
@@ -796,6 +824,8 @@ app.post("/api/sessions/:id/adopt", (req, res) => {
   rt.confidence = "manual";
   rt.desiredRuntime = "claude";
   rt.cleanExitAt = null;
+  // verified against the file unless forced — so a later disappearance is red
+  if (body.force === true) delete rt.transcriptSeen; else rt.transcriptSeen = true;
   delete rt.restoreAttempt;
   saveRuntimeCheckpoint(session, true);
   console.log(`[resume] agent ${id}: session id adopted manually (confidence manual)`);
@@ -1967,6 +1997,22 @@ function isCwdShared(sessionId) {
   return [...sessions.values()].some((s) => s.id !== sessionId && s.cwd === me.cwd);
 }
 
+// The tracker's (and doctor's) view into claude's session registry for one
+// agent: records must name this agent's tmux session AND its active pane
+// exactly. `-t <name>` resolves (via exactTarget) to the same active pane the
+// state detector reads, so the registry can never attribute a split pane's or
+// a shell tab's claude to the agent. The tmux spawn only happens when a record
+// names the session at all (see findRegistrySession). Pid reuse is guarded by
+// the record's procStart (kernel start time) — see session-registry.js.
+function registryLookupFor(sessionId, registry = null) {
+  const tmuxName = tmuxSessionName(sessionId);
+  return () => findRegistrySession({
+    tmuxSession: tmuxName,
+    paneTarget: () => tmuxSafe(["display-message", "-t", tmuxName, "-p", "#{window_id}.#{pane_id}"]),
+    registry,
+  });
+}
+
 function startMonitor(sessionId) {
   if (monitors.has(sessionId)) return;
   const session = sessions.get(sessionId);
@@ -1981,6 +2027,7 @@ function startMonitor(sessionId) {
     // Shared-cwd agents can't be told apart by transcript scraping (the jsonl
     // head proves the cwd, not the owner) — the tracker refuses to scrape there.
     cwdShared: () => isCwdShared(sessionId),
+    registry: registryLookupFor(sessionId),
   });
   runtimeTrackers.set(sessionId, tracker);
   detector.onCmd = (cmd) => tracker.observe(cmd);

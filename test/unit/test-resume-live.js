@@ -265,6 +265,10 @@ async function main() {
   ok(argvLines().some((l) => l === `--fixture-flag --session-id ${sidR}`), "fixture saw the launcher argv + --session-id");
   ok(paneCmd(r1) === "claude.exe", `launcher ran the claude.exe fixture (${paneCmd(r1)})`);
 
+  // The fixture never writes a transcript; claude would have on the first turn.
+  // performResume refuses ANY id whose transcript is missing (pinned included),
+  // so seed it — the refusal itself is covered by test-resume.js + doc-nofile.
+  seedTranscript(cwdR, sidR);
   const linesBefore = argvLines().length;
   await killServer();
   tmuxS(["kill-session", "-t", paneOf(r1)]);
@@ -279,7 +283,8 @@ async function main() {
   ok(d.runtime?.restoreAttempt?.state === "ready", `restoreAttempt.state = ready (${d.runtime?.restoreAttempt?.state})`);
   ok(d.runtime?.restoreAttempt?.generation === "boot-boot-A" && d.runtime?.restoreAttempt?.attempts === 1, "restoreAttempt carries the boot generation, attempts=1");
   ok(paneCmd(r1) === "claude.exe", "resumed pane is running the fixture");
-  ok(new RegExp(`\\[resume\\] ${r1}: resuming session ${sidR}`).test(serverLog), "log says it resumed");
+  ok(new RegExp(`\\[resume\\] ${r1}: resuming the checkpointed session \\(confidence authoritative, attempt 1\\)`).test(serverLog), "log says it resumed (agent + confidence, never the session id)");
+  ok(!serverLog.includes(sidR), "server log never carries the session id");
   // shared-cwd warning did not fire for the reboot agent (unique cwd, authoritative id)
   ok(!new RegExp(`agent ${r1}: cwd .* is shared`).test(serverLog), "no shared-cwd warning for the launcher-spawned agent");
 

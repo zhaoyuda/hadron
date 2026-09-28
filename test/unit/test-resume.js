@@ -10,7 +10,8 @@
  *
  * Run: node test/unit/test-resume.js
  */
-import { decideResume, scrapeSessionId, validateSessionFile, claudeProjectDir, RuntimeTracker, performResume, isClaudeCmd, verifyAdoption } from "../../server/resume.js";
+import { decideResume, scrapeSessionId, validateSessionFile, claudeProjectDir, RuntimeTracker, performResume, isClaudeCmd, verifyAdoption, PINNED_CONFIDENCE, REGISTRY_POLL_MS, REGISTRY_POLL_NO_ID_MS } from "../../server/resume.js";
+import { findRegistrySession, readRegistry, processIdentity } from "../../server/session-registry.js";
 import { warnOnce, firedWarnings, resetWarnOnce } from "../../server/log.js";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "fs";
 import { tmpdir } from "os";
@@ -241,21 +242,219 @@ console.log("\n[performResume — resumes through the agent's launcher argv]");
     return calls;
   };
   ok((await run(["cc-kimi"]))[0] === `cc-kimi --resume ${SID}`, "claude-kind wrapper argv resumes through the wrapper, not bare claude");
-  // Doctor and the decider agree: a correlated id with no transcript under the
-  // agent's cwd is refused before anything is typed into the pane.
-  for (const [conf, want] of [["correlated", false], ["authoritative", true], ["manual", true]]) {
+  // Doctor and the decider agree: an id with no transcript under the agent's
+  // cwd is refused before anything is typed into the pane — at EVERY
+  // confidence. A pinned identity is still not resumable without its file.
+  for (const conf of ["correlated", "authoritative", "manual", "registry"]) {
     const sess = { id: "y", cwd: "/some/cwd", runtime: { ...base, confidence: conf, lastObservedAt: new Date(Date.now() - 60_000).toISOString() } };
     const calls = [];
+    const logs = [];
     const r = await performResume(sess, "tmux-y", {
       deliver: (t, text) => { calls.push(text); throw new Error("abort-after-deliver"); },
-      save: () => {}, generation: "boot-pr-test", log: () => {}, fileExists: () => false,
+      save: () => {}, generation: "boot-pr-test", log: (m) => logs.push(m), fileExists: () => false,
     }).catch(() => null);
-    ok(want ? calls.length === 1 : (calls.length === 0 && r?.reason === "transcript missing" && !sess.runtime.restoreAttempt),
-      `${conf} id, transcript missing → ${want ? "resumes anyway (pinned)" : "refused, no attempt burned"}`);
+    ok(calls.length === 0 && r?.reason === "transcript missing" && !sess.runtime.restoreAttempt && sess.runtime.sessionId === SID,
+      `${conf} id, transcript missing → refused, no attempt burned, id kept`);
+    ok(!logs.some((m) => m.includes(SID)), `${conf} refusal log carries no session id`);
+  }
+  // The "resuming" log line names the agent and confidence, never the session id.
+  {
+    const sess = { id: "z", cwd: "/some/cwd", runtime: { ...base, lastObservedAt: new Date(Date.now() - 60_000).toISOString() } };
+    const logs = [];
+    await performResume(sess, "tmux-z", {
+      deliver: () => { throw new Error("abort-after-deliver"); },
+      save: () => {}, generation: "boot-pr-test", log: (m) => logs.push(m), fileExists: () => true,
+    }).catch(() => {});
+    ok(logs.some((m) => /\[resume\] z: resuming the checkpointed session \(confidence correlated, attempt 1\)/.test(m)) && !logs.some((m) => m.includes(SID)),
+      "resume log line names agent + confidence + attempt, not the session id");
   }
   ok((await run(null))[0] === `claude --resume ${SID}`, "default launchArgv stays bare claude");
   ok((await run(["cc-kimi", "--profile", "two words"]))[0] === `cc-kimi --profile 'two words' --resume ${SID}`,
     "argv boundaries survive resume (spaced element single-quoted)");
+}
+
+console.log("\n[session registry — ~/.claude/sessions/<pid>.json → this pane's session, pid-verified]");
+{
+  const root = mkdtempSync(join(tmpdir(), "hadron-registry-"));
+  // field types as claude writes them: procStart a STRING, timestamps epoch-ms NUMBERS
+  const rec = (pid, extra = {}) => ({ pid, procStart: String(1000 + pid), pidDomain: "linux:de318805c2084395abffe0e4aa6cec48:pid:[4026531836]", sessionId: `11111111-2222-4333-8444-${String(pid).padStart(12, "0")}`, cwd: "/some/cwd", tmux: "hadron-ws-a:@1.%7", status: "idle", updatedAt: Date.now(), startedAt: Date.now() - 5000, version: "2.1.283", kind: "interactive", entrypoint: "cli", ...extra });
+  const put = (pid, extra) => writeFileSync(join(root, `${pid}.json`), JSON.stringify(rec(pid, extra)));
+  const live = new Map(); // pid → identity
+  const identity = (pid) => live.get(pid) || { alive: false, claude: false, start: null };
+  const find = (o = {}) => findRegistrySession({ tmuxSession: "hadron-ws-a", paneTarget: () => "@1.%7", root, identity, ...o });
+
+  ok(findRegistrySession({ tmuxSession: "x", paneTarget: "@1.%1", root: join(root, "nope"), identity }).status === "unavailable", "missing registry dir → unavailable");
+  ok(find().status === "none", "empty registry → none");
+  put(41);
+  live.set(41, { alive: true, claude: true, start: 1041 });
+  const hit = find();
+  ok(hit.status === "matched" && hit.sessionId === rec(41).sessionId && hit.registryStatus === "idle" && hit.entries === 1, "live claude pid, exact pane → matched with its session id");
+  ok(readRegistry({ root }).entries.length === 1, "readRegistry parses the well-formed record");
+  ok(typeof readRegistry({ root }).entries[0].procStart === "number" && /^\d{4}-\d\d-\d\dT/.test(hit.updatedAt), `procStart string → number, updatedAt epoch-ms → ISO (${hit.updatedAt})`);
+  ok(findRegistrySession({ tmuxSession: "hadron-ws-a", paneTarget: "@1.%7", root, identity, registry: readRegistry({ root }) }).status === "matched", "a pre-read registry snapshot is used instead of re-reading the dir");
+  ok(find({ paneTarget: () => "@3.%7" }).status === "matched", "same %pane in another @window (break-pane / move-pane) still matches — the pane id is the key");
+  put(41, { kind: "batch" });
+  ok(find().status === "none" && readRegistry({ root }).malformed === 1, "a non-interactive record (claude -p) is never a candidate");
+  put(41);
+  ok(find({ paneTarget: () => "@1.%8" }).status === "none", "same tmux session, different pane (user split) → none, not matched");
+  ok(find({ paneTarget: () => null }).status === "unavailable", "pane target unresolved → unavailable (never a prefix match)");
+  ok(find({ tmuxSession: "hadron-ws-a-sh1" }).status === "none", "a shell-tab claude's session name never matches the agent's");
+  ok(find({ tmuxSession: "hadron-ws-" }).status === "none", "session match is exact (prefix + ':'), not a substring");
+  live.set(41, { alive: true, claude: true, start: 9999 });
+  ok(find().status === "stale", "procStart mismatch (pid reused) → stale");
+  live.set(41, { alive: true, claude: false, start: 1041 });
+  ok(find().status === "stale", "pid alive but not a claude process → stale");
+  live.delete(41);
+  ok(find().status === "stale", "pid dead → stale (record left behind by a crash)");
+  // pidDomain is the MACHINE id (constant across boots; prod 2026-09-28: a
+  // boot-id comparison read every live claude as stale) — never a match key.
+  live.set(41, { alive: true, claude: true, start: 1041 });
+  ok(find({ paneTarget: () => "@1.%7" }).status === "matched" && findRegistrySession({ tmuxSession: "hadron-ws-a", paneTarget: "@1.%7", root, identity }).status === "matched", "pidDomain is not compared (machine id, not boot id)");
+  live.set(41, { alive: true, claude: true, start: null });
+  const unv = find();
+  ok(unv.status === "unverified" && unv.sessionId === rec(41).sessionId, "no start time on this platform (macOS) but the record has procStart → unverified, id offered, never 'matched'");
+  put(41, { procStart: null });
+  live.set(41, { alive: true, claude: true, start: 1041 });
+  ok(find().status === "unverified", "…a record without procStart (older claude) is unverified too — the rule is 'start time verified or not', not 'the record asked'");
+  put(41);
+  put(42);
+  live.set(41, { alive: true, claude: true, start: 1041 });
+  live.set(42, { alive: true, claude: true, start: 1042 });
+  ok(find().status === "ambiguous", "two live claudes claiming one pane → ambiguous, never a guess");
+  rmSync(join(root, "42.json"));
+  // malformed / foreign files are skipped, never crash
+  writeFileSync(join(root, "43.json"), "{not json");
+  writeFileSync(join(root, "44.json"), JSON.stringify({ pid: 45, sessionId: rec(45).sessionId, cwd: "/x", tmux: "hadron-ws-a:@1.%7" })); // pid ≠ filename
+  writeFileSync(join(root, "46.json"), JSON.stringify(rec(46, { sessionId: "not-a-uuid" })));
+  writeFileSync(join(root, "41.abc.key"), "x");
+  const r2 = readRegistry({ root });
+  ok(r2.entries.length === 1 && r2.malformed === 3, `malformed records are counted, not parsed (entries=${r2.entries.length}, malformed=${r2.malformed})`);
+  ok(find().status === "matched", "…and the good record still matches");
+  // the real thing: this very process is alive, and not claude
+  const me = processIdentity(process.pid);
+  ok(me.alive === true && me.claude === false, `processIdentity(self) → alive, not claude (${JSON.stringify(me)})`);
+  const gone = processIdentity(2 ** 22 - 1);
+  ok(gone.alive === false && gone.claude === false, `processIdentity on an unused pid → not alive (${JSON.stringify(gone)})`);
+  rmSync(root, { recursive: true, force: true });
+}
+
+console.log("\n[RuntimeTracker — registry first: replaces any id (pinned included) with claude's own, same id is idempotent, scrape never overrides it]");
+{
+  const regId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const oldId = "11111111-2222-4333-8444-555555555555";
+  const scrapedId = "33333333-4444-4555-8666-777777777777";
+  const settle = (tr) => { tr.observe("claude"); tr.observe("claude"); tr.observe("claude"); };
+  let result = { status: "matched", sessionId: regId };
+  const registry = () => result;
+  const scrape = () => ({ sessionId: scrapedId, confidence: "correlated" });
+  for (const conf of ["correlated", "authoritative", "manual", "registry"]) {
+    const saves = [];
+    // desiredRuntime already "claude": the settle poll leaves restoreAttempt alone (only a
+    // shell→claude transition clears it), so what survives here is the registry path's doing.
+    const s = { id: `r-${conf}`, cwd: "/some/cwd", runtime: { sessionId: oldId, confidence: conf, desiredRuntime: "claude", restoreAttempt: { state: "ready", generation: "g" } } };
+    settle(new RuntimeTracker(s, { save: (x, u) => saves.push(!!u), cwdShared: () => true, scrape, registry, fileExists: () => true }));
+    ok(s.runtime.sessionId === regId && s.runtime.confidence === "registry" && saves.includes(true),
+      `${conf} id replaced by the registry's (a /clear or fresh claude is claude's own report, not a scrape)`);
+    ok(s.runtime.restoreAttempt?.state === "ready", "…restoreAttempt untouched (an in-flight performResume still owns it)");
+  }
+  // same id → provenance kept
+  const auth = { id: "r-same", cwd: "/some/cwd", runtime: { sessionId: regId, confidence: "authoritative" } };
+  const trS = new RuntimeTracker(auth, { save: () => {}, cwdShared: () => false, scrape, registry, fileExists: () => true });
+  settle(trS);
+  ok(auth.runtime.sessionId === regId && auth.runtime.confidence === "authoritative", "same id from the registry keeps authoritative provenance (idempotent)");
+  // same id, scraped provenance → promoted: claude confirmed the scrape, so the 5-min file check can no longer drop it
+  const corr = { id: "r-same-corr", cwd: "/some/cwd", runtime: { sessionId: regId, confidence: "correlated" } };
+  const savesC = [];
+  settle(new RuntimeTracker(corr, { save: (x, u) => savesC.push(!!u), cwdShared: () => false, scrape, registry, fileExists: () => true }));
+  ok(corr.runtime.sessionId === regId && corr.runtime.confidence === "registry" && savesC.includes(true), "same id with correlated provenance is promoted to registry (persisted)");
+  // exclusive cwd, no id, registry matched: the scrape runs too but must not override
+  const fresh = { id: "r-fresh", cwd: "/some/cwd" };
+  settle(new RuntimeTracker(fresh, { save: () => {}, cwdShared: () => false, scrape, registry, fileExists: () => true }));
+  ok(fresh.runtime.sessionId === regId && fresh.runtime.confidence === "registry", "registry beats the scrape in an exclusive cwd (registry is pinned)");
+  ok(fresh.runtime.transcriptSeen === true, "…and the settle check saw the transcript (transcriptSeen persisted for doctor)");
+  // unverified (macOS): fills an empty id as correlated, never replaces a known one
+  result = { status: "unverified", sessionId: regId };
+  const unvEmpty = { id: "r-unv-empty", cwd: "/some/cwd" };
+  settle(new RuntimeTracker(unvEmpty, { save: () => {}, cwdShared: () => true, scrape, registry, fileExists: () => true }));
+  ok(unvEmpty.runtime.sessionId === regId && unvEmpty.runtime.confidence === "correlated", "unverified match fills an EMPTY checkpoint at scrape grade (correlated)");
+  const unvAuth = { id: "r-unv-auth", cwd: "/some/cwd", runtime: { sessionId: oldId, confidence: "authoritative", desiredRuntime: "claude" } };
+  settle(new RuntimeTracker(unvAuth, { save: () => {}, cwdShared: () => true, scrape, registry, fileExists: () => true }));
+  ok(unvAuth.runtime.sessionId === oldId && unvAuth.runtime.confidence === "authoritative", "unverified match never replaces a known id (pid reuse after a crash cannot be excluded)");
+  const unvCorr = { id: "r-unv-corr", cwd: "/some/cwd", runtime: { sessionId: oldId, confidence: "correlated", desiredRuntime: "claude" } };
+  settle(new RuntimeTracker(unvCorr, { save: () => {}, cwdShared: () => true, scrape, registry, fileExists: () => true }));
+  ok(unvCorr.runtime.sessionId === oldId, "…not even a correlated one");
+  // the flap: unverified fill before the first turn is written must NOT be dropped by the missing-file check
+  {
+    const seen = [];
+    const orig = console.log; console.log = (m) => seen.push(String(m));
+    const unvNoFile = { id: "r-unv-nofile", cwd: "/some/cwd" };
+    const saves = [];
+    const trN = new RuntimeTracker(unvNoFile, { save: (x, u) => saves.push(!!u), cwdShared: () => true, scrape, registry, fileExists: () => false });
+    settle(trN); trN.observe("claude"); trN.observe("claude");
+    console.log = orig;
+    ok(unvNoFile.runtime.sessionId === regId && unvNoFile.runtime.transcriptSeen === false && saves.filter(Boolean).length === 1,
+      `unverified fill with no transcript yet is kept (transcriptSeen=false), one urgent save, no fill/drop flap (${saves.filter(Boolean).length})`);
+    ok(seen.filter((m) => m.includes("r-unv-nofile") && /session registry/.test(m)).length === 1 && !seen.some((m) => m.includes(regId)), "…logged once, no id");
+  }
+  // a legacy correlated checkpoint (no transcriptSeen flag) with its file gone is still dropped
+  {
+    const legacy = { id: "r-legacy", cwd: "/some/cwd", runtime: { sessionId: oldId, confidence: "correlated", desiredRuntime: "claude" } };
+    settle(new RuntimeTracker(legacy, { save: () => {}, cwdShared: () => true, scrape, registry: () => ({ status: "none" }), fileExists: () => false }));
+    ok(legacy.runtime.sessionId === null && legacy.runtime.transcriptSeen === undefined, "legacy correlated id with a missing file is dropped (pre-flag behaviour kept), flag cleared");
+  }
+  result = { status: "matched", sessionId: regId };
+  ok(PINNED_CONFIDENCE.has("registry"), "registry is a pinned confidence");
+  // registry id survives a missing transcript (identity kept; doctor/performResume refuse separately)
+  const nofile = { id: "r-nofile", cwd: "/some/cwd", runtime: { sessionId: regId, confidence: "registry" } };
+  const trN = new RuntimeTracker(nofile, { save: () => {}, cwdShared: () => true, scrape, registry, fileExists: () => false });
+  settle(trN); trN.lastCheckAt = 0; trN.observe("claude");
+  ok(nofile.runtime.sessionId === regId && nofile.runtime.confidence === "registry", "registry id is never dropped for a missing transcript (first turn not written yet)");
+  ok(nofile.runtime.transcriptSeen === undefined, "…and transcriptSeen stays unset (doctor: yellow 'not written yet', not red)");
+  // no match → existing behaviour (scrape in exclusive cwd), and status recorded for doctor
+  result = { status: "none" };
+  resetWarnOnce();
+  const seen = [];
+  const origWarn = console.warn;
+  console.warn = (m) => seen.push(String(m));
+  try {
+    const fb = { id: "r-fallback", cwd: "/some/cwd" };
+    const trF = new RuntimeTracker(fb, { save: () => {}, cwdShared: () => false, scrape, registry, fileExists: () => true });
+    settle(trF);
+    ok(fb.runtime.sessionId === scrapedId && fb.runtime.confidence === "correlated" && trF.registryStatus === "none", "registry none → scrape fallback, status recorded");
+    ok(seen.filter((m) => m.includes("r-fallback") && /session registry/.test(m)).length === 1 && !seen.some((m) => m.includes(scrapedId) || m.includes(regId)), "warned once (silent-failure rule), no session id in the warning");
+    // a throwing registry is "unavailable", never a crash of the poll
+    const boom = { id: "r-boom", cwd: "/some/cwd" };
+    const trB = new RuntimeTracker(boom, { save: () => {}, cwdShared: () => false, scrape, registry: () => { throw new Error("EACCES"); }, fileExists: () => true });
+    settle(trB);
+    ok(trB.registryStatus === "unavailable" && boom.runtime.sessionId === scrapedId, "registry lookup throwing → unavailable, poll continues");
+  } finally { console.warn = origWarn; resetWarnOnce(); }
+  // clocks: no id → every REGISTRY_POLL_NO_ID_MS; with id → every REGISTRY_POLL_MS
+  {
+    let calls = 0;
+    result = { status: "none" };
+    const c = { id: "r-clock", cwd: "/some/cwd" };
+    const tr = new RuntimeTracker(c, { save: () => {}, cwdShared: () => true, scrape, registry: () => { calls++; return result; }, fileExists: () => true });
+    settle(tr);
+    ok(calls === 1, `settle poll consults the registry once (${calls})`);
+    tr.observe("claude");
+    ok(calls === 1, "next poll within the no-id interval does not");
+    tr.lastRegistryAt = Date.now() - REGISTRY_POLL_NO_ID_MS - 1;
+    tr.observe("claude");
+    ok(calls === 2, "no id: consulted again after REGISTRY_POLL_NO_ID_MS");
+    result = { status: "matched", sessionId: regId };
+    tr.lastRegistryAt = 0; tr.observe("claude");
+    ok(calls === 3 && c.runtime.sessionId === regId, "matched on a later poll");
+    tr.lastRegistryAt = Date.now() - REGISTRY_POLL_NO_ID_MS - 1;
+    tr.observe("claude");
+    ok(calls === 3, "with an id: the short interval no longer applies");
+    tr.lastRegistryAt = Date.now() - REGISTRY_POLL_MS - 1;
+    tr.observe("claude");
+    ok(calls === 4, "with an id: consulted again after REGISTRY_POLL_MS");
+  }
+  // no registry wired (unit tests / older server) → nothing changes
+  const nr = { id: "r-none", cwd: "/some/cwd" };
+  settle(new RuntimeTracker(nr, { save: () => {}, cwdShared: () => false, scrape, fileExists: () => true }));
+  ok(nr.runtime.sessionId === scrapedId, "no registry wired → plain scrape behaviour");
 }
 
 console.log("\n[silent-failure warnings: once per (invariant, agent), not once per process]");

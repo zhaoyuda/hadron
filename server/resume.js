@@ -21,6 +21,7 @@
  * legal state and is left alone.
  */
 import { execFile, execFileSync } from "child_process";
+import { CLAUDE_PROJECTS_ROOT } from "./session-registry.js";
 import { readdirSync, statSync, openSync, readSync, closeSync, readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
@@ -126,14 +127,14 @@ export function validateSessionFile(file, expectSessionId, expectCwd) {
 // cd'd elsewhere carries an id whose file lives under another project dir —
 // `claude --resume` fails for both. (Seen on prod 2026-09-28: two green
 // "resumes as correlated" agents whose files were gone.)
-export function sessionFileExists(cwd, sessionId, { projectsRoot = join(homedir(), ".claude", "projects") } = {}) {
+export function sessionFileExists(cwd, sessionId, { projectsRoot = CLAUDE_PROJECTS_ROOT } = {}) {
   if (!cwd || typeof sessionId !== "string" || !UUID_RE.test(sessionId)) return false;
   return existsSync(join(projectsRoot, claudeProjectDir(cwd), `${sessionId}.jsonl`));
 }
 
 // Newest transcript in the agent-cwd's project dir, content-validated.
 // Returns {sessionId, confidence} or null. Never returns an unvalidated guess.
-export function scrapeSessionId(cwd, { projectsRoot = join(homedir(), ".claude", "projects") } = {}) {
+export function scrapeSessionId(cwd, { projectsRoot = CLAUDE_PROJECTS_ROOT } = {}) {
   try {
     const dir = join(projectsRoot, claudeProjectDir(cwd));
     const files = readdirSync(dir)
@@ -163,7 +164,7 @@ const CLAUDE_CMDS = new Set(["claude"]);
 // transcript claude wrote for THIS agent's cwd — and that cwd must actually be
 // known: never fall back to the workspace/server cwd, or an unrelated root
 // transcript could validate a hand-attached agent's id.
-export function verifyAdoption(session, sessionId, { force = false, projectsRoot = join(homedir(), ".claude", "projects") } = {}) {
+export function verifyAdoption(session, sessionId, { force = false, projectsRoot = CLAUDE_PROJECTS_ROOT } = {}) {
   const sid = typeof sessionId === "string" ? sessionId.trim() : "";
   if (!UUID_RE.test(sid)) return { ok: false, status: 400, error: "sessionId must be a claude session uuid" };
   if (force === true) return { ok: true, sessionId: sid };
@@ -178,9 +179,12 @@ export function verifyAdoption(session, sessionId, { force = false, projectsRoot
 }
 
 // Confidence levels that resume under every policy except "off" and that a
-// later scrape may never overwrite: Hadron launched it (authoritative) or the
-// operator told us (manual, via `hadron adopt`).
-export const PINNED_CONFIDENCE = new Set(["authoritative", "manual"]);
+// later scrape may never overwrite: Hadron launched it (authoritative), the
+// operator told us (manual, via `hadron adopt`), or claude's own process
+// registry named it for this exact pane (registry, see session-registry.js).
+// Pinned = identity is known; whether the transcript exists (resumability) is
+// a separate question that performResume and doctor ask for EVERY level.
+export const PINNED_CONFIDENCE = new Set(["authoritative", "manual", "registry"]);
 
 export const isClaudeCmd = (c) => {
   if (!c) return false;
@@ -200,13 +204,26 @@ function warnClaudeish(cmd, agentId) {
   warnOnce(`claudeish:${agentId}`, `[resume] agent ${agentId}: pane_current_command ${JSON.stringify(cmd)} looks like claude but is not tracked — auto-resume checkpoints will not be written`);
 }
 const SETTLE_POLLS = 3; // claude must be foreground this long before we track it
+// How often the tracker consults claude's session registry: fast while the
+// agent has no id at all (a readdir + a few small reads; the tmux spawn only
+// happens when a record names this session), relaxed once it has one — a
+// /clear or in-app /resume changes the id and is picked up within this.
+export const REGISTRY_POLL_NO_ID_MS = 5 * 1000;
+export const REGISTRY_POLL_MS = 30 * 1000;
 
 export class RuntimeTracker {
-  constructor(session, { save, cwdShared, scrape = scrapeSessionId, fileExists = sessionFileExists }) {
+  constructor(session, { save, cwdShared, scrape = scrapeSessionId, fileExists = sessionFileExists, registry = null }) {
     this.session = session;
     this.save = save; // (session, urgent) => void — urgent flushes immediately
     this.scrape = scrape; // (cwd) => { sessionId, confidence } | null — injectable for tests
     this.fileExists = fileExists; // (cwd, sessionId) => boolean — injectable for tests
+    // registry: () => findRegistrySession(...) result for THIS agent's pane, or
+    // null when the server has not wired one (unit tests). The deterministic
+    // source: consulted before any scrape, and the only thing that may replace
+    // a pinned id (it is claude itself reporting the current conversation).
+    this.registry = registry;
+    this.lastRegistryAt = 0;
+    this.registryStatus = null; // last result status, for doctor
     // cwdShared(): does any OTHER agent share this agent's cwd right now?
     // Shared-cwd transcripts validate identically for every sharer (the head
     // only proves the cwd, not which agent owns the session), so scraping
@@ -215,6 +232,60 @@ export class RuntimeTracker {
     this.claudePolls = 0;
     this.lastScrapeAt = 0;
     this.lastCheckAt = 0; // last transcript-exists validation of a correlated id
+  }
+
+  // Ask claude's registry which session runs in this pane. A different id
+  // (fresh claude, /clear, in-app /resume) replaces whatever we had — pinned
+  // or not: this is not a scrape guess, it is the process itself. The same id
+  // is idempotent and keeps its provenance (an authoritative launch stays
+  // authoritative). Nothing else about the checkpoint is touched — in
+  // particular restoreAttempt, which a performResume in flight still owns.
+  // Returns true when the id changed.
+  consultRegistry(rt, now) {
+    this.lastRegistryAt = now;
+    let r;
+    try { r = this.registry(); } catch (e) { r = { status: "unavailable", reason: e && e.message }; }
+    this.registryStatus = r && r.status ? r.status : "unavailable";
+    if (this.registryStatus === "matched") {
+      if (rt.sessionId === r.sessionId) {
+        // Same id: a pinned provenance stands; a scraped one is now confirmed
+        // by claude itself — promote it so the 5-min file check cannot drop it.
+        if (PINNED_CONFIDENCE.has(rt.confidence)) return false;
+        rt.confidence = "registry";
+        return true;
+      }
+      rt.sessionId = r.sessionId;
+      rt.confidence = "registry";
+      delete rt.transcriptSeen; // a new conversation: its file is not known to exist yet
+      this.lastCheckAt = 0;
+      console.log(`[resume] agent ${this.session.id}: session id taken from claude's session registry (pane matched, pid verified)`);
+      return true;
+    }
+    if (this.registryStatus === "unverified") {
+      // Live claude by pid+name only (no start time on this platform): good
+      // enough to fill an empty checkpoint as a scrape-grade id (the 5-min
+      // file check and a verified match can still correct it), never to
+      // replace one — a crash-leftover record whose pid was reused would
+      // otherwise pin a dead conversation over an authoritative id.
+      if (rt.sessionId || !r.sessionId) return false;
+      rt.sessionId = r.sessionId;
+      rt.confidence = "correlated";
+      // Explicitly "not seen yet": unlike a scraped id this one was never
+      // validated against a file, so the missing-transcript drop below must
+      // wait until the file has existed once (else fill/drop flaps every poll).
+      // The trade: a pid-reuse ghost taken this way sits at permanent yellow
+      // until a scrape or a later `matched` corrects it — in a shared cwd only
+      // `hadron adopt` does. It can never resume (performResume needs the file).
+      rt.transcriptSeen = false;
+      this.lastCheckAt = 0;
+      console.log(`[resume] agent ${this.session.id}: session id taken from claude's session registry (pane matched; the pid's start time could not be verified, so treated like a scrape)`);
+      return true;
+    }
+    // Silent-failure rule: the deterministic path is off for this agent —
+    // say so once, and let doctor show the status. Scraping still runs.
+    const why = { none: "has no record for this pane (claude older than the registry, or not claude)", unverified: "names this pane but the platform cannot verify the pid's start time and an id is already known — keeping it", stale: "names this pane only in records of exited processes", ambiguous: "has two live claudes claiming this pane", unavailable: `is unavailable (${r && r.reason || "unknown"})` }[this.registryStatus];
+    warnOnce(`registry:${this.session.id}`, `[resume] agent ${this.session.id}: claude's session registry ${why} — falling back to transcript scraping`);
+    return false;
   }
 
   // Called from the state detector's poll with the pane's foreground command.
@@ -247,8 +318,15 @@ export class RuntimeTracker {
         // stale (revalidate every 5 min; ids change when sessions fork).
         const now = Date.now();
         const shared = this.cwdShared();
+        // Claude's own registry first: deterministic pane → session id. With
+        // no id, poll fast (a fresh claude writes its record within seconds);
+        // with one, every 30 s catches /clear. paneTarget is only resolved
+        // when some record names this session, so old claudes cost a readdir.
+        if (this.registry && now - this.lastRegistryAt > (rt.sessionId ? REGISTRY_POLL_MS : REGISTRY_POLL_NO_ID_MS)) {
+          if (this.consultRegistry(rt, now)) urgent = true;
+        }
         if (shared && !rt.sessionId) {
-          warnOnce(`sharedcwd:${this.session.id}`, `[resume] agent ${this.session.id}: cwd ${JSON.stringify(this.session.cwd || null)} is shared with another agent (or unset) — its claude session id cannot be scraped, auto-resume is off for it until it is launched by Hadron with --session-id`);
+          warnOnce(`sharedcwd:${this.session.id}`, `[resume] agent ${this.session.id}: cwd ${JSON.stringify(this.session.cwd || null)} is shared with another agent (or unset) — its claude session id cannot be scraped; auto-resume is off for it until claude's session registry names this pane, it is launched by Hadron with --session-id, or \`hadron adopt\` pins it`);
         }
         const due = !rt.sessionId || now - this.lastScrapeAt > 5 * 60 * 1000;
         // Re-validate a correlated id every 5 min (its own clock — a shared cwd
@@ -256,15 +334,31 @@ export class RuntimeTracker {
         // the CURRENT cwd, or the checkpoint is a lie that `hadron doctor` would
         // show green and a reboot would fail on. Drop it (a fresh scrape follows
         // when the cwd is exclusive; a shared cwd goes red "no session id" —
-        // honest, and `hadron adopt` fixes it). Pinned ids are never touched:
-        // Hadron chose them, and the file appears only once claude writes the
-        // first turn.
+        // honest, and `hadron adopt` fixes it). Pinned ids are never dropped
+        // here: their identity is known (Hadron, the operator, or claude's
+        // registry said so) and the file appears once claude writes the first
+        // turn; a pinned id whose file is missing is red in doctor and refused
+        // by performResume instead.
+        // Every id, pinned or not, records once that its transcript has been
+        // seen (rt.transcriptSeen): doctor tells "not written yet" (yellow)
+        // from "was there, now gone" (red) by it.
         const checkDue = now - this.lastCheckAt > 5 * 60 * 1000;
-        if (checkDue && UUID_RE.test(String(rt.sessionId)) && !PINNED_CONFIDENCE.has(rt.confidence) && this.session.cwd) this.lastCheckAt = now;
-        if (checkDue && UUID_RE.test(String(rt.sessionId)) && !PINNED_CONFIDENCE.has(rt.confidence) && this.session.cwd && !this.fileExists(this.session.cwd, rt.sessionId)) {
+        let fileThere = null;
+        if (checkDue && UUID_RE.test(String(rt.sessionId)) && this.session.cwd) {
+          this.lastCheckAt = now;
+          fileThere = this.fileExists(this.session.cwd, rt.sessionId);
+          if (fileThere && !rt.transcriptSeen) { rt.transcriptSeen = true; urgent = true; }
+        }
+        // Drop a non-pinned id whose transcript is gone — "gone" needs it to
+        // have been there: scraped ids were validated against the file when
+        // taken (transcriptSeen true), legacy checkpoints predate the flag
+        // (undefined → treated as seen, the pre-flag behaviour); only an
+        // unverified registry fill is explicitly false.
+        if (fileThere === false && !PINNED_CONFIDENCE.has(rt.confidence) && rt.transcriptSeen !== false) {
           warnOnce(`stalesid:${this.session.id}`, `[resume] agent ${this.session.id}: the correlated session's transcript no longer exists under ${claudeProjectDir(this.session.cwd)} (deleted, or scraped while the pane was in another cwd) — checkpoint dropped${shared ? "; cwd is shared, so it cannot be re-scraped: run `hadron adopt <agent> --session-id <uuid>`" : ", re-scraping"}`);
           rt.sessionId = null;
           delete rt.confidence;
+          delete rt.transcriptSeen;
           urgent = true;
         }
         // cwdShared() already returns true for an unset cwd (the server's own
@@ -276,6 +370,7 @@ export class RuntimeTracker {
           if (hit && !PINNED_CONFIDENCE.has(rt.confidence) && rt.sessionId !== hit.sessionId) {
             rt.sessionId = hit.sessionId;
             rt.confidence = hit.confidence;
+            rt.transcriptSeen = true; // the scrape read the file it names
             urgent = true;
           }
         }
@@ -300,6 +395,8 @@ export class RuntimeTracker {
     rt.confidence = "authoritative";
     rt.desiredRuntime = "claude";
     rt.cleanExitAt = null;
+    delete rt.transcriptSeen;
+    this.lastCheckAt = 0;
     this.save(this.session, true);
   }
 }
@@ -345,17 +442,19 @@ export async function performResume(session, tmuxName, { deliver, save, generati
   const decision = decideResume(rt, { generation });
   if (!decision.resume) return decision;
   // Same check `hadron doctor` makes (doctor must never disagree with the code
-  // that decides): a correlated id whose transcript is gone from the agent's cwd
-  // would burn the 60 s readiness wait and an attempt on a `--resume` that
-  // cannot succeed. Pinned ids are exempt — Hadron chose them before any file.
-  if (!PINNED_CONFIDENCE.has(rt.confidence) && session.cwd && !fileExists(session.cwd, decision.sessionId)) {
-    log(`[resume] ${session.id}: not resuming — the correlated session's transcript is missing under ${claudeProjectDir(session.cwd)}`);
+  // that decides): an id whose transcript is gone from the agent's cwd — at
+  // ANY confidence; identity being pinned does not make missing data
+  // resumable — would burn the 60 s readiness wait and an attempt on a
+  // `--resume` that cannot succeed.
+  if (session.cwd && !fileExists(session.cwd, decision.sessionId)) {
+    log(`[resume] ${session.id}: not resuming — the checkpoint's transcript is missing under ${claudeProjectDir(session.cwd)} (confidence ${rt.confidence || "ambiguous"})`);
     return { resume: false, reason: "transcript missing" };
   }
 
   rt.restoreAttempt = { generation, state: "started", attempts: (rt.restoreAttempt?.attempts || 0) + 1, at: new Date().toISOString() };
   save(session);
-  log(`[resume] ${session.id}: resuming session ${decision.sessionId}`);
+  // Logs carry agent ids, never session ids (the id is on disk in the checkpoint).
+  log(`[resume] ${session.id}: resuming the checkpointed session (confidence ${rt.confidence || "ambiguous"}, attempt ${rt.restoreAttempt.attempts})`);
 
   await sleep(1500); // fresh pane: let the shell finish initializing
   // launchArgv: the agent's claude-kind launcher (a cc-* wrapper resumes through

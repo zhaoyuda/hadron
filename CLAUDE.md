@@ -66,6 +66,7 @@ test/
 - **State detection**: Every second the server reads the foreground command / alt-screen / cwd of ALL agent panes in one batched `tmux list-panes -a` (two spawns per tick total, not per agent), then `capture-pane`s each pane and pattern-matches Claude Code output to determine state (idle/working/blocked/done). Quiet panes (content unchanged for 3 captures, state not `working`) are captured only every 5th tick until the command, content, or input changes. See `server/state-detector.js`.
 - **Artifacts**: Files attached to an agent, rendered in the right panel. Paths can be absolute, `~/`-relative, or workspace-relative.
 - **Tmux namespacing**: Sessions are named `hadron-<workspace-basename>-<agent-id>` (the workspace *directory basename*, not the configurable display name) to prevent collisions between multiple Hadron instances.
+- **Session identity** (auto-resume): the id of the claude conversation in an agent's pane comes, in order, from claude's own session registry (`~/.claude/sessions/<pid>.json`, matched to the exact tmux pane and a live pid that is claude — `server/session-registry.js`, confidence `registry`), Hadron's own launch (`authoritative`), the operator (`hadron adopt`, `manual`), or a content-validated transcript scrape (`correlated`, refused in shared cwds). Identity and resumability are separate: a pinned id is never demoted by a scrape, but a missing transcript is refused by performResume and shown by `hadron doctor` — yellow while the transcript was never seen (claude has not written the first turn), red once it was seen and is gone (`runtime.transcriptSeen`). When the pid's start time cannot be verified (macOS; a record without `procStart`) the match is `unverified`: it fills an empty checkpoint at scrape grade (`transcriptSeen: false`, so the missing-file drop waits for the file to have existed once) but never replaces a known id. `CLAUDE_CONFIG_DIR` relocates registry and transcripts together (`CLAUDE_CONFIG_DIR`/`CLAUDE_PROJECTS_ROOT` in session-registry.js).
 
 ## Running Hadron
 
@@ -103,7 +104,13 @@ npm test
 #                            bare-shell pane is refused 409 unless force — no paste into zsh)
 #   + test-resume.js        (v0.9 auto-resume gate: checkpoint, tombstone, scrape validation; tracker
 #                            drops a correlated id whose transcript is gone (injectable fileExists);
-#                            pane_current_command "claude.exe" (macOS) normalizes to claude)
+#                            claude's session registry (server/session-registry.js: ~/.claude/sessions/
+#                            <pid>.json → exact pane match + live pid that IS claude + procStart (pidDomain = machine id, not compared)
+#                            guard; none/stale/ambiguous/unavailable never match) is consulted before any
+#                            scrape and replaces ANY id — pinned included — with claude's own, same id is
+#                            idempotent, restoreAttempt untouched; performResume refuses a missing
+#                            transcript at every confidence and its log names agent + confidence, never
+#                            the session id; pane_current_command "claude.exe" (macOS) normalizes to claude)
 #   + test-file-revision.js (conditional /api/file writes: revision, 409 conflict, atomicity)
 #   + test-artifacts.js     (browse + suggest jail (per-level realpath revalidation, hidden files, no
 #                            client cwd, suggest { base, files } contract), artifact validation on EVERY
@@ -144,7 +151,13 @@ npm test
 #                            malformed, older build; falls back to package versions without git)
 #   + test-doctor.js        (`hadron doctor` at the REAL boundary — reuses test-resume-live's fixture:
 #                            shell agent (n/a), seeded claude (green "resumes as correlated"), shared-cwd
-#                            claude (red, shared-cwd text), claude.exe with recognition disabled via
+#                            claude (red, shared-cwd text), a third shared-cwd claude that a registry record
+#                            (written for the fixture's real pid + pane) names → green "resumes as registry"
+#                            within the no-id poll interval, row registry=matched, a dead-pid record is
+#                            registry=stale and never adopted, payload sessionRegistry carries counts only, registryAgrees
+#                            is a boolean (never an id); a pinned id with a never-seen transcript is yellow, seen-then-gone is red;
+#                            a disk-seeded MANUAL id without a transcript stays on disk but is red
+#                            "checkpoint transcript missing … id is kept"; claude.exe with recognition disabled via
 #                            HADRON_TEST_UNRECOGNIZE_CLAUDE_CMD (red "untracked"); GET /api/doctor is
 #                            token-gated (GET but authenticated), leaks no sessionId key/value; disk-seeded
 #                            malformed-id AND exhausted-attempts checkpoints loaded on restart with a live
