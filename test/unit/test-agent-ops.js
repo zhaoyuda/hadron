@@ -126,6 +126,24 @@ async function main() {
     ok(!("pinned" in readAgentFile(A)), "rejected PATCHes did not touch the stored agent");
   }
 
+  console.log("\n[PATCH parked — strict boolean, absent-unless-true, tmux untouched]");
+  {
+    const r = await req("PATCH", `/api/sessions/${A}`, { parked: true });
+    ok(r.status === 200 && (await r.json()).parked === true, "PATCH {parked:true} → 200 with parked in response");
+    ok(readAgentFile(A).parked === true, "parked:true persisted to disk");
+    ok(!readAgentFile(A).archived, "parking is not archiving (no archived flag)");
+    ok(tmuxAlive(A), "parking leaves the tmux session running");
+    ok((await liveList()).find((s) => s.id === A)?.parked === true, "GET /api/sessions carries parked through (still a live agent)");
+
+    const rOff = await req("PATCH", `/api/sessions/${A}`, { parked: false });
+    ok(rOff.status === 200 && !("parked" in readAgentFile(A)), "parked:false round-trips to ABSENT on disk");
+    for (const bad of ["yes", 1, null, {}]) {
+      const rBad = await req("PATCH", `/api/sessions/${A}`, { parked: bad });
+      ok(rBad.status === 400, `non-boolean parked (${JSON.stringify(bad)}) → 400`);
+    }
+    ok(!("parked" in readAgentFile(A)), "rejected PATCHes did not touch the stored agent");
+  }
+
   console.log("\n[DELETE default = soft archive; ?force=true unlinks]");
   {
     await req("PATCH", `/api/sessions/${A}`, { pinned: true });
@@ -171,6 +189,11 @@ async function main() {
     ok(readAgentFile(C).pinned === true, "CLI pin persisted");
     hadron(["unpin", C]); // bare id keeps working
     ok(!("pinned" in readAgentFile(C)), "hadron unpin by id persisted");
+    const parkOut = hadron(["park", "ops gamma"]);
+    ok(/parked Ops Gamma \(ops-gamma\)/.test(parkOut) && /keep running/.test(parkOut), "hadron park by name resolves + says nothing is killed");
+    ok(readAgentFile(C).parked === true && tmuxAlive(C), "CLI park persisted, tmux still alive");
+    hadron(["unpark", C]);
+    ok(!("parked" in readAgentFile(C)), "hadron unpark by id persisted");
 
     const miss = hadronFails(["pin", "no-such-agent"]);
     ok(miss !== null && miss.status === 1, "unknown target → exit 1");
@@ -393,9 +416,13 @@ async function main() {
     s = await get();
     ok(r.status === 200 && s.ackRev === 1, `ackRev 99 clamps to attentionRev (ackRev ${s.ackRev})`);
     ok(readAgentFile(A).ackRev === 1, "ackRev persisted to disk");
+    ok(typeof s.ackAt === "string" && Date.parse(s.ackAt) > Date.parse(s.attentionAt) - 1 && Date.now() - Date.parse(s.ackAt) < 10000,
+      "the ack stamps ackAt (\"you last looked\" — the card's third timestamp)");
+    ok(readAgentFile(A).ackAt === s.ackAt, "ackAt persisted alongside ackRev");
     r = await req("PATCH", `/api/sessions/${A}`, { ackRev: 0 });
     s = await get();
     ok(s.ackRev === 1, "ackRev never moves backwards (0 after 1 ignored)");
+    ok(s.ackAt === readAgentFile(A).ackAt, "an ignored ack does not restamp ackAt");
     ok(s.state === "done", "ack leaves the detector state alone (still done)");
 
     // Blocked is a fresh entry → re-lights even though done was acked.
@@ -422,9 +449,10 @@ async function main() {
     await req("PATCH", `/api/sessions/${A}`, { state: "idle" });
   }
 
-  console.log("\n[server restart — pinned survives a full store reload]");
+  console.log("\n[server restart — pinned/parked survive a full store reload]");
   {
-    await req("PATCH", `/api/sessions/${A}`, { pinned: true });
+    await req("PATCH", `/api/sessions/${A}`, { pinned: true, parked: true });
+    const ackAtBefore = readAgentFile(A).ackAt;
     server.kill("SIGKILL");
     server = spawn("node", [join(REPO, "server", "index.js"), WS], {
       env: { ...process.env, PORT: String(PORT), HADRON_HOST: "127.0.0.1" },
@@ -433,6 +461,9 @@ async function main() {
     await waitForServer();
     const live = (await liveList()).find((s) => s.id === A);
     ok(live?.pinned === true, "pinned survives server restart (fresh loadAgents)");
+    ok(live?.parked === true, "parked survives server restart");
+    ok(typeof ackAtBefore === "string" && live?.ackAt === ackAtBefore, "ackAt survives the restart");
+    await req("PATCH", `/api/sessions/${A}`, { parked: false });
     ok(live?.state === "idle", "restart still resets state to idle (loader contract intact)");
     ok(live?.attentionRev === 4 && live?.ackRev === 3,
       `attentionRev/ackRev survive the restart (${live?.attentionRev}/${live?.ackRev}) — an unread agent stays unread across a service restart`);

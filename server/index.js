@@ -1045,6 +1045,13 @@ app.patch("/api/sessions/:id", async (req, res) => {
   if (pinned !== undefined && typeof pinned !== "boolean") {
     return res.status(400).json({ error: "pinned must be a boolean" });
   }
+  // parked: "fold this one away until I say otherwise" — a deck-only flag.
+  // Parking never touches the pane (tmux and claude keep running) and never
+  // archives; it is the manual twin of the client's stale fold.
+  const { parked } = req.body;
+  if (parked !== undefined && typeof parked !== "boolean") {
+    return res.status(400).json({ error: "parked must be a boolean" });
+  }
   // ackRev: "I have seen attention revision N" — a non-negative integer, never
   // above attentionRev (a client can only ack what exists), never moving back
   // (an older tab's late ack must not un-ack a newer one). The client sends the
@@ -1068,7 +1075,7 @@ app.patch("/api/sessions/:id", async (req, res) => {
   let acked = false;
   if (ackRev !== undefined) {
     const next = Math.min(ackRev, session.attentionRev || 0);
-    if (next > (session.ackRev || 0)) { session.ackRev = next; acked = true; }
+    if (next > (session.ackRev || 0)) { session.ackRev = next; session.ackAt = new Date().toISOString(); acked = true; }
   }
   if (blockReason !== undefined) session.blockReason = blockReason;
   if (name !== undefined) session.name = name;
@@ -1085,7 +1092,11 @@ app.patch("/api/sessions/:id", async (req, res) => {
     if (pinned) session.pinned = true;
     else delete session.pinned; // stored form: absent unless true (like icon/sortOrder)
   }
-  const shouldSave = [name, task, notes, artifacts, relatedAgents, group, icon, sortOrder, deletable, pinned].some(v => v !== undefined)
+  if (parked !== undefined) {
+    if (parked) session.parked = true;
+    else delete session.parked;
+  }
+  const shouldSave = [name, task, notes, artifacts, relatedAgents, group, icon, sortOrder, deletable, pinned, parked].some(v => v !== undefined)
     || acked || (state !== undefined && (state === "done" || state === "blocked"));
   if (shouldSave) await saveAgentLocked(session); // same lock as append/delete — no interleaved read-modify-write
   res.json(resolvedSession(session));
@@ -2038,6 +2049,7 @@ function ackByInput(sessionId) {
   const rev = s.attentionRev || 0;
   if (rev <= (s.ackRev || 0)) return;
   s.ackRev = rev;
+  s.ackAt = new Date().toISOString();
   saveAgentLocked(s).catch((e) => console.error(`[attention] ${sessionId}: ${e.message}`));
 }
 

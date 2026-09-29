@@ -398,6 +398,8 @@ async function main() {
     ok(await waitFor(async () => (await get()).ackRev, rev), `input on the agent's own WS acks (ackRev ${rev})`);
     ok(await waitFor(() => { try { return JSON.parse(readFileSync(join(WS, ".hadron", "agents", "pty-a.json"), "utf-8")).ackRev; } catch { return undefined; } }, rev),
       "…and the ack is persisted to the agent file");
+    s = await get();
+    ok(typeof s.ackAt === "string" && Date.now() - Date.parse(s.ackAt) < 10000, "a keystroke ack stamps ackAt too");
     ws.close(); await waitFor(async () => (await health()).livePtys, 0);
     await patch({ state: "idle" });
   }

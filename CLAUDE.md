@@ -49,7 +49,7 @@ scripts/
   setup-workspace.js  # Interactive workspace initializer
 test/
   unit/               # detectState/nextState fixtures + security HTTP suite (npm test)
-  e2e/                # Playwright browser modules M1-M21 (npm run test:e2e)
+  e2e/                # Playwright browser modules M1-M22 (npm run test:e2e)
 ```
 
 ## Conventions
@@ -116,8 +116,9 @@ npm test
 #                            client cwd, suggest { base, files } contract), artifact validation on EVERY
 #                            write path (append, PATCH, session-create seed) + canonical path contract
 #                            incl. symlink escapes, DELETE 409, store-level lock FIFO barrier)
-#   + test-agent-ops.js     (agent ops: pinned strict-boolean PATCH + absent-unless-true persistence,
-#                            archive/restore lifecycle over HTTP, CLI pin/unpin/close/restore/ls --archived
+#   + test-agent-ops.js     (agent ops: pinned AND parked strict-boolean PATCH + absent-unless-true persistence
+#                            (parking leaves tmux running and never sets archived; both survive the restart block),
+#                            archive/restore lifecycle over HTTP, CLI pin/unpin/park/unpark/close/restore/ls --archived
 #                            with name→id resolution — ambiguous names exit 1 with candidates; custom
 #                            launchers incl. argv quoting; Bearer alias; bulk close; kernels CLI with
 #                            atomic PATCH merge; /api/file .hadron write jail; restart persistence; archive kills
@@ -130,7 +131,8 @@ npm test
 #                            once per ENTRY (same state again does not), PATCH ackRev is a non-negative
 #                            integer (400 otherwise), clamped to attentionRev, never moves back, leaves state
 #                            alone; {state, ackRev} in one request cannot swallow its own bump; both revs
-#                            persist and survive the restart block while state resets to idle; test-pane-resolution
+#                            persist and survive the restart block while state resets to idle; an accepted ack
+#                            stamps ackAt ("you last looked", persisted, an ignored ack does not restamp it); test-pane-resolution
 #                            covers the boot rule: a first post-boot verdict equal to the persisted attentionState is a
 #                            re-recognition, not an entry — a read agent stays read across a restart)
 #   + test-terminal-ws.js   (terminal pty lifecycle — the macOS ptmx-exhaustion class: normal close
@@ -145,7 +147,7 @@ npm test
 #                            mints an agent, no pty, no shell tmux session, archived record untouched;
 #                            restore → attaches again; ?shell= must be sh<N> or vim-<ts> (the client's
 #                            shapes) or the upgrade is refused with 400 — no pty, no tmux session;
-#                            {type:"input"} on the agent's OWN WS acks its attention (persisted), on a
+#                            {type:"input"} on the agent's OWN WS acks its attention (persisted, ackAt stamped), on a
 #                            shell-tab WS it does not, and neither do xterm's terminal-query replies (DA / CPR /
 #                            focus / OSC) on the agent's WS — attaching is not typing)
 #   + test-resume-live.js   (auto-resume at the REAL boundary: private tmux server (HADRON_TMUX_SOCKET) +
@@ -263,6 +265,15 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #   + test/e2e/m19-artifacts-ux.js (artifacts add/remove UX: Browse popover survives folder clicks (pointerdown close model) + keyboard nav + hidden-files toggle; atomic add with canonical de-dupe; URL validation + escaped labels; remove with 409 drift recovery; dir artifacts — live folder groups where new on-disk files appear automatically; ephemeral file: tabs; add concurrency; viewport clamp)
 #   + test/e2e/m20-agent-ops.js  (agent ops: context-menu Pin → "📌 Pinned" section first in BOTH deck modes, card moved not duplicated, survives 3s refresh + reload; `hadron pin <name>`; `hadron close <name>` → tmux dead + JSON archived + ls --archived + restore, with the dashboard left ON the closed agent: its WS is refused (4404), no reconnect loop, record not blanked/resurrected; in-pane `hadron message` sender attribution + --raw; ambiguous names exit 1, nothing delivered)
 #   + test/e2e/m21-needs-me.js   (triage: cards light on unseen done/blocked with a "N need me" counter; a 1-s dwell on the agent's terminal in a focused window acks it — card goes quiet, ackRev persisted, and the client never PATCHes `state`; an unread agent stays lit when its state moves on; Alt+N jumps to the next unread and wraps; a re-raise on the active agent is acked as the rev moves; "Only Agents That Need Me" keeps the active card and survives a reload; the palette lists all agents (no 8-row cap) with a "needs me" hint)
+#   + test/e2e/m22-stale-fold.js (cards + stale fold: a seeded agent whose three timestamps are days old folds into a
+#                                 collapsed "Stale · N" section rendered last (harness `seed(ws)` hook writes it before boot);
+#                                 fresh or timestamp-less agents stay visible; the header toggles the fold and the open state
+#                                 survives the 3-s refresh + a reload; a collapsed fold takes no Alt+N slot while the
+#                                 palette's full order still reaches it; the active agent never folds; context-menu Park →
+#                                 fold + ⏸ + `parked:true` on disk with tmux alive and nothing archived; PATCH state done
+#                                 pulls the parked card out lit and acking folds it again; Unpark restores; View → Fold
+#                                 Stale After "Never" removes the age fold, persists, "1 day" folds again, an unknown value
+#                                 falls back to 3 days; the tooltip spells out the timestamps)
 ```
 
 `npm run test:e2e` runs `test/e2e/run-all.js`, which executes every `m*.js`
@@ -313,7 +324,7 @@ staging first:
    changes.
 2. `npm test` + `npm run test:e2e` in the worktree. The runner reports M10 as
    `XFAIL` (known headless-chromium clipboard issue, fails identically on main)
-   and exits 0 when it's the only failure — so a green run means M1–M9, M11–M21
+   and exits 0 when it's the only failure — so a green run means M1–M9, M11–M22
    all passed. Any `FAIL` (non-xfail) gates the branch.
 3. `scripts/predeploy-check.sh` — live-fire proof on staging that a service
    restart does NOT interrupt running agents (claude PIDs survive, a

@@ -38,6 +38,8 @@ let groupConfig = {}; // per-group attributes like { expandable: false }
 let deckSortMode = "state"; // "state", "manual", "name"
 let deckGroupBy = "group"; // "group" (semantic groups) or "status" (bucket by agent state)
 let deckFilter = "all"; // "all" | "needs" (only agents that need me, plus the active one)
+let deckStaleAfter = "3d"; // "1d" | "3d" | "7d" | "never" — fold quiet agents after this long
+let deckStaleOpen = false; // the Stale section is collapsed unless the operator opened it
 let currentTheme = "default"; // "default", "exploration"
 let notifyLevel = "all"; // "all" (sound+banner+flash), "banner" (banner+flash), "off"
 let titleFlashInterval = null;
@@ -223,6 +225,46 @@ function getPinnedSection() {
   return { label: "📌 Pinned", pinnedSection: true, items };
 }
 
+// ═══ STALE FOLD ═══
+// Three timestamps describe an agent's recent past: the last transcript
+// activity (claude's own record), when it last raised "needs me" (attentionAt)
+// and when the operator last looked (ackAt). The newest of them is "last
+// touched"; an agent untouched for deckStaleAfter that is not working, not
+// pinned, not needing me and not on screen folds into a collapsed Stale
+// section at the bottom of the deck — moved there, never archived, never
+// killed. `parked` is the manual version of the same fold (context menu /
+// `hadron park`). Either way, needing me pulls the card back out: attention
+// wins over quiet. Unknown timestamps fail toward visible.
+const STALE_AFTER_MS = { "1d": 86400e3, "3d": 3 * 86400e3, "7d": 7 * 86400e3, never: Infinity };
+function lastTouchedAt(s) {
+  const ts = [s.transcript?.lastActivityAt, s.attentionAt, s.ackAt]
+    .map((t) => (t ? Date.parse(t) : NaN)).filter(Number.isFinite);
+  return ts.length ? Math.max(...ts) : NaN;
+}
+function staleByAge(s) {
+  const after = Object.hasOwn(STALE_AFTER_MS, deckStaleAfter) ? STALE_AFTER_MS[deckStaleAfter] : STALE_AFTER_MS["3d"];
+  if (after === Infinity || s.state === "working") return false;
+  const t = lastTouchedAt(s);
+  return Number.isFinite(t) && Date.now() - t > after;
+}
+function isFolded(s) {
+  if (s.pinned || needsMe(s) || s.id === activeSessionId) return false;
+  return !!s.parked || staleByAge(s);
+}
+function getStaleSection() {
+  const items = sessions.filter(isFolded);
+  if (!items.length) return null;
+  // Most recently touched first; agents with no timestamp at all sink.
+  items.sort((a, b) => {
+    const ta = lastTouchedAt(a), tb = lastTouchedAt(b);
+    if (Number.isFinite(ta) !== Number.isFinite(tb)) return Number.isFinite(ta) ? -1 : 1;
+    if (ta !== tb) return tb - ta;
+    return a.id.localeCompare(b.id);
+  });
+  const parked = items.filter((s) => s.parked).length;
+  return { label: `Stale · ${items.length}${parked ? ` (${parked} parked)` : ""}`, staleSection: true, items, collapsed: !deckStaleOpen };
+}
+
 // Rendering/nav layer: either semantic groups or status buckets. Persistence and
 // group-list bookkeeping keep using getSessionGroups() (always the group axis).
 // ═══ TRIAGE (attention / ack) ═══
@@ -244,19 +286,24 @@ function getDeckSections({ filtered = true } = {}) {
     base = base.map((g) => ({ ...g, items: g.items.filter(keep) })).filter((g) => g.items.length > 0);
     if (pinnedSection) { pinnedSection = { ...pinnedSection, items: pinnedSection.items.filter(keep) }; if (!pinnedSection.items.length) pinnedSection = null; }
   }
-  if (!pinnedSection) return base;
-  base = base.map((g) => ({ ...g, items: g.items.filter((s) => !s.pinned) }));
+  // The "needs me" filter already hides every quiet agent, so the fold has
+  // nothing to add there; otherwise stale/parked cards move (not copy) to it.
+  const staleSection = filtering ? null : getStaleSection();
+  if (pinnedSection || staleSection) {
+    base = base.map((g) => ({ ...g, items: g.items.filter((s) => !s.pinned && !isFolded(s)) }));
+  }
   // Status buckets never render empty; group sections keep rendering empty
   // (they own the add/delete affordances) — unless the deck is filtered.
   if (statusMode || filtering) base = base.filter((g) => g.items.length > 0);
-  return [pinnedSection, ...base];
+  return [...(pinnedSection ? [pinnedSection] : []), ...base, ...(staleSection ? [staleSection] : [])];
 }
 
 // Deck order. Filtered by default so Alt+1..9 / Alt+H/L index what is on
-// screen; `{ filtered: false }` is the full fleet (the palette must reach a
-// quiet agent while the "needs me" filter hides it from the deck).
+// screen (a collapsed Stale section's cards are not); `{ filtered: false }` is
+// the full fleet (the palette must reach a quiet agent while the "needs me"
+// filter or the fold hides it from the deck).
 function getDisplayOrder({ filtered = true } = {}) {
-  return getDeckSections({ filtered }).flatMap((g) => g.items);
+  return getDeckSections({ filtered }).flatMap((g) => (filtered && g.staleSection && g.collapsed) ? [] : g.items);
 }
 
 function syncGroupList() {
@@ -835,6 +882,22 @@ function renderDeck() {
       html += `</div></div>`;
       return;
     }
+    // The stale fold: a click on the header opens/closes it; cards render only
+    // while open (a collapsed fold takes no Alt+N slots — see getDisplayOrder).
+    if (g.staleSection) {
+      html += `<div class="deck-group deck-group-stale">`;
+      html += `<div class="deck-group-label" data-stale-toggle title="${g.collapsed ? "Show" : "Hide"} agents untouched for ${esc(deckStaleAfter === "never" ? "…" : deckStaleAfter)} or parked (nothing here is archived)">${g.collapsed ? "▸" : "▾"} ${esc(g.label)}</div>`;
+      if (!g.collapsed) {
+        html += `<div class="deck-cards">`;
+        g.items.forEach((s) => {
+          idx++;
+          html += mkDeckCard(s, idx, false);
+        });
+        html += `</div>`;
+      }
+      html += `</div>`;
+      return;
+    }
     // In status mode the header is a state label (not editable / not a drop target);
     // omit data-group-name so the rename/contextmenu handlers don't bind to it.
     const labelAttrs = statusMode
@@ -857,7 +920,7 @@ function renderDeck() {
       // Empty, non-protected group → offer a visible delete button (no right-click
       // needed). A group whose only members are pinned (moved to the pinned
       // section) is NOT empty — deleteGroup would no-op on it anyway.
-      const hasPinnedMember = sessions.some((s) => s.pinned && (s.group || "Workers").toLowerCase() === groupKey);
+      const hasPinnedMember = sessions.some((s) => (s.pinned || isFolded(s)) && (s.group || "Workers").toLowerCase() === groupKey);
       if (g.items.length === 0 && !hasPinnedMember && gc.expandable !== false) {
         html += `<div class="dk-del dk-add-sm" title="Delete empty group "${esc(g.label)}"" data-del-group="${esc(g.label)}">×</div>`;
       }
@@ -880,6 +943,8 @@ function renderDeck() {
   el.querySelectorAll(".dk[data-sid]").forEach((card) => {
     card.addEventListener("click", () => switchSession(card.dataset.sid));
   });
+  const staleToggle = el.querySelector("[data-stale-toggle]");
+  if (staleToggle) staleToggle.addEventListener("click", () => { deckStaleOpen = !deckStaleOpen; renderDeck(); saveUIState(); });
 
   // ── Drag and drop (group axis only; status buckets aren't reorderable) ──
   if (!statusMode) initDeckDragAndDrop(el);
@@ -997,15 +1062,17 @@ function mkDeckCard(s, idx, allowDrag = true) {
   else if (state === "working") { sub = formatWorkingSubstatus(s); subClass = "dk-sub-working"; }
   else { sub = "idle" + formatBackgroundSuffix(s); subClass = "dk-sub-idle"; }
 
-  // Age of the last transcript activity (claude's own record, see
-  // server/transcript.js) — only when the agent isn't mid-turn; a working
-  // agent's substatus already says what it is doing right now.
-  const age = state !== "working" ? timeAgo(s.transcript?.lastActivityAt) : "";
+  // One age on the line: how long it has been waiting for me (attentionAt)
+  // while it needs me, else the last transcript activity (claude's own record,
+  // see server/transcript.js) — only when the agent isn't mid-turn; a working
+  // agent's substatus already says what it is doing right now. All three
+  // timestamps are spelled out in the tooltip.
+  const age = state === "working" ? "" : needs ? (timeAgo(s.attentionAt) || timeAgo(s.transcript?.lastActivityAt)) : timeAgo(s.transcript?.lastActivityAt);
   if (age) sub += ` · ${age}`;
 
   const draggable = allowDrag ? ` draggable="true"` : "";
-  const pin = s.pinned ? `<span class="dk-pin" title="Pinned">📌</span>` : "";
-  const tip = transcriptTooltip(s);
+  const pin = (s.pinned ? `<span class="dk-pin" title="Pinned">📌</span>` : "") + (s.parked ? `<span class="dk-pin dk-parked" title="Parked — folded away until you unpark it (still running)">⏸</span>` : "");
+  const tip = cardTooltip(s);
   const titleAttr = tip ? ` title="${esc(tip)}"` : "";
   return `<div class="dk${stateClass}${activeClass}" data-sid="${s.id}"${draggable}${titleAttr} oncontextmenu="showCtxMenu(event,'${s.id}')">${avatar}<div class="dk-info"><div class="dk-name">${esc(name)}${pin}</div><div class="dk-sub ${subClass}">${sub}</div></div></div>`;
 }
@@ -1029,8 +1096,11 @@ function initDeckDragAndDrop(el) {
     });
   });
 
-  // Dragover and drop on deck cards
-  el.querySelectorAll(".dk[data-sid]").forEach((card) => {
+  // Dragover and drop on deck cards. The Pinned and Stale sections are
+  // display-only (no data-group, so handleDrop would refuse) — skip them so
+  // they never paint a drop indicator they cannot honour.
+  const dndCards = [...el.querySelectorAll(".dk[data-sid]")].filter((c) => !c.closest(".deck-group-pinned, .deck-group-stale"));
+  dndCards.forEach((card) => {
     card.addEventListener("dragover", (e) => {
       e.preventDefault();
       e.dataTransfer.dropEffect = "move";
@@ -1063,7 +1133,8 @@ function initDeckDragAndDrop(el) {
   });
 
   // Dragover and drop on deck-cards containers (for dropping at end of group)
-  el.querySelectorAll(".deck-cards").forEach((container) => {
+  const dndContainers = [...el.querySelectorAll(".deck-cards")].filter((c) => !c.closest(".deck-group-pinned, .deck-group-stale"));
+  dndContainers.forEach((container) => {
     container.addEventListener("dragover", (e) => {
       // Only handle if dragging over the container itself or the add button, not over a card
       if (e.target.closest(".dk[data-sid]")) return;
@@ -1511,7 +1582,8 @@ function firstLine(text, max = 160) {
 }
 
 // Card tooltip: what the agent was asked and what it last said (transcript
-// summary from the server; absent for shell agents and unknown sessions).
+// summary from the server; absent for shell agents and unknown sessions),
+// then the three timestamps — last activity, waiting since, last looked at.
 function transcriptTooltip(s) {
   const t = s.transcript;
   if (!t) return "";
@@ -1520,6 +1592,20 @@ function transcriptTooltip(s) {
   if (t.lastPrompt) parts.push(`› ${firstLine(t.lastPrompt.text, 200)}`);
   if (t.lastReply) parts.push(firstLine(t.lastReply.text, 300) + (t.lastReply.truncated && !firstLine(t.lastReply.text, 300).endsWith("…") ? "…" : ""));
   return parts.join("\n");
+}
+function timestampsLine(s) {
+  const parts = [];
+  const act = timeAgo(s.transcript?.lastActivityAt);
+  if (act) parts.push(`last activity ${act}`);
+  const wait = timeAgo(s.attentionAt);
+  if (wait) parts.push(needsMe(s) ? `waiting for you ${wait}` : `last needed you ${wait}`);
+  const seen = timeAgo(s.ackAt);
+  if (seen) parts.push(`you last looked ${seen}`);
+  if (s.parked) parts.push("parked");
+  return parts.join(" · ");
+}
+function cardTooltip(s) {
+  return [transcriptTooltip(s), timestampsLine(s)].filter(Boolean).join("\n");
 }
 
 // ═══ LAST REPLY STRIP ═══
@@ -1936,6 +2022,7 @@ function showCtxMenu(e, sessionId) {
   menu.innerHTML = `
     <div class="cm-item" data-action="focus" data-sid="${sessionId}">Focus ${esc(s.name.toUpperCase())}</div>
     <div class="cm-item" data-action="pin" data-sid="${sessionId}">${s.pinned ? "Unpin" : "Pin"} ${esc(s.name.toUpperCase())}</div>
+    <div class="cm-item" data-action="park" data-sid="${sessionId}" title="${s.parked ? "Bring it back to its group" : "Fold it into the Stale section — keeps running, never archived"}">${s.parked ? "Unpark" : "Park"} ${esc(s.name.toUpperCase())}</div>
     ${canClose ? `<div class="cm-sep"></div><div class="cm-item danger" data-action="close" data-sid="${sessionId}">Close ${esc(s.name.toUpperCase())}</div>` : ""}
   `;
   menu.style.display = "block";
@@ -1949,29 +2036,34 @@ function showCtxMenu(e, sessionId) {
       hideCtxMenu();
       if (action === "focus") switchSession(sid);
       else if (action === "pin") togglePin(sid);
+      else if (action === "park") togglePark(sid);
       else if (action === "close") closeSession(sid);
     });
   });
 }
 
-async function togglePin(sessionId) {
+// Flip one of the deck-only boolean flags (pinned / parked): PATCH, mirror
+// the server's absent-unless-true shape locally, re-render.
+async function toggleFlag(sessionId, key) {
   const s = sessions.find((x) => x.id === sessionId);
   if (!s) return;
-  const pinned = !s.pinned;
+  const value = !s[key];
   try {
     const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pinned }),
+      body: JSON.stringify({ [key]: value }),
     });
-    if (!res.ok) return;
-    if (pinned) s.pinned = true;
-    else delete s.pinned;
+    if (!res.ok) { console.warn(`Failed to set ${key}=${value} on ${sessionId}: HTTP ${res.status}`); return; }
+    if (value) s[key] = true;
+    else delete s[key];
     renderDeck();
   } catch (e) {
-    console.error("Failed to toggle pin:", e);
+    console.error(`Failed to toggle ${key}:`, e);
   }
 }
+const togglePark = (sessionId) => toggleFlag(sessionId, "parked");
+const togglePin = (sessionId) => toggleFlag(sessionId, "pinned");
 
 function hideCtxMenu() {
   document.getElementById("ctx-menu").style.display = "none";
@@ -2473,10 +2565,14 @@ async function showMenu(menuId, anchorEl) {
       menuItem("Text (built-in)", "set-editor", { checked: editorPref() === "text", data: 'data-editor="text"' }),
       menuItem("Vim (terminal)", "set-editor", { checked: editorPref() === "vim", data: 'data-editor="vim"' }),
     ].join("");
+    const staleSub = [["1d", "1 day"], ["3d", "3 days"], ["7d", "7 days"], ["never", "Never"]].map(([id, label]) =>
+      menuItem(label, "set-stale-after", { checked: deckStaleAfter === id, data: `data-stale-after="${id}"` })
+    ).join("");
     menu.innerHTML = [
       menuItem("Deck Layout", "", { submenu: groupBySub }),
       menuItem("Agent Sorting", "", { submenu: sortSub }),
       menuItem("Only Agents That Need Me", "toggle-needs-filter", { checked: deckFilter === "needs" }),
+      menuItem("Fold Stale After", "", { submenu: staleSub }),
       menuItem("Theme", "", { submenu: themeSub }),
       menuItem("Editor", "", { submenu: editorSub }),
       menuItem("Notifications", "", { submenu: notifySub }),
@@ -2549,6 +2645,10 @@ async function handleMenuAction(action, item) {
     saveUIState();
   } else if (action === "toggle-needs-filter") {
     setDeckFilter(deckFilter === "needs" ? "all" : "needs");
+  } else if (action === "set-stale-after") {
+    deckStaleAfter = Object.hasOwn(STALE_AFTER_MS, item.dataset.staleAfter) ? item.dataset.staleAfter : "3d";
+    renderDeck();
+    saveUIState();
   } else if (action === "set-theme") {
     applyTheme(item.dataset.theme || "default");
   } else if (action === "set-notify") {

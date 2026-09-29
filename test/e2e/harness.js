@@ -29,9 +29,14 @@ export function freePort() {
   });
 }
 
-export async function bootWorkspace({ name = "e2e" } = {}) {
+// `seed(ws)` runs after the workspace scaffold and before the server boots —
+// for records that must already be on disk at load time (an agent whose
+// timestamps are days old, say). Boot never autostarts agents, so a seeded
+// agent gets a plain shell pane.
+export async function bootWorkspace({ name = "e2e", seed } = {}) {
   const ws = mkdtempSync(join(tmpdir(), "hadron-e2e-"));
   execFileSync("node", [join(REPO, "scripts", "setup-workspace.js"), ws, "--name", name], { stdio: "ignore" });
+  if (seed) await seed(ws);
 
   const port = await freePort();
   const proc = spawn("node", [join(REPO, "server", "index.js"), ws], {

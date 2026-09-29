@@ -95,13 +95,14 @@ function writeAgentFile(id, data) {
 }
 
 export function saveAgent(agent) {
-  const { id, name, group, task, icon, tmuxSession, artifacts, relatedAgents, notes, sortOrder, archived, archivedAt, deletable, cwd, launchCommand, autostartedAt, pinned } = agent;
+  const { id, name, group, task, icon, tmuxSession, artifacts, relatedAgents, notes, sortOrder, archived, archivedAt, deletable, cwd, launchCommand, autostartedAt, pinned, parked } = agent;
   const data = { id, name, group: group || "Workers", task, artifacts: artifacts || [], relatedAgents: relatedAgents || [], notes: notes || "" };
   // Never fabricate a name here: the real one is `hadron-<workspace>-<id>`
   // (server/index.js tmuxSessionName) and only the server knows the prefix.
   if (tmuxSession) data.tmuxSession = tmuxSession;
   if (icon) data.icon = icon;
   if (pinned) data.pinned = true;
+  if (parked) data.parked = true; // deck fold only — never implies archived
   if (sortOrder !== undefined && sortOrder !== null) data.sortOrder = sortOrder;
   if (archived) data.archived = true;
   if (archived && archivedAt) data.archivedAt = archivedAt;
@@ -116,7 +117,10 @@ export function saveAgent(agent) {
   // still lit after a deploy (state itself is not persisted — it is re-detected).
   if (Number.isInteger(agent.attentionRev) && agent.attentionRev > 0) {
     data.attentionRev = agent.attentionRev;
-    if (Number.isInteger(agent.ackRev) && agent.ackRev > 0) data.ackRev = Math.min(agent.ackRev, agent.attentionRev);
+    if (Number.isInteger(agent.ackRev) && agent.ackRev > 0) {
+      data.ackRev = Math.min(agent.ackRev, agent.attentionRev);
+      if (agent.ackAt) data.ackAt = agent.ackAt; // "you last looked" — one of the card's three timestamps
+    }
     if (agent.attentionAt) data.attentionAt = agent.attentionAt;
     if (agent.attentionState === "done" || agent.attentionState === "blocked") data.attentionState = agent.attentionState;
   }

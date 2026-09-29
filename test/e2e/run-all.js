@@ -26,7 +26,7 @@ const XFAIL = new Set(["m10-clipboard.js"]);
 
 const modules = readdirSync(here)
   .filter((f) => /^m\d+-.*\.js$/.test(f))
-  .sort((a, b) => (parseInt(a) || 0) - (parseInt(b) || 0));
+  .sort((a, b) => parseInt(a.slice(1)) - parseInt(b.slice(1)));
 
 const results = [];
 for (const mod of modules) {

@@ -203,7 +203,7 @@ const COMMAND_FLAGS = {
   skills: [],
   send: [],
   message: ["no-enter", "raw", "force"],
-  pin: [], unpin: [], close: [], restore: [],
+  pin: [], unpin: [], park: [], unpark: [], close: [], restore: [],
   adopt: ["session-id", "force"],
   artifacts: ["auto"],
   kernels: ["json", "marimo", "jupyter"],
@@ -426,6 +426,14 @@ async function main() {
       const pinned = cmd === "pin";
       await api("PATCH", `/api/sessions/${agent.id}`, { pinned });
       console.log(`${pinned ? "pinned" : "unpinned"} ${agent.name} (${agent.id})`);
+      break;
+    }
+    case "park":
+    case "unpark": {
+      const agent = await resolveTargetOrSelf(positional[0]);
+      const parked = cmd === "park";
+      await api("PATCH", `/api/sessions/${agent.id}`, { parked });
+      console.log(`${parked ? "parked" : "unparked"} ${agent.name} (${agent.id})${parked ? " — folded into the deck's Stale section; tmux and claude keep running" : ""}`);
       break;
     }
     case "close": {
@@ -781,6 +789,9 @@ Commands:
        (custom launchers are defined in .hadron/config.json "launchers" — see docs/CONFIGURATION.md)
   hadron pin [name|id]                     pin an agent to the deck's 📌 Pinned section (no arg = self)
   hadron unpin [name|id]                   unpin (no arg = self)
+  hadron park [name|id]                    fold an agent into the deck's Stale section (nothing is killed
+                                           or archived; it comes back when it next needs you) (no arg = self)
+  hadron unpark [name|id]                  unfold (no arg = self)
   hadron close [name|id ...]               archive agent(s): tmux dies, JSON kept (no arg = self;
                                            several targets allowed — self is archived last)
   hadron restore <name|id ...>             bring archived agent(s) back (searches the archive)

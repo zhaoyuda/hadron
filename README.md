@@ -20,6 +20,7 @@ Hadron solves this by giving each agent a card on a shared deck. At a glance you
 
 - **Multi-agent dashboard** — See all agents at a glance, organized into groups. Automatic state detection shows who's working, idle, blocked, or done.
 - **Triage ("needs me")** — State and attention are separate bits, like a mailbox: every time an agent enters *done* or *blocked* its card lights up and stays lit until you have actually looked at it (its terminal on screen in a focused window for a second, or a keystroke into its pane). Looking never edits the state — a done agent still reads "done", just quietly. The topbar counts how many need you, Alt+N jumps to the next one, and View → "Only Agents That Need Me" folds the rest away. An agent that finishes another round while you are elsewhere lights up again.
+- **Stale fold** — With dozens of agents most cards are history. Each card carries three timestamps (last transcript activity, waiting for you since, you last looked — hover for all three; the line shows the one that matters now). An agent untouched for longer than View → "Fold Stale After" (default 3 days) folds into a collapsed **Stale** section at the end of the deck; a working, pinned, needs-me or active agent never folds, and an agent with no timestamps at all (a plain shell agent has none) stays visible rather than guessed stale. Park one by hand (card context menu, or `hadron park <name>`) to fold it regardless of age. Folding moves the card and nothing else: tmux and claude keep running, nothing is archived, and the moment a folded agent needs you it comes back out lit.
 - **Real terminals** — Each agent runs in its own tmux session, rendered via xterm.js. Full terminal emulation, not a log viewer.
 - **Artifact panel** — Attach files to any agent: Markdown (rendered), Python (syntax-highlighted, editable via vim), CSV (table view), SQL, Jupyter notebooks, and Marimo notebooks.
 - **Live artifacts** — File artifacts auto-reload when changed on disk. Marimo notebooks support `--watch`, and notebook state survives agent switches.
@@ -107,6 +108,8 @@ hadron message <id> "text"               # deliver a prompt to a running agent �
                                          #   multiline/special chars (tmux buffer paste);
                                          #   pipe stdin with `-`; --no-enter to skip submit
 hadron send <id> "keys"                  # low-level: type raw keys into a pane
+hadron park [name|id] | unpark           # fold an agent into the deck's Stale section (it keeps
+                                         #   running; never archives) / bring it back
 hadron artifacts add <path...>           # attach files to the current agent
 hadron notes [show|set|append]           # per-agent durable notes
 hadron version                           # is the server running the code in this tree?

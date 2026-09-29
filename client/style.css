@@ -161,6 +161,12 @@ html, body {
 .deck-group-status .deck-group-label { cursor: default; }
 /* Pinned section: display-only header (no rename/drop affordances). */
 .deck-group-pinned .deck-group-label { cursor: default; color: var(--yellow, #d29922); }
+/* Stale fold: the header is the toggle; folded cards read quieter. */
+.deck-group-stale .deck-group-label { cursor: pointer; color: var(--text3); }
+.deck-group-stale .deck-group-label:hover { color: var(--text2); }
+.deck-group-stale .dk { opacity: .75; }
+.deck-group-stale .dk:hover, .deck-group-stale .dk.active { opacity: 1; }
+.dk .dk-parked { color: var(--text3); }
 .deck-group-edit {
   font-size: 10px;
   font-weight: 600;
