@@ -192,7 +192,7 @@ export function readSettings(configDir = CLAUDE_CONFIG_DIR) {
   return { path, settings, existed: true };
 }
 
-function writeSettings(path, settings, prevText) {
+export function writeSettings(path, settings, prevText) {
   if (prevText !== null) writeFileSync(`${path}.hadron-bak`, prevText);
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(settings, null, 2) + "\n");

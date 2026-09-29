@@ -25,6 +25,7 @@ import { warnOnce } from "./log.js";
 import { gitChanges, gitDiffFile } from "./changes.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { readQuota } from "./quota.js";
+import { validateCheckpoint, safeCheckpoint, verifyHookClaim, applyHookClaim } from "./checkpoint.js";
 import {
   listAnnotations, createAnnotation, updateAnnotation, deleteAnnotation,
   sendAnnotations, resolveAnnotation, reopenAnnotations, retryDispatch,
@@ -539,7 +540,7 @@ const DOCTOR_SIM_GENERATION = `doctor-sim-reboot-${randomUUID()}`;
 // so every free-string checkpoint field is allowlisted to its known set here;
 // anything else collapses to the literal "invalid" (which also keeps such a
 // checkpoint out of the "green" verdict — "invalid" is below every resume policy).
-const CONFIDENCE_VALUES = new Set(["authoritative", "correlated", "ambiguous", "manual", "registry"]);
+const CONFIDENCE_VALUES = new Set(["authoritative", "correlated", "ambiguous", "manual", "registry", "hook"]);
 const RUNTIME_VALUES = new Set(["claude", "shell"]);
 const RESTORE_STATES = new Set(["started", "ready", "failed"]);
 const allowlist = (set) => (v) => (v == null || v === "" ? null : set.has(v) ? v : "invalid");
@@ -983,8 +984,9 @@ function coreFor(s, core) {
 // the agent's own business (transcript text, files, coreDismissed, context
 // arithmetic); the single-session POST/PATCH responses are the reduced form.
 function resolvedSession(s, { authenticated = false } = {}) {
-  const { transcript, contextPct, files, coreDismissed, ...rest } = s;
+  const { transcript, contextPct, files, coreDismissed, checkpoint, ...rest } = s;
   const context = contextWire(s);
+  const cp = safeCheckpoint(checkpoint);
   let fw = null;
   if (authenticated && files) {
     const hidden = coreHidden(s);
@@ -992,6 +994,9 @@ function resolvedSession(s, { authenticated = false } = {}) {
   }
   return {
     ...rest,
+    // The agent's own handoff (goal / next / blocked / outputs): the card line,
+    // same class as task/notes — typed wire form, absent when empty.
+    ...(cp ? { checkpoint: cp } : {}),
     // coreDismissed is the operator's own list, but its entries are paths the
     // transcript named — same class as `files`, token-bearing readers only.
     ...(authenticated && Array.isArray(coreDismissed) && coreDismissed.length ? { coreDismissed } : {}),
@@ -1077,6 +1082,85 @@ app.post("/api/sessions/:id/adopt", (req, res) => {
   saveRuntimeCheckpoint(session, true);
   console.log(`[resume] agent ${id}: session id adopted manually (confidence manual)`);
   res.json(resolvedSession(session));
+});
+
+// The agent's own handoff checkpoint (`hadron checkpoint --goal … --next …`).
+// Whole-object replace; the CLI merges over the current one client-side. An
+// all-empty body clears it. `at` is the server clock.
+app.post("/api/sessions/:id/checkpoint", async (req, res) => {
+  const { id } = req.params;
+  const session = sessions.get(id);
+  if (!session || session.archived) return res.status(404).json({ error: "agent not found" });
+  const v = validateCheckpoint(req.body);
+  if (v.error) return res.status(400).json({ error: v.error });
+  if (v.checkpoint) session.checkpoint = v.checkpoint; else delete session.checkpoint;
+  await saveAgentLocked(session);
+  res.json({ ok: true, checkpoint: safeCheckpoint(session.checkpoint) });
+});
+
+// claude's own SessionStart hook (`hadron checkpoint --hook`, installed by
+// `hadron checkpoint --install-hook`) reports the conversation's session_id
+// with the pane it runs in and its own pid. The claim renames the agent's
+// conversation only when it is provably about this agent's pane: the pane
+// belongs to the agent's MAIN tmux session, the hook's process descends from
+// that pane's process through a live claude (verifyHookClaim), the claim is
+// not older than the last accepted one, and claude's session registry — the
+// same process's own record — does not name a different id (applyHookClaim).
+// Mirrors consultRegistry: identity only, restoreAttempt/desiredRuntime untouched.
+const HOOK_CLOCK_SKEW_MS = 5000;
+app.post("/api/hook/session-start", (req, res) => {
+  const b = req.body || {};
+  if (typeof b.pane !== "string" || !/^%\d+$/.test(b.pane)) return res.status(400).json({ error: "pane must be a tmux pane id (%N)" });
+  if (typeof b.sessionId !== "string" || !UUID_RE.test(b.sessionId)) return res.status(400).json({ error: "sessionId must be a UUID" });
+  const at = Number(b.at);
+  if (!Number.isFinite(at) || at <= 0) return res.status(400).json({ error: "at must be a timestamp (ms)" });
+  if (at > Date.now() + HOOK_CLOCK_SKEW_MS) return res.status(400).json({ error: "at is in the future" });
+  // The id must be the one claude itself named in transcript_path: internal
+  // consistency, not provenance (the file need not exist yet at SessionStart)
+  // — a token holder under the pane cannot pin another cwd's UUID; two agents
+  // sharing a cwd remain each other's (the scrape refuses shared cwds outright).
+  if (typeof b.transcriptPath !== "string" || basename(b.transcriptPath) !== `${b.sessionId}.jsonl`) return res.status(400).json({ error: "transcriptPath must name <sessionId>.jsonl (claude's own transcript_path)" });
+  const pid = Number(b.pid);
+  if (!Number.isInteger(pid) || pid <= 0) return res.status(400).json({ error: "pid must be a positive integer" });
+  const owner = tmuxSafe(["display-message", "-t", b.pane, "-p", "#{session_name}"]);
+  if (!owner || !owner.startsWith(`${TMUX_PREFIX}-`)) return res.status(404).json({ error: "pane is not under a Hadron agent" });
+  const suffix = owner.slice(TMUX_PREFIX.length + 1);
+  const id = agentIdFromSuffix(suffix);
+  if (id !== suffix) return res.status(409).json({ error: "pane is a shell tab / editor pane, not the agent's conversation" });
+  const session = sessions.get(id);
+  if (!session || session.archived) return res.status(404).json({ error: "agent not found" });
+  if (session.cwd && basename(dirname(b.transcriptPath)) !== claudeProjectDir(session.cwd)) return res.status(409).json({ error: "transcriptPath is not under the agent's cwd project (a claude started elsewhere?)" });
+  // The conversation pane = the session's active pane, exactly what the
+  // registry match keys on (paneTarget) — a split of the agent's window is not it.
+  const conv = tmuxSafe(["display-message", "-t", owner, "-p", "#{pane_id} #{pane_pid}"]);
+  const [convPane, convPid] = (conv || "").split(" ");
+  if (convPane !== b.pane) return res.status(409).json({ error: "pane is not the agent's conversation pane (a split of its window?)" });
+  const panes = [{ paneId: convPane, panePid: Number(convPid) }];
+  const v = verifyHookClaim({ panes, pane: b.pane, hookPid: pid, identity: processIdentity, parent: parentPid });
+  if (!v.ok) {
+    // Silent-failure rule: a claim refused for the same reason again and again
+    // (a wrapper NAMED claude between the pane and the real one, an agent that
+    // runs `claude -p` from its Bash tool) means the hook never lands — say so
+    // once per (agent, reason), not on every POST.
+    warnOnce(`hook-claim:${id}:${v.reason}`, `[resume] agent ${id}: SessionStart hook claim refused (${v.reason}) — the hook will not identify this agent's session while that holds; \`hadron adopt\` or the registry still can`);
+    return res.status(403).json({ error: v.reason });
+  }
+  const rt = session.runtime || (session.runtime = {});
+  let registry = null;
+  try { registry = registryLookupFor(id)(); } catch {}
+  const before = rt.sessionId;
+  const r = applyHookClaim(rt, { sessionId: b.sessionId, at, claudePid: v.claudePid }, {
+    registry, pinned: PINNED_CONFIDENCE,
+    fileExists: session.cwd ? sessionFileExists(session.cwd, b.sessionId) : null,
+  });
+  if (!r.accepted) return res.status(409).json({ error: r.reason });
+  if (r.changed) {
+    const tracker = runtimeTrackers.get(id);
+    if (tracker) tracker.lastCheckAt = 0;
+    saveRuntimeCheckpoint(session, true);
+    console.log(`[resume] agent ${id}: ${before === rt.sessionId ? "session id confirmed by" : "session id taken from"} claude's SessionStart hook (pane matched, process verified)`);
+  }
+  res.json({ ok: true, changed: r.changed, confidence: rt.confidence });
 });
 
 app.delete("/api/sessions/:id/permanent", (req, res) => {

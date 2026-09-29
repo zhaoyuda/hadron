@@ -13,6 +13,7 @@ import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { syncSkills, removeSkills, skillsStatus, userSkillsDir } from "../server/skills.js";
 import { gitInfo, packageVersion, short } from "../server/provenance.js";
+import { hookInstallStatus, installSessionHook, uninstallSessionHook } from "../server/checkpoint.js";
 import { pickClaudeRateLimits, writeReceipt, readQuota, readClaudeQuota, quotaInstallStatus, installQuotaSink, uninstallQuotaSink, STDIN_MAX_BYTES } from "../server/quota.js";
 
 const REPO = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -204,7 +205,7 @@ function printSkillsStatus() {
 // ── flag parsing ──
 // Presence-only flags must be declared here or they swallow the next positional
 // (`hadron message --raw "Beta Two" hi` would resolve "hi" as the target).
-const BOOLEAN_FLAGS = new Set(["json", "archived", "all", "raw", "no-enter", "start", "auto", "force", "restart", "tee", "install", "uninstall"]);
+const BOOLEAN_FLAGS = new Set(["json", "archived", "all", "raw", "no-enter", "start", "auto", "force", "restart", "tee", "install", "uninstall", "hook", "install-hook", "uninstall-hook"]);
 // Every --flag a command accepts. Anything else is rejected up front with
 // `unknown option: --x` (exit 1) — a typo like `watchdog --restrat` used to be
 // silently ignored and exit 0, which from a timer unit looks like success.
@@ -220,6 +221,7 @@ const COMMAND_FLAGS = {
   artifacts: ["auto"],
   kernels: ["json", "marimo", "jupyter"],
   notes: [],
+  checkpoint: ["json", "goal", "next", "blocked", "hook", "install-hook", "uninstall-hook"],
   annotations: ["json"],
   watchdog: ["restart", "json", "stale-after", "boot-grace"],
   doctor: ["json"],
@@ -259,6 +261,17 @@ function printAgent(a) {
   if (a.artifacts && a.artifacts.length) console.log(`  artifacts: ${a.artifacts.map((x) => x.label || x.value).join(", ")}`);
   if (a.relatedAgents && a.relatedAgents.length) console.log(`  related: ${a.relatedAgents.join(", ")}`);
   if (a.notes) console.log(`  notes: ${a.notes.split("\n")[0]}${a.notes.includes("\n") ? " …" : ""}`);
+  if (a.checkpoint) for (const l of checkpointLines(a.checkpoint)) console.log(`  ${l}`);
+}
+function checkpointLines(c) {
+  const one = (t) => String(t).split("\n")[0] + (String(t).includes("\n") ? " …" : "");
+  const out = [];
+  if (c.goal) out.push(`checkpoint: ${one(c.goal)}`);
+  if (c.next) out.push(`  → ${one(c.next)}`);
+  if (c.blocked) out.push(`  ⚠ ${one(c.blocked)}`);
+  if (c.outputs && c.outputs.length) out.push(`  outputs: ${c.outputs.join(", ")}`);
+  if (c.at) out.push(`  at: ${c.at}`);
+  return out;
 }
 
 
@@ -615,6 +628,81 @@ async function main() {
       die("usage: hadron notes [show|set \"...\"|append \"...\"]");
       break;
     }
+    case "checkpoint": {
+      // --hook: claude's SessionStart hook. Everything it needs is in the
+      // env Hadron stamps on the agent's tmux session (HADRON_PORT /
+      // HADRON_TOKEN — never the runtime.json fallback, so a hook firing in a
+      // pane of one Hadron instance can never report to another) plus
+      // TMUX_PANE; missing any of them = not a Hadron agent = exit 0 silently.
+      // Whatever happens, exit 0: a failing hook would block claude's startup.
+      if (flags.hook) {
+        const port = process.env.HADRON_PORT, token = process.env.HADRON_TOKEN, pane = process.env.TMUX_PANE;
+        if (!port || !token || !pane || !/^%\d+$/.test(pane) || !/^\d+$/.test(port)) break;
+        let payload = null;
+        try {
+          if (!process.stdin.isTTY) {
+            const chunks = []; let n = 0;
+            const timer = setTimeout(() => { try { process.stdin.destroy(); } catch {} }, 2000);
+            for await (const c of process.stdin) { n += c.length; if (n > STDIN_MAX_BYTES) { chunks.length = 0; break; } chunks.push(c); }
+            clearTimeout(timer);
+            if (chunks.length) payload = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
+          }
+        } catch { payload = null; }
+        if (!payload || typeof payload.session_id !== "string") break;
+        try {
+          await fetch(`http://127.0.0.1:${port}/api/hook/session-start`, {
+            method: "POST", headers: { "Content-Type": "application/json", "x-hadron-token": token },
+            body: JSON.stringify({ sessionId: payload.session_id, pane, pid: process.pid, at: Date.now(), cwd: payload.cwd, transcriptPath: payload.transcript_path }),
+            signal: AbortSignal.timeout(3000),
+          });
+        } catch {}
+        break;
+      }
+      const hadronBin = join(REPO, "bin", "hadron.js");
+      if (flags["install-hook"] && flags["uninstall-hook"]) die("choose one of --install-hook / --uninstall-hook");
+      if (flags["install-hook"]) {
+        let r;
+        try { r = installSessionHook({ hadronBin }); } catch (e) { die(`checkpoint --install-hook: ${e.message}`); }
+        if (!r.changed) console.log(`already installed in ${r.path}:\n  ${r.command}`);
+        else console.log(`${r.repaired ? `repointed the hook from another checkout (was: ${r.repaired})\ninstalled` : "installed"} in ${r.path} (backup: ${r.path}.hadron-bak)\n  hooks.SessionStart += ${r.command}\nclaude sessions started from now on report their session id to Hadron on startup, /clear and --resume (an already-running session reports on its next /clear).`);
+        break;
+      }
+      if (flags["uninstall-hook"]) {
+        let r;
+        try { r = uninstallSessionHook(); } catch (e) { die(`checkpoint --uninstall-hook: ${e.message}`); }
+        console.log(r.changed ? `removed from ${r.path}` : `not installed in ${r.path} — nothing to do`);
+        break;
+      }
+      const sub = positional[0];
+      const setting = flags.goal !== undefined || flags.next !== undefined || flags.blocked !== undefined || (positional.length && sub !== "show" && sub !== "clear");
+      const me = await whoami();
+      if (sub === "clear") {
+        await api("POST", `/api/sessions/${me.id}/checkpoint`, {});
+        console.log("checkpoint cleared");
+        break;
+      }
+      if (!setting || sub === "show") {
+        if (flags.json) { console.log(JSON.stringify(me.checkpoint || null, null, 2)); break; }
+        if (!me.checkpoint) { console.log("(no checkpoint) — hadron checkpoint --goal \"…\" --next \"…\" [--blocked \"…\"] [-- output files…]"); break; }
+        for (const l of checkpointLines(me.checkpoint)) console.log(l);
+        break;
+      }
+      // Merge over the current one: an unmentioned field is kept, an empty
+      // string clears it, positionals replace the outputs list.
+      const cur = me.checkpoint || {};
+      const body = { goal: cur.goal, next: cur.next, blocked: cur.blocked, outputs: cur.outputs };
+      for (const f of ["goal", "next", "blocked"]) {
+        if (flags[f] === undefined) continue;
+        if (flags[f] === true) die(`--${f} needs a value (use --${f} "" to clear it)`);
+        body[f] = flags[f];
+      }
+      if (positional.length) body.outputs = positional;
+      const out = await api("POST", `/api/sessions/${me.id}/checkpoint`, body);
+      if (flags.json) { console.log(JSON.stringify(out.checkpoint, null, 2)); break; }
+      if (!out.checkpoint) { console.log("checkpoint cleared"); break; }
+      for (const l of checkpointLines(out.checkpoint)) console.log(l);
+      break;
+    }
     case "annotations": {
       const sub = positional[0];
       if (sub === "ls") {
@@ -939,6 +1027,18 @@ Commands:
   hadron artifacts pin [--auto | <path...>] pin files to the current agent's panel (alias: add)
   hadron artifacts ls                      list the current agent's pinned files
   hadron notes [show|set "..."|append "..."]
+  hadron checkpoint [show] [--json]        the current agent's handoff (goal / → next / ⚠ blocked / outputs)
+  hadron checkpoint --goal "..." --next "..." [--blocked "..."] [-- <output files...>]
+                                           write it (merges over the current one; "" clears a field) —
+                                           shown on the card while the agent is idle/done and the
+                                           first thing a resumed session reads
+  hadron checkpoint clear                  remove it (an output file literally named "clear" needs --goal)
+  hadron checkpoint --install-hook         add \`hadron checkpoint --hook\` to claude's SessionStart hooks
+                                           in ~/.claude/settings.json (explicit, idempotent, backed up;
+                                           --uninstall-hook reverts): claude then tells Hadron its own
+                                           session id on start, /clear and --resume — conversation pane,
+                                           process ancestry and transcript path verified, so a shell tab,
+                                           a split, a nested claude or a forged request can't rename you
   hadron kernels [show [--json]]           show notebook kernel envs (marimo/jupyter)
   hadron kernels set --marimo PATH         set a kernel env (merges — the other runtime is
        [--jupyter PATH]                    kept; path must contain bin/python3)

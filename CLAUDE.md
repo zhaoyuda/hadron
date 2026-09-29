@@ -49,7 +49,7 @@ scripts/
   setup-workspace.js  # Interactive workspace initializer
 test/
   unit/               # detectState/nextState fixtures + security HTTP suite (npm test)
-  e2e/                # Playwright browser modules M1-M28 (npm run test:e2e)
+  e2e/                # Playwright browser modules M1-M29 (npm run test:e2e)
 ```
 
 ## Conventions
@@ -288,6 +288,31 @@ npm test
 #                            with a repo-relative header; 400 no path, 404 for anything outside the change
 #                            set incl. ../ escapes and gitignored files — a diff viewer, not a file reader;
 #                            clipped at 512 KB with truncated); nothing on the record, no session id on the wire)
+#   + test-checkpoint.js    (`hadron checkpoint` + claude's SessionStart hook — server/checkpoint.js: (A) the agent's
+#                            own handoff {goal,next,blocked,outputs,at} — strings ≤ 500 chars, control chars rejected,
+#                            ≤ 20 output paths, `at` is the server clock, all-empty clears; POST /api/sessions/:id/checkpoint
+#                            404 unknown/archived, persisted on the record, sanitised again on the way out so a corrupt
+#                            on-disk value never reaches the wire; CLI set/show/clear, --goal/--next/--blocked merge over
+#                            the existing checkpoint, positionals replace outputs, `--goal` without a value dies;
+#                            (B) POST /api/hook/session-start — the claim claude's SessionStart hook makes (session_id +
+#                            $TMUX_PANE + its own pid + transcript_path): the pane must be the agent's OWN conversation
+#                            pane (the main session's active pane, what the registry keys on) on THIS tmux server (a shell
+#                            tab → 409, a split of the window → 409, another agent's pane → 403, a foreign pane → 404), the
+#                            pid must reach that pane through exactly ONE live claude (verifyHookClaim, depth 8 — a forged
+#                            POST with a random pid → 403, a NESTED claude launched by the conversation's Bash tool → 403,
+#                            proven with a real two-claude fixture), transcriptPath must be <sessionId>.jsonl under the
+#                            project dir of the agent's cwd (400 / 409 — a token holder cannot pin an arbitrary UUID), `at`
+#                            may not be in the future (400 — it would refuse every later claim); registry `matched` with another id wins over the claim (409), a same-id
+#                            claim keeps a pinned provenance (registry/manual/authoritative), scraped → promoted to
+#                            `hook`, a different id replaces any provenance (transcriptSeen reset unless the file exists),
+#                            a claim older than the last accepted one is refused (freshness across /clear); `hadron
+#                            checkpoint --hook` reads claude's stdin JSON (cap + 2-s timer), needs HADRON_PORT/TOKEN/
+#                            TMUX_PANE from the pane env (never runtime.json — instances never cross), always exits 0
+#                            silently; `--install-hook`/`--uninstall-hook` edit hooks.SessionStart in
+#                            CLAUDE_CONFIG_DIR/settings.json (idempotent, .hadron-bak, other hooks untouched, a hook from
+#                            another checkout repointed, non-object hooks refused untouched); the real flow is proven with
+#                            the fixture claude running the hook from the agent's pane → confidence `hook`, doctor green
+#                            "resumes as hook"; logs name the agent, never the id or the token)
 ```
 
 ### Reliability gate
@@ -408,6 +433,11 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                                 permission denied → an in-page message saying why, item stays off. Notification is
 #                                 stubbed via addInitScript (headless raises none). Fixed on the way: submenu items were
 #                                 bound twice in bindMenuClicks, every submenu action fired twice)
+#   + test/e2e/m29-checkpoint.js (checkpoint: `hadron checkpoint --goal … --next … -- <outputs>` typed INSIDE the agent's
+#                                 pane lands on the record (goal/next/outputs/at, no blocked key) and the CLI echoes it; the
+#                                 card's sub line shows "→ next" (.dk-cp) while idle, the tooltip lists goal/next/outputs under
+#                                 "checkpoint", the open GET carries it; `--blocked` merges (goal + next kept) and wins the sub
+#                                 line as "⚠ …"; survives a reload; `show` prints it, `clear` removes line, record and wire)
 ```
 
 `npm run test:e2e` runs `test/e2e/run-all.js`, which executes every `m*.js`
@@ -458,7 +488,7 @@ staging first:
    changes.
 2. `npm test` + `npm run test:e2e` in the worktree. The runner reports M10 as
    `XFAIL` (known headless-chromium clipboard issue, fails identically on main)
-   and exits 0 when it's the only failure — so a green run means M1–M9, M11–M26
+   and exits 0 when it's the only failure — so a green run means M1–M9, M11–M29
    all passed. Any `FAIL` (non-xfail) gates the branch.
 3. `scripts/predeploy-check.sh` — live-fire proof on staging that a service
    restart does NOT interrupt running agents (claude PIDs survive, a

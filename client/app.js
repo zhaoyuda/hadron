@@ -1087,6 +1087,10 @@ function mkDeckCard(s, idx, allowDrag = true) {
   // timestamps are spelled out in the tooltip.
   const age = state === "working" ? "" : needs ? (timeAgo(s.attentionAt) || timeAgo(s.transcript?.lastActivityAt)) : timeAgo(s.transcript?.lastActivityAt);
   if (age) sub += ` · ${age}`;
+  // The agent's own handoff (`hadron checkpoint`): while it is idle or done,
+  // "→ next" (or "⚠ blocked") is more useful than the bare state word.
+  const cpLine = checkpointLine(s);
+  if (cpLine && (state === "idle" || state === "done")) sub = `<span class="dk-cp">${esc(cpLine)}</span>${age ? ` · ${age}` : ""}`;
 
   const draggable = allowDrag ? ` draggable="true"` : "";
   const pin = (s.pinned ? `<span class="dk-pin" title="Pinned">📌</span>` : "") + (s.parked ? `<span class="dk-pin dk-parked" title="Parked — folded away until you unpark it (still running)">⏸</span>` : "");
@@ -1823,7 +1827,26 @@ function contextLine(s) {
   return `context ${Math.round(c.pct)}% used (${detail})`;
 }
 function cardTooltip(s) {
-  return [transcriptTooltip(s), timestampsLine(s), contextLine(s)].filter(Boolean).join("\n");
+  return [checkpointTooltip(s), transcriptTooltip(s), timestampsLine(s), contextLine(s)].filter(Boolean).join("\n");
+}
+// ═══ CHECKPOINT (the agent's own handoff, server/checkpoint.js) ═══
+function checkpointLine(s) {
+  const c = s.checkpoint;
+  if (!c) return "";
+  if (c.blocked) return `⚠ ${c.blocked}`;
+  if (c.next) return `→ ${c.next}`;
+  return c.goal ? `◇ ${c.goal}` : "";
+}
+function checkpointTooltip(s) {
+  const c = s.checkpoint;
+  if (!c) return "";
+  const lines = [];
+  if (c.goal) lines.push(`goal: ${c.goal}`);
+  if (c.next) lines.push(`next: ${c.next}`);
+  if (c.blocked) lines.push(`blocked: ${c.blocked}`);
+  if (c.outputs && c.outputs.length) lines.push(`outputs: ${c.outputs.join(", ")}`);
+  const age = timeAgo(c.at);
+  return `checkpoint${age ? ` (${age})` : ""}\n  ${lines.join("\n  ")}`;
 }
 
 // ═══ LAST REPLY STRIP ═══

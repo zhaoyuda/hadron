@@ -117,6 +117,9 @@ hadron park [name|id] | unpark           # fold an agent into the deck's Stale s
                                          #   running; never archives) / bring it back
 hadron artifacts pin <path...>           # pin files to the current agent's panel (alias: add)
 hadron notes [show|set|append]           # per-agent durable notes
+hadron checkpoint [show|clear]           # the agent's own handoff: --goal / --next / --blocked
+                                         #   [-- output files…]; shown on the card while idle/done
+                                         #   (--install-hook wires claude's SessionStart hook, see below)
 hadron version                           # is the server running the code in this tree?
                                          #   commit/dirty/managedBy for both; exit 1 if the
                                          #   server is stale or a tree is dirty (scriptable)
@@ -215,6 +218,7 @@ Hadron includes Claude Code skills that agents can invoke:
 | `/hadron-spawn` | Turn intent into a briefed, auto-started agent |
 | `/hadron-artifacts` | Attach output files to this agent so they show in the dashboard |
 | `/hadron-notebook-kernel` | Configure Python environment for marimo/Jupyter (detect, create, switch envs) |
+| `/hadron-checkpoint` | Write a handoff (goal / next step / blocker / outputs) so the card says where you stopped |
 
 Skills live in this repo, but Claude Code only discovers skills user-globally or up to the current repo's root — so agents in *other* repos can't see them until they're linked into `~/.claude/skills/`. `hadron skills sync` does that (the server also self-heals on startup, additively linking any missing skills — it never touches your own skills). Links are **symlinks, not copies**, so skill updates flow through automatically on `git pull`. `/hadron-setup` is the exception: it's the bootstrap, run from the repo and never linked. If you have multiple Hadron checkouts, the first one to create a link wins; others leave it alone and `hadron skills status` reports it as a conflict.
 
@@ -382,6 +386,11 @@ Several workspaces on one machine need one watchdog per workspace, exactly like 
 
 - Agents that were spawned by Hadron carry an authoritative session id (`--session-id` is injected at launch) and resume cleanly.
 - Agents whose Claude session started some other way get their session id from Claude Code's own session registry (`~/.claude/sessions/`, Claude ≥ 2.1.26x: it records which tmux pane each live claude runs in, so the match is exact — a shell-tab claude in the same directory is never confused with the agent's). On older Claude versions Hadron falls back to scraping the newest transcript under `~/.claude/projects/` — except when **several agents share one `cwd`**: the transcripts there are indistinguishable per agent, so Hadron refuses to guess and those agents do not auto-resume (`hadron adopt` fixes that by hand; `hadron doctor` shows what the registry knew — including when the pane's claude is simply too old to write the pane field, in which case it names the version and says to upgrade).
+
+**Checkpoints and the SessionStart hook**
+
+- `hadron checkpoint --goal "…" --next "…" [--blocked "…"] [-- files…]` is the agent's own handoff. While the agent is idle or done its card shows the next step (or the blocker) instead of a bare age, and the tooltip lists the whole record; `hadron whoami` prints it, so a resumed session reads where it stopped. Text is capped at 500 characters per field; `hadron checkpoint clear` removes it.
+- `hadron checkpoint --install-hook` adds a `SessionStart` hook to `~/.claude/settings.json` that runs `hadron checkpoint --hook` every time claude starts, resumes or clears a conversation in one of your panes. The hook posts claude's own session id together with the pane it runs in, its pid and the transcript path claude reported; the server accepts the claim only when the pane is that agent's conversation pane on this tmux server, the pid reaches that pane through exactly one claude process, and the transcript path names that id under the agent's directory — a forged request, a shell-tab claude, a split, or a nested `claude -p` launched by the conversation itself changes nothing. The checkpoint itself is agent-authored text like task and notes and rides the same open GET as they do; transcript-derived data stays token-gated. Accepted claims give the agent confidence `hook` (`hadron doctor`: "resumes as hook"), which covers claude versions and setups where the session registry never names the pane. Claude's own registry still wins when it names a different id. Explicit, idempotent, backed up (`.hadron-bak`), `--uninstall-hook` reverts; run it from the checkout that runs your server.
 
 ## Roadmap
 

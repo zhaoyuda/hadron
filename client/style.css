@@ -302,6 +302,8 @@ html, body {
 .dk .dk-sub.dk-sub-done { color: #56d364; }
 .dk .dk-sub.dk-sub-blocked { color: #f85149; }
 .dk .dk-sub.dk-sub-idle { color: var(--text3); }
+.dk .dk-sub .dk-cp { color: var(--text2); }
+.dk .dk-sub.dk-sub-done .dk-cp { color: #56d364; }
 
 /* State tint on card background */
 .dk.dk-working { background: #1a2a3a; border-color: rgba(88,166,255,.25); }

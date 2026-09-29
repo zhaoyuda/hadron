@@ -105,6 +105,8 @@ export function saveAgent(agent) {
   if (parked) data.parked = true; // deck fold only — never implies archived
   // Files hidden from the panel's Core section (paths); absent unless non-empty.
   if (Array.isArray(agent.coreDismissed) && agent.coreDismissed.length) data.coreDismissed = agent.coreDismissed;
+  // The agent's own handoff checkpoint (goal/next/blocked/outputs/at) — absent unless set.
+  if (agent.checkpoint && typeof agent.checkpoint === "object" && !Array.isArray(agent.checkpoint)) data.checkpoint = agent.checkpoint;
   if (sortOrder !== undefined && sortOrder !== null) data.sortOrder = sortOrder;
   if (archived) data.archived = true;
   if (archived && archivedAt) data.archivedAt = archivedAt;

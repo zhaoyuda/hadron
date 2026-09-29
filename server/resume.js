@@ -184,7 +184,7 @@ export function verifyAdoption(session, sessionId, { force = false, projectsRoot
 // registry named it for this exact pane (registry, see session-registry.js).
 // Pinned = identity is known; whether the transcript exists (resumability) is
 // a separate question that performResume and doctor ask for EVERY level.
-export const PINNED_CONFIDENCE = new Set(["authoritative", "manual", "registry"]);
+export const PINNED_CONFIDENCE = new Set(["authoritative", "manual", "registry", "hook"]);
 
 export const isClaudeCmd = (c) => {
   if (!c) return false;
