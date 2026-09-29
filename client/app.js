@@ -1074,7 +1074,7 @@ function mkDeckCard(s, idx, allowDrag = true) {
   const pin = (s.pinned ? `<span class="dk-pin" title="Pinned">📌</span>` : "") + (s.parked ? `<span class="dk-pin dk-parked" title="Parked — folded away until you unpark it (still running)">⏸</span>` : "");
   const tip = cardTooltip(s);
   const titleAttr = tip ? ` title="${esc(tip)}"` : "";
-  return `<div class="dk${stateClass}${activeClass}" data-sid="${s.id}"${draggable}${titleAttr} oncontextmenu="showCtxMenu(event,'${s.id}')">${avatar}<div class="dk-info"><div class="dk-name">${esc(name)}${pin}</div><div class="dk-sub ${subClass}">${sub}</div></div></div>`;
+  return `<div class="dk${stateClass}${activeClass}" data-sid="${s.id}"${draggable}${titleAttr} oncontextmenu="showCtxMenu(event,'${s.id}')">${avatar}<div class="dk-info"><div class="dk-name">${esc(name)}${pin}${contextBadge(s)}</div><div class="dk-sub ${subClass}">${sub}</div></div></div>`;
 }
 
 // ═══ DRAG AND DROP ═══
@@ -1604,8 +1604,26 @@ function timestampsLine(s) {
   if (s.parked) parts.push("parked");
   return parts.join(" · ");
 }
+// Context badge: "N%" next to the name — how full the agent's context window
+// is (server/index.js contextWire: claude's own footer percentage while the
+// pane shows one, else the transcript's last usage against the model's
+// window). The colour comes from the server too (`level`): amber / red by
+// tokens of headroom before auto-compact, so a 1M window is not misread.
+function contextBadge(s) {
+  const c = s.context;
+  if (!c || !Number.isFinite(c.pct)) return "";
+  const cls = c.level === "hot" ? " dk-ctx-hot" : c.level === "warn" ? " dk-ctx-warn" : "";
+  return `<span class="dk-ctx${cls}">${Math.round(c.pct)}%</span>`;
+}
+function contextLine(s) {
+  const c = s.context;
+  if (!c || !Number.isFinite(c.pct)) return "";
+  const k = (n) => `${Math.round(n / 1000)}k`;
+  const detail = c.source === "pane" ? "claude's own meter" : Number.isFinite(c.tokens) && c.window ? `${k(c.tokens)} of ${k(c.window)}, from the transcript` : "from the transcript";
+  return `context ${Math.round(c.pct)}% used (${detail})`;
+}
 function cardTooltip(s) {
-  return [transcriptTooltip(s), timestampsLine(s)].filter(Boolean).join("\n");
+  return [transcriptTooltip(s), timestampsLine(s), contextLine(s)].filter(Boolean).join("\n");
 }
 
 // ═══ LAST REPLY STRIP ═══

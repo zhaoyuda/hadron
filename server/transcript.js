@@ -69,10 +69,18 @@ function clip(s) {
 //                  usually one block, a mid-turn narration is what's current)
 //   lastActivityAt timestamp of the last user/assistant record (tool traffic
 //                  counts: an agent mid-task is active even without prose)
+//   context        { tokens, window, at } — the prompt size of the last API
+//                  call claude made (usage of the last assistant record:
+//                  input + cache-creation + cache-read tokens), against the
+//                  window claude itself assumes for that model. This is what
+//                  claude's own footer/statusline computes "% context used"
+//                  from; the pane only prints that line near the limit, so
+//                  the transcript is the badge's source the rest of the time.
 export function summarizeRecords(records) {
   let title = null;
   let lastPrompt = null;
   let lastActivityAt = null;
+  let context = null;
   let replyId = null, replyParts = [], replyAt = null;
   for (const rec of records) {
     if (!rec || typeof rec !== "object") continue;
@@ -86,6 +94,8 @@ export function summarizeRecords(records) {
       if (t) lastPrompt = { text: clip(t), at };
       continue;
     }
+    const usage = usageTokens(rec.message?.usage);
+    if (usage !== null) context = { tokens: usage, window: contextWindowFor(rec.message?.model), at };
     const t = blockText(rec.message?.content);
     if (!t.trim()) continue; // thinking / tool_use-only records
     const mid = rec.message?.id || rec.uuid || null;
@@ -94,7 +104,26 @@ export function summarizeRecords(records) {
     replyAt = at;
   }
   const lastReply = replyParts.length ? { text: clip(replyParts.join("\n\n")), at: replyAt } : null;
-  return { title, lastPrompt, lastReply, lastActivityAt };
+  return { title, lastPrompt, lastReply, lastActivityAt, context };
+}
+
+// Claude Code's own arithmetic (2.1.284): total input of a call is the three
+// input counters summed; a model whose name carries "[1m]" runs on the 1M
+// window, everything else on 200k. A record with no usage (or a usage with
+// no numeric counter) contributes nothing.
+export const CONTEXT_WINDOW = 200_000;
+export const CONTEXT_WINDOW_1M = 1_000_000;
+export function contextWindowFor(model) {
+  return /\[1m\]/i.test(String(model || "")) ? CONTEXT_WINDOW_1M : CONTEXT_WINDOW;
+}
+function usageTokens(usage) {
+  if (!usage || typeof usage !== "object") return null;
+  let total = 0, seen = false;
+  for (const k of ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"]) {
+    const v = usage[k];
+    if (Number.isFinite(v) && v >= 0) { total += v; seen = true; }
+  }
+  return seen ? total : null;
 }
 
 function readTail(file, size, bytes) {
@@ -122,7 +151,7 @@ function readTail(file, size, bytes) {
 // widens backwards up to MAX_SCAN_BYTES; if a reply is already known from an
 // earlier read it is carried forward instead — it is still the last thing the
 // agent said, and the strip must not blink out for the length of a turn.
-// title / lastPrompt carry the same way. lastActivityAt is always fresh.
+// title / lastPrompt / context carry the same way. lastActivityAt is always fresh.
 export function readTranscriptSummary(file, cache) {
   let st;
   try { st = statSync(file); } catch { cache.summary = null; cache.size = -1; return null; }
@@ -141,7 +170,7 @@ export function readTranscriptSummary(file, cache) {
     cache.summary = null;
     return null;
   }
-  if (prev) for (const k of ["title", "lastPrompt", "lastReply", "lastActivityAt"]) if (!summary[k] && prev[k]) summary[k] = prev[k];
+  if (prev) for (const k of ["title", "lastPrompt", "lastReply", "lastActivityAt", "context"]) if (!summary[k] && prev[k]) summary[k] = prev[k];
   cache.summary = summary;
   return summary;
 }
@@ -155,5 +184,5 @@ export function transcriptWire(t) {
     const truncated = m.text.length > WIRE_TEXT;
     return { text: truncated ? m.text.slice(0, WIRE_TEXT) : m.text, at: m.at, ...(truncated ? { truncated: true } : {}) };
   };
-  return { title: t.title, lastPrompt: short(t.lastPrompt), lastReply: short(t.lastReply), lastActivityAt: t.lastActivityAt };
+  return { title: t.title, lastPrompt: short(t.lastPrompt), lastReply: short(t.lastReply), lastActivityAt: t.lastActivityAt, context: t.context || null };
 }

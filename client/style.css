@@ -277,6 +277,18 @@ html, body {
   margin-left: 4px;
   vertical-align: 1px;
 }
+.dk .dk-ctx {
+  font-size: 9px;
+  font-weight: 500;
+  margin-left: 5px;
+  padding: 0 4px;
+  border-radius: 6px;
+  vertical-align: 1px;
+  color: var(--text3);
+  background: rgba(139,148,158,.16);
+}
+.dk .dk-ctx.dk-ctx-warn { color: #d29922; background: rgba(210,153,34,.18); }
+.dk .dk-ctx.dk-ctx-hot { color: #f85149; background: rgba(248,81,73,.2); }
 .dk .dk-sub {
   font-size: 10px;
   color: var(--text3);

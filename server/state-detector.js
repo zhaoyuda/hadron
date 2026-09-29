@@ -404,6 +404,41 @@ const PROMPT_EDITOR_RE = /claude-prompt-[a-f0-9-]+\.md/;
  *
  * So we need: the prompt line + a few lines ABOVE it.
  */
+// Claude's own context meter, when the pane shows it. The footer prints one of
+// "N% context used" / "N% until auto-compact" / "Context low (N% remaining)"
+// only once the level is past "ok" (2.1.284) — so a match is authoritative and
+// no match means nothing (the transcript's usage is the badge's fallback, see
+// server/transcript.js). The footer is the last thing on screen and sits BELOW
+// the input box, so only the bottom CONTEXT_TAIL_LINES rows are read and only
+// those under the last `❯` prompt line among them: a reply that quotes the
+// phrase (a cat of this file, "you are at 72% context used") sits above the
+// box and is never the meter. No prompt line in the tail (a permission dialog,
+// a scrolled pane) → null, and the transcript's number stands. Pure; returns
+// { pct } (0–100, used) or null.
+const CONTEXT_USED_RE = /(\d{1,3})% context used\b/;
+const CONTEXT_LEFT_RE = /(\d{1,3})% until auto-compact\b|Context low \((\d{1,3})% remaining\)/;
+const CONTEXT_TAIL_LINES = 16;   // chrome under the box (statusline, hints) — the prompt-line rule keeps replies out
+export function contextFromPane(rawLines) {
+  let end = rawLines.length;
+  while (end > 0 && !(rawLines[end - 1] || "").trim()) end--;   // trailing blank rows
+  const start = Math.max(0, end - CONTEXT_TAIL_LINES);
+  let prompt = -1;
+  for (let i = end - 1; i >= start; i--) {
+    const t = (rawLines[i] || "").trim();
+    if (/^❯/.test(t) && !/^❯\s+\d+\./.test(t)) { prompt = i; break; }
+  }
+  if (prompt < 0) return null;
+  for (let i = end - 1; i > prompt; i--) {
+    const line = rawLines[i] || "";
+    let m = line.match(CONTEXT_USED_RE);
+    if (m) return { pct: clampPct(Number(m[1])) };
+    m = line.match(CONTEXT_LEFT_RE);
+    if (m) return { pct: clampPct(100 - Number(m[1] ?? m[2])) };
+  }
+  return null;
+}
+const clampPct = (n) => Math.max(0, Math.min(100, n));
+
 export function detectState(rawLines, opts = {}) {
   // ── Step 0: Alt-screen (full-screen TUI) short-circuit ──
   // When the pane is in the alternate screen buffer, it's a full-screen TUI
@@ -851,6 +886,7 @@ export class StateDetector {
     if (this.disposed) return;
     const pane = panes.get(this.paneTarget);
     if (!pane || pane.ambiguous) {
+      this.session.contextPct = null;   // no pane, no meter (the transcript's number stands)
       // No detection and no resume checkpoint for this agent until it comes
       // back: silent-failure rule — say so once per agent. (A session that is
       // simply gone used to be a silently failed display-message.)
@@ -893,6 +929,16 @@ export class StateDetector {
     if (this.disposed) return;
     // All awaits are behind us: from here to the end of the poll is synchronous,
     // so a detector disposed mid-poll never writes to its session.
+
+    // Context meter (runtime-only, never persisted — saveAgent allowlists what
+    // goes to disk): claude's own percentage while the pane shows it, else null
+    // and the session list falls back to the transcript's usage. A pane that is
+    // not running an agent has no meter, whatever its text says.
+    // While a tool child (bash, python3) is the foreground command of a working
+    // agent the last reading stands — the meter is still on screen behind it
+    // and the badge must not flip between sources every capture.
+    if (AGENT_PROCESS_RE.test(cmd)) this.session.contextPct = contextFromPane(rawLines)?.pct ?? null;
+    else if (this.session.state !== "working") this.session.contextPct = null;
 
     if (this.skipCount > 0) {
       this.skipCount--;

@@ -16,7 +16,7 @@
  *   2. Add an entry to EXPECTED below with the expected state and optional checks
  */
 
-import { detectState, apiErrorReason } from "../../server/state-detector.js";
+import { detectState, apiErrorReason, contextFromPane } from "../../server/state-detector.js";
 import { readFileSync, readdirSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -334,6 +334,45 @@ for (const [line, want] of [
   const w = detectState(wrapped, {});
   if (w.state === "blocked" && w.blockReason === "Model unavailable") { console.log("  ✓ latest error wins for a wrapped block too → Model unavailable"); passed++; }
   else { console.log(`  ✗ FAIL: wrapped-later tail → ${JSON.stringify(w)}`); failed++; }
+}
+
+// contextFromPane — claude's own meter, printed only near the limit in each of
+// its three phrasings, always BELOW the input box: only the bottom 16 rows are
+// read and only those under the last `❯` prompt line, so a reply that quotes
+// the phrase (a cat of this file, "you are at 91% context used") is never the
+// meter; the bottom-most match wins; a pane without one is null (never 0),
+// and no state-detection fixture except the 100% one shows a meter.
+console.log("\n[contextFromPane]");
+const quoted = ["● The footer says 91% context used when it is time to compact.", ...Array(10).fill("  more reply text"), "❯ ", "  ⏵⏵ bypass permissions on"];
+for (const [lines, want, label] of [
+  [["● done", "", "❯ ", "                     63% context used"], 63],
+  [["❯ ", "  37% until auto-compact"], 63],
+  [["❯ ", "  Context low (12% remaining)"], 88],
+  [["  80% context used (old, scrolled)", "❯ ", "  91% context used"], 91],
+  [["❯ ", "  91% context used", "", "", ""], 91, "trailing blank rows are skipped"],
+  [["● I used 40% of the budget", "❯ "], null],
+  [["● I used 40% of the budget", "❯ ", "  ⏵⏵ bypass permissions on"], null, "prose above the box, hint below: null"],
+  [quoted, null, "a reply quoting \"91% context used\" ≥10 rows up: null"],
+  [["● note: 91% context used", "❯ ", "  ⏵⏵ bypass permissions on"], null, "the phrase right above the box: null (above the prompt line)"],
+  [["  72% context used"], null, "no prompt line at all (the phrase alone): null"],
+  [["❯ 1. Yes", "  2. No", "  72% context used"], null, "a selection prompt is not the input box"],
+  [["", "", "❯ ", ""], null],
+  [[], null],
+  [["❯ ", "  250% context used"], 100],
+]) {
+  const got = contextFromPane(lines);
+  const gotPct = got ? got.pct : null;
+  if (gotPct === want) { console.log(`  ✓ ${label || JSON.stringify(lines.slice(-1)[0] ?? "")} → ${gotPct}`); passed++; }
+  else { console.log(`  ✗ FAIL: ${label || JSON.stringify(lines)} → ${JSON.stringify(got)} (want ${want})`); failed++; }
+}
+{
+  let bad = 0;
+  for (const f of readdirSync(FIXTURES_DIR).filter((x) => x.endsWith(".txt"))) {
+    const got = contextFromPane(readFileSync(join(FIXTURES_DIR, f), "utf-8").split("\n"));
+    const want = f === "idle-100pct-context.txt" ? 100 : null;
+    if ((got ? got.pct : null) !== want) { bad++; console.log(`  ✗ FAIL: fixture ${f} → ${JSON.stringify(got)} (want ${want})`); }
+  }
+  if (!bad) { console.log("  ✓ every state fixture: null except idle-100pct-context (100)"); passed++; } else failed += bad;
 }
 
 console.log(`\n  ${passed} passed, ${failed} failed, ${skipped} skipped\n`);

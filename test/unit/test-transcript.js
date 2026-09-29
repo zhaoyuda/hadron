@@ -6,11 +6,14 @@
  * slash-command envelopes are not prompts or replies; a reply is every text
  * block of the last assistant message; a torn last line (claude mid-write)
  * and a partial first line (tail read) are dropped, never a crash; nothing
- * in the summary is a session id.
+ * in the summary is a session id. `context` is the last assistant usage
+ * (input + cache-creation + cache-read) against claude's window for the
+ * model (1M for "[1m]" models, 200k otherwise) — the card badge's fallback
+ * when the pane does not print its own meter.
  *
  * Run: node test/unit/test-transcript.js
  */
-import { parseRecords, summarizeRecords, readTranscriptSummary, transcriptPath, transcriptWire, MAX_TEXT, TAIL_BYTES, WIRE_TEXT } from "../../server/transcript.js";
+import { parseRecords, summarizeRecords, readTranscriptSummary, transcriptPath, transcriptWire, contextWindowFor, MAX_TEXT, TAIL_BYTES, WIRE_TEXT, CONTEXT_WINDOW, CONTEXT_WINDOW_1M } from "../../server/transcript.js";
 import { mkdtempSync, writeFileSync, rmSync, appendFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -84,6 +87,29 @@ console.log("\n[summarizeRecords — pure]");
   ok(s2.lastReply.text === "no uuid ok", "an assistant record without uuid still groups by message id");
 }
 
+console.log("\n[context — last assistant usage against the model's window]");
+{
+  const usage = (i, c, r, extra = {}) => ({ input_tokens: i, cache_creation_input_tokens: c, cache_read_input_tokens: r, output_tokens: 99, ...extra });
+  const s = summarizeRecords([
+    user("go", 1),
+    asst([{ type: "thinking", thinking: "…" }], 2, "m1", { message: { id: "m1", role: "assistant", model: "claude-fable-5-1", usage: usage(10, 20, 30), content: [{ type: "thinking", thinking: "…" }] } }),
+    asst([{ type: "text", text: "on it" }], 3, "m1", { message: { id: "m1", role: "assistant", model: "claude-fable-5-1", usage: usage(32, 9981, 83050), content: [{ type: "text", text: "on it" }] } }),
+    { type: "assistant", isSidechain: true, sessionId: SID, timestamp: T(4), message: { id: "s1", role: "assistant", model: "claude-haiku-4-5-20251001", usage: usage(1, 1, 199000), content: [{ type: "text", text: "sub" }] } },
+    userBlocks([{ type: "tool_result", tool_use_id: "t1", content: "x" }], 5),
+  ]);
+  ok(s.context && s.context.tokens === 32 + 9981 + 83050, `context.tokens sums input + cache_creation + cache_read of the LAST assistant usage (${s.context?.tokens})`);
+  ok(s.context.window === CONTEXT_WINDOW && s.context.at === T(3), "window is 200k for a plain model; at = that record's timestamp");
+  ok(s.lastActivityAt === T(5) && s.context.at === T(3), "a sidechain's huge usage and later tool traffic do not move the meter");
+  const oneM = summarizeRecords([asst([{ type: "text", text: "hi" }], 1, "m", { message: { id: "m", role: "assistant", model: "claude-opus-5[1m]", usage: usage(300000, 0, 0), content: [{ type: "text", text: "hi" }] } })]);
+  ok(oneM.context.window === CONTEXT_WINDOW_1M && oneM.context.tokens === 300000, "a \"[1m]\" model runs on the 1M window");
+  ok(contextWindowFor("claude-sonnet-5[1M]") === CONTEXT_WINDOW_1M && contextWindowFor("claude-sonnet-5") === CONTEXT_WINDOW && contextWindowFor(undefined) === CONTEXT_WINDOW, "contextWindowFor: [1m] case-insensitive, default 200k, null-safe");
+  const none = summarizeRecords([user("q", 1), asst([{ type: "text", text: "a" }], 2, "m1"), asst([{ type: "text", text: "b" }], 3, "m2", { message: { id: "m2", role: "assistant", usage: { output_tokens: 5 }, content: [{ type: "text", text: "b" }] } })]);
+  ok(none.context === null, "no usage / no input counters → context null (never 0)");
+  const partial = summarizeRecords([asst([{ type: "text", text: "a" }], 1, "m1", { message: { id: "m1", role: "assistant", usage: { input_tokens: 7, cache_read_input_tokens: "lots" }, content: [{ type: "text", text: "a" }] } })]);
+  ok(partial.context.tokens === 7, "a non-numeric counter is skipped, the numeric ones still count");
+  ok(!JSON.stringify(s).includes(SID) && !("model" in s.context), "context carries numbers only — no session id, no model string");
+}
+
 console.log("\n[parseRecords]");
 {
   const lines = [JSON.stringify(user("a", 1)), JSON.stringify(user("b", 2)), '{"type":"user","torn'];
@@ -132,12 +158,23 @@ console.log("\n[readTranscriptSummary — stat-gated tail read]");
   s = readTranscriptSummary(file, cache);
   ok(s && s.lastReply.text === "reply two" && s.lastPrompt.text === "second", "tail of pure tool traffic: last reply/prompt carried forward from the previous read");
   ok(s.lastActivityAt === T(8), "…while lastActivityAt reflects the new tool traffic");
+  ok(s.context === null, "no usage anywhere in this file → context stays null");
+
+  // Usage lives on the assistant record; a later tail of pure tool traffic
+  // carries the meter forward like the reply (the badge must not blink out).
+  appendFileSync(file, JSON.stringify(asst([{ type: "text", text: "reply three" }], 9, "m3", { message: { id: "m3", role: "assistant", model: "claude-fable-5-1", usage: { input_tokens: 5, cache_creation_input_tokens: 1000, cache_read_input_tokens: 120000 }, content: [{ type: "text", text: "reply three" }] } })) + "\n");
+  s = readTranscriptSummary(file, cache);
+  ok(s.context && s.context.tokens === 121005 && s.context.window === CONTEXT_WINDOW, "usage on the new reply → context read");
+  appendFileSync(file, chunks.map((c) => c.replace(T(3), T(10))).join("\n") + "\n");
+  s = readTranscriptSummary(file, cache);
+  ok(s.context && s.context.tokens === 121005 && s.lastReply.text === "reply three", "tail of pure tool traffic: context carried forward with the reply");
 
   // Same file, fresh cache (server restart): nothing to carry, so the window
   // widens backwards until the reply is in view.
   const fresh = {};
   const s2 = readTranscriptSummary(file, fresh);
-  ok(s2 && s2.lastReply.text === "reply two" && s2.lastPrompt.text === "second", "fresh read of a tool-heavy tail widens the window backwards to find the last turn");
+  ok(s2 && s2.lastReply.text === "reply three", "fresh read of a tool-heavy tail widens the window backwards to find the last reply");
+  ok(s2.context && s2.context.tokens === 121005, "…and the meter comes with it (usage sits on that reply's record)");
 
   rmSync(dir, { recursive: true, force: true });
   ok(readTranscriptSummary(file, cache) === null, "deleted file → null again");
@@ -150,6 +187,9 @@ console.log("\n[transcriptWire — session-list form]");
   ok(w.lastReply.text.length === WIRE_TEXT && w.lastReply.truncated === true && w.lastReply.at === T(2), "reply longer than WIRE_TEXT is clipped and flagged truncated");
   ok(w.lastPrompt.text === "short" && !("truncated" in w.lastPrompt), "short prompt passes through unflagged");
   ok(transcriptWire(null) === null && transcriptWire({ title: null, lastPrompt: null, lastReply: null, lastActivityAt: T(1) }).lastReply === null, "null-safe");
+  const ctx = { tokens: 129063, window: CONTEXT_WINDOW, at: T(2) };
+  ok(JSON.stringify(transcriptWire({ ...w, context: ctx }).context) === JSON.stringify(ctx), "context rides the wire form unchanged");
+  ok(transcriptWire({ title: null, lastPrompt: null, lastReply: null, lastActivityAt: T(1) }).context === null, "…and is null (present) when the summary has none");
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -20,7 +20,7 @@ import { tmux, tmuxSafe, isValidId, shellQuoteArgv, tmuxArgv } from "./tmux.js";
 import { findRegistrySession, findTmuxlessRecordFor, classifyTmuxless, readRegistry, processIdentity, parentPid, REGISTRY_ROOT, REGISTRY_STATUSES, REGISTRY_TMUX_SINCE } from "./session-registry.js";
 import { syncSkills } from "./skills.js";
 import { collectProvenance } from "./provenance.js";
-import { transcriptPath, readTranscriptSummary, transcriptWire } from "./transcript.js";
+import { transcriptPath, readTranscriptSummary, transcriptWire, CONTEXT_WINDOW } from "./transcript.js";
 import { warnOnce } from "./log.js";
 import { startHeartbeat } from "./heartbeat.js";
 import {
@@ -814,11 +814,38 @@ app.get("/api/sessions/:id/transcript", (req, res) => {
 // bound host, and the conversation is not for anyone who can reach the port —
 // and only in its short form (transcriptWire); the full text is
 // GET /api/sessions/:id/transcript.
+// `context` (the card's "% context used" badge) rides every list: it is a
+// number, not conversation — claude's own footer percentage while the pane
+// shows one (source "pane"), else the transcript's last usage against the
+// model's window (source "transcript"), absent when neither is known. The
+// colour is decided here, in tokens of headroom before auto-compact (window −
+// COMPACT_RESERVE): a percentage alone misreads a 1M window, where 85% is
+// still 130k short of compaction. A pane reading has no window of its own —
+// the transcript's is used, else the 200k default.
+const COMPACT_RESERVE = 20_000, CONTEXT_WARN_HEADROOM = 40_000, CONTEXT_HOT_HEADROOM = 10_000;
+function contextLevel(tokens, window) {
+  const compactAt = window - COMPACT_RESERVE;
+  return tokens >= compactAt - CONTEXT_HOT_HEADROOM ? "hot" : tokens >= compactAt - CONTEXT_WARN_HEADROOM ? "warn" : "ok";
+}
+function contextWire(s) {
+  const t = s.transcript?.context;
+  if (Number.isFinite(s.contextPct)) {
+    const window = t?.window > 0 ? t.window : CONTEXT_WINDOW;
+    return { pct: s.contextPct, source: "pane", level: contextLevel((s.contextPct / 100) * window, window) };
+  }
+  if (t && Number.isFinite(t.tokens) && t.window > 0) {
+    return { pct: Math.min(100, Math.round((100 * t.tokens) / t.window)), tokens: t.tokens, window: t.window, source: "transcript", level: contextLevel(t.tokens, t.window) };
+  }
+  return null;
+}
 function resolvedSession(s, { withTranscript = false } = {}) {
-  const { transcript, ...rest } = s;
+  const { transcript, contextPct, ...rest } = s;
+  const context = contextWire(s);
   return {
     ...rest,
     ...(withTranscript && transcript ? { transcript: transcriptWire(transcript) } : {}),
+    // The open GET gets the badge (pct + colour), the token-bearing one the arithmetic too.
+    ...(context ? { context: withTranscript ? context : { pct: context.pct, source: context.source, level: context.level } } : {}),
     artifacts: (s.artifacts || []).map(a => ({
       ...a,
       value: a.value ? resolveFilePath(a.value) : a.value

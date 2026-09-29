@@ -49,7 +49,7 @@ scripts/
   setup-workspace.js  # Interactive workspace initializer
 test/
   unit/               # detectState/nextState fixtures + security HTTP suite (npm test)
-  e2e/                # Playwright browser modules M1-M22 (npm run test:e2e)
+  e2e/                # Playwright browser modules M1-M23 (npm run test:e2e)
 ```
 
 ## Conventions
@@ -98,7 +98,9 @@ npm test
 #                            with substatus {type:"shell",count} — not working — and a permission dialog
 #                            with a shell in the chrome is blocked; an API error's blockReason names what to DO —
 #                            "Login needed" / "Usage limit" / "Model unavailable" / transient "API error"
-#                            (apiErrorReason, classification only: it never decides `blocked`))
+#                            (apiErrorReason, classification only: it never decides `blocked`); contextFromPane
+#                            reads claude's context footer only from the bottom 16 rows under the last ❯ prompt line —
+#                            a reply quoting "91% context used" is null, so is the phrase with no prompt line at all)
 #   + test-state-machine.js (nextState reducer — temporal transitions; idle/done refresh a shell substatus
 #                            in place, a turn ending with a shell still running settles to done)
 #   + test-security.js      (auth, cwd policy, injection, concurrency over HTTP)
@@ -230,7 +232,12 @@ npm test
 #                            slash-command envelopes are never prompts or replies; tail-only stat-gated reads,
 #                            torn lines dropped, no session id in the summary; a tail of pure tool traffic
 #                            carries the known reply forward (fresh cache: widens the window backwards);
-#                            transcriptWire clips to WIRE_TEXT + `truncated`. The wire-form contract
+#                            transcriptWire clips to WIRE_TEXT + `truncated`; `context` = the last assistant
+#                            usage (input + cache-creation + cache-read) against claude's window for the model
+#                            (contextWindowFor: 1M for "[1m]", else 200k), sidechain ignored, carried forward,
+#                            numbers only — the card badge's fallback (contextFromPane in test-state-eval
+#                            reads claude's own "N% context used" / "N% until auto-compact" / "Context low
+#                            (N% remaining)" footer, bottom-most line wins, null when absent). The wire-form contract
 #                            (`transcript` on /api/sessions only for a token-bearing GET and only for an
 #                            adopted/correlated session id, absent for a shell agent; full text at
 #                            /api/sessions/:id/transcript, 401 without token; doctor row transcriptPreview)
@@ -296,6 +303,16 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                                 pulls the parked card out lit and acking folds it again; Unpark restores; View → Fold
 #                                 Stale After "Never" removes the age fold, persists, "1 day" folds again, an unknown value
 #                                 falls back to 3 days; the tooltip spells out the timestamps)
+#   + test/e2e/m23-context-badge.js (context badge: seeded transcripts (CLAUDE_CONFIG_DIR relocated) → "64%" plain,
+#                                 "85%" red (level "hot": 10k before auto-compact on 200k), "30%" for 300k on a
+#                                 "[1m]" model and 950k of 1M is "95%" but only amber (colour is headroom in tokens,
+#                                 not a percentage); the open GET carries {pct, source, level} only, tokens/window
+#                                 and the transcript text need the token; a shell agent has none; appended usage
+#                                 moves the badge within poll + refresh, amber at 75%; tooltip "context 64% used
+#                                 (128k of 200k, from the transcript)"; a pane under an agent process showing
+#                                 claude's footer (❯ line, then "72% context used") → source "pane", gone again when
+#                                 the foreground is a shell; the same footer in the pane of an agent WITH a
+#                                 transcript wins over it and hands back on exit; nothing persisted)
 ```
 
 `npm run test:e2e` runs `test/e2e/run-all.js`, which executes every `m*.js`
@@ -346,7 +363,7 @@ staging first:
    changes.
 2. `npm test` + `npm run test:e2e` in the worktree. The runner reports M10 as
    `XFAIL` (known headless-chromium clipboard issue, fails identically on main)
-   and exits 0 when it's the only failure — so a green run means M1–M9, M11–M22
+   and exits 0 when it's the only failure — so a green run means M1–M9, M11–M23
    all passed. Any `FAIL` (non-xfail) gates the branch.
 3. `scripts/predeploy-check.sh` — live-fire proof on staging that a service
    restart does NOT interrupt running agents (claude PIDs survive, a
