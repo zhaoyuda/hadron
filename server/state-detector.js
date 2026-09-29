@@ -690,6 +690,18 @@ export function nextState(m, { cmd, snap, contentChanged, canTransition }) {
   return null;
 }
 
+// One more "needs me" event for `session`: attentionRev++ (ackRev untouched),
+// attentionAt = now. `persist` (optional) is the caller's save hook — the
+// detector never touches the store itself. Shared by the detector and the
+// manual state PATCH so both paths count the same way.
+export function raiseAttention(session, persist, state) {
+  session.attentionRev = (Number.isInteger(session.attentionRev) ? session.attentionRev : 0) + 1;
+  session.attentionAt = new Date().toISOString();
+  if (state) session.attentionState = state; // the state that raised — see _setState's first-verdict rule
+  if (typeof persist === "function") persist(session);
+}
+export const needsAttention = (s) => (s.attentionRev || 0) > (s.ackRev || 0);
+
 export class StateDetector {
   constructor(tmuxSessionName, session, { poll = true } = {}) {
     this.tmuxName = tmuxSessionName;
@@ -897,6 +909,24 @@ export class StateDetector {
     this.session.state = state;
     this.stateEnteredAt = Date.now();
     this.session.substatus = substatus || null;
+    // Attention is a separate bit from state (mail model: state = what the pane
+    // is doing, attention = whether the operator has seen it). Every ENTRY into
+    // done/blocked raises it; nothing here ever lowers it — only an ack does
+    // (PATCH ackRev, or input typed into the pane), so a card stays lit until
+    // the operator has actually looked, and lights again if the agent finishes
+    // another round while they are looking (the rev moved on).
+    //
+    // State is not persisted (the loader resets it to idle), attention is. So
+    // the detector's FIRST verdict after a boot is usually a re-recognition of
+    // the turn that already raised — re-raising it would re-light a fleet the
+    // operator had triaged to zero before a service restart. A first verdict
+    // equal to the persisted attentionState is therefore not an entry; any
+    // later transition, or a first verdict of a different kind, is.
+    const firstVerdict = !this._verdictSeen;
+    this._verdictSeen = true;
+    if ((state === "done" || state === "blocked") && !(firstVerdict && state === this.session.attentionState)) {
+      raiseAttention(this.session, this.onAttention, state);
+    }
 
     if (state === "blocked" && blockReason) {
       this.session.blockReason = blockReason;

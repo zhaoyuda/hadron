@@ -19,6 +19,7 @@ Hadron solves this by giving each agent a card on a shared deck. At a glance you
 ## Key Features
 
 - **Multi-agent dashboard** — See all agents at a glance, organized into groups. Automatic state detection shows who's working, idle, blocked, or done.
+- **Triage ("needs me")** — State and attention are separate bits, like a mailbox: every time an agent enters *done* or *blocked* its card lights up and stays lit until you have actually looked at it (its terminal on screen in a focused window for a second, or a keystroke into its pane). Looking never edits the state — a done agent still reads "done", just quietly. The topbar counts how many need you, Alt+N jumps to the next one, and View → "Only Agents That Need Me" folds the rest away. An agent that finishes another round while you are elsewhere lights up again.
 - **Real terminals** — Each agent runs in its own tmux session, rendered via xterm.js. Full terminal emulation, not a log viewer.
 - **Artifact panel** — Attach files to any agent: Markdown (rendered), Python (syntax-highlighted, editable via vim), CSV (table view), SQL, Jupyter notebooks, and Marimo notebooks.
 - **Live artifacts** — File artifacts auto-reload when changed on disk. Marimo notebooks support `--watch`, and notebook state survives agent switches.
@@ -185,6 +186,7 @@ Artifacts are files linked to an agent, rendered in the right-side panel based o
 |---|---|
 | Alt+1-9 (Option+1-9) | Switch to agent by position |
 | Alt+H / Alt+L | Previous / next agent |
+| Alt+N | Next agent that needs me (unseen done / blocked) |
 | Alt+T | New shell tab |
 | Alt+J / Alt+K | Previous / next shell tab |
 | Cmd+Shift+V | Toggle markdown preview |

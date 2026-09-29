@@ -37,6 +37,7 @@ let workspaceGroups = null; // persisted group order from config, or null if not
 let groupConfig = {}; // per-group attributes like { expandable: false }
 let deckSortMode = "state"; // "state", "manual", "name"
 let deckGroupBy = "group"; // "group" (semantic groups) or "status" (bucket by agent state)
+let deckFilter = "all"; // "all" | "needs" (only agents that need me, plus the active one)
 let currentTheme = "default"; // "default", "exploration"
 let notifyLevel = "all"; // "all" (sound+banner+flash), "banner" (banner+flash), "off"
 let titleFlashInterval = null;
@@ -110,6 +111,7 @@ async function fetchSessions() {
   try {
     const res = await fetch("/api/sessions");
     sessions = await res.json();
+    applyPendingAcks(sessions);
   } catch (e) {
     console.error("Failed to fetch sessions:", e);
   }
@@ -223,20 +225,38 @@ function getPinnedSection() {
 
 // Rendering/nav layer: either semantic groups or status buckets. Persistence and
 // group-list bookkeeping keep using getSessionGroups() (always the group axis).
-function getDeckSections() {
+// ═══ TRIAGE (attention / ack) ═══
+// Mail model: `state` is what the pane is doing (detector-owned, never edited
+// from here); attentionRev/ackRev say whether the operator has seen the last
+// time it needed them. A card "needs me" while attentionRev > ackRev.
+const needsMe = (s) => (s.attentionRev || 0) > (s.ackRev || 0);
+const needsMeList = () => sessions.filter(needsMe);
+
+function getDeckSections({ filtered = true } = {}) {
   const statusMode = deckGroupBy === "status";
   let base = statusMode ? getStatusBuckets() : getSessionGroups();
-  const pinnedSection = getPinnedSection();
+  let pinnedSection = getPinnedSection();
+  const filtering = filtered && deckFilter === "needs";
+  if (filtering) {
+    // The active agent stays visible even once acked (acking it must not make
+    // it vanish from under the cursor); everything else needs me or is hidden.
+    const keep = (s) => needsMe(s) || s.id === activeSessionId;
+    base = base.map((g) => ({ ...g, items: g.items.filter(keep) })).filter((g) => g.items.length > 0);
+    if (pinnedSection) { pinnedSection = { ...pinnedSection, items: pinnedSection.items.filter(keep) }; if (!pinnedSection.items.length) pinnedSection = null; }
+  }
   if (!pinnedSection) return base;
   base = base.map((g) => ({ ...g, items: g.items.filter((s) => !s.pinned) }));
   // Status buckets never render empty; group sections keep rendering empty
-  // (they own the add/delete affordances).
-  if (statusMode) base = base.filter((g) => g.items.length > 0);
+  // (they own the add/delete affordances) — unless the deck is filtered.
+  if (statusMode || filtering) base = base.filter((g) => g.items.length > 0);
   return [pinnedSection, ...base];
 }
 
-function getDisplayOrder() {
-  return getDeckSections().flatMap((g) => g.items);
+// Deck order. Filtered by default so Alt+1..9 / Alt+H/L index what is on
+// screen; `{ filtered: false }` is the full fleet (the palette must reach a
+// quiet agent while the "needs me" filter hides it from the deck).
+function getDisplayOrder({ filtered = true } = {}) {
+  return getDeckSections({ filtered }).flatMap((g) => g.items);
 }
 
 function syncGroupList() {
@@ -269,7 +289,7 @@ function renderWorkHeader() {
   const avBg = state === "working" ? "#1a2332" : state === "done" ? "#1a2e1a" : state === "blocked" ? "#2a1318" : "#363c46";
 
   let stateLabel, stateClass;
-  if (state === "done") { stateLabel = "needs review" + formatBackgroundSuffix(s); stateClass = "wh-state-done"; }
+  if (state === "done") { stateLabel = (needsMe(s) ? "needs review" : "done") + formatBackgroundSuffix(s); stateClass = "wh-state-done"; }
   else if (state === "blocked") { stateLabel = isExplorationTheme() ? rpgBlockedLine(s) : (s.blockReason || "blocked"); stateClass = "wh-state-blocked"; }
   else if (state === "working") { stateLabel = formatWorkingSubstatus(s); stateClass = "wh-state-working"; }
   else { stateLabel = "idle" + formatBackgroundSuffix(s); stateClass = "wh-state-idle"; }
@@ -850,8 +870,12 @@ function renderDeck() {
     if (html) html += '<div class="deck-sep"></div>';
     html += `<div class="dk-add dk-add-sm dk-add-global" title="New group">+</div>`;
   }
+  if (deckFilter === "needs" && !needsMeList().length) {
+    html = `<div class="deck-empty">Nobody needs you right now</div>` + html;
+  }
 
   el.innerHTML = html;
+  renderNeedsMe();
 
   el.querySelectorAll(".dk[data-sid]").forEach((card) => {
     card.addEventListener("click", () => switchSession(card.dataset.sid));
@@ -943,14 +967,18 @@ function mkDeckCard(s, idx, allowDrag = true) {
   const isActive = s.id === activeSessionId;
   const name = (s.name || s.id).toUpperCase();
   const code = getAgentIcon(s);
-  const stateClass = state !== "idle" ? ` dk-${state}` : "";
+  const needs = needsMe(s);
+  // Unseen done/blocked keep their loud tint + dot; once acked the card falls
+  // back to a quiet outline (dk-acked) but the state label stays truthful —
+  // "done" is still done until the pane actually does something new.
+  const ackedClass = !needs && (state === "done" || state === "blocked") ? " dk-acked" : "";
+  const stateClass = (state !== "idle" ? ` dk-${state}` : "") + ackedClass + (needs ? " dk-needs" : "");
   const activeClass = isActive ? " active" : "";
 
   const avBg = state === "working" ? "#1a2332" : state === "done" ? "#1a2e1a" : state === "blocked" ? "#2a1318" : "#363c46";
   const ring = state === "working" ? `<div class="dk-ring"></div>` : "";
-  const needsDot = state === "done" || state === "blocked";
-  const dotColor = state === "done" ? "#3fb950" : "#f85149";
-  const dot = needsDot ? `<div class="dk-dot" style="background:${dotColor}"></div>` : "";
+  const dotColor = state === "done" ? "#3fb950" : state === "blocked" ? "#f85149" : "#8b949e";
+  const dot = needs ? `<div class="dk-dot" style="background:${dotColor}"></div>` : "";
 
   let avatarInner;
   if (isExplorationTheme()) {
@@ -961,7 +989,7 @@ function mkDeckCard(s, idx, allowDrag = true) {
   const avatar = `<div class="dk-av" style="background:${avBg}">${avatarInner}</div>`;
 
   let sub, subClass;
-  if (state === "done") { sub = "needs review" + formatBackgroundSuffix(s); subClass = "dk-sub-done"; }
+  if (state === "done") { sub = (needs ? "needs review" : "done") + formatBackgroundSuffix(s); subClass = "dk-sub-done"; }
   else if (state === "blocked") {
     sub = isExplorationTheme() ? rpgBlockedLine(s) : esc(s.blockReason || "blocked");
     subClass = "dk-sub-blocked";
@@ -1979,8 +2007,6 @@ async function closeSession(sessionId) {
 }
 
 // ═══ SWITCHING ═══
-let doneViewTimer = null;
-
 function switchSession(sessionId) {
   if (sessionId === activeSessionId) return;
   if (activeTab === "notes") saveNotes();
@@ -1989,7 +2015,7 @@ function switchSession(sessionId) {
   perSessionTab[activeSessionId] = activeTab;
   perSessionLayout[activeSessionId] = layoutMode;
 
-  if (doneViewTimer) { clearTimeout(doneViewTimer); doneViewTimer = null; }
+  viewing = null; // the ack dwell restarts on the new agent
 
   // Close vim editors from the previous session to avoid orphan tmux sessions
   for (const [container, editor] of activeEditors) {
@@ -2004,23 +2030,101 @@ function switchSession(sessionId) {
 
   connectWs(sessionId);
 
-  const s = sessions.find((x) => x.id === sessionId);
-  if (s && s.state === "done") {
-    doneViewTimer = setTimeout(() => {
-      doneViewTimer = null;
-      if (activeSessionId === sessionId && s.state === "done") {
-        s.state = "idle";
-        fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ state: "idle" }),
-        }).catch(() => {});
-        render();
-      }
-    }, 5000);
-  }
-
   render();
+  saveUIState();
+}
+
+// ── Ack by looking ──
+// The operator has "seen" an agent when its terminal is on screen, the browser
+// window is focused, and it has stayed that way for ACK_DWELL_MS. A background
+// tab clears nothing; a glance that lasts under a second clears nothing. The
+// ack names the revision that was on screen, so a round that finishes after the
+// fetch stays lit (the server keeps ackRev ≤ attentionRev and monotonic).
+// Typing into the pane is the other ack path — the server does that one.
+const ACK_DWELL_MS = 1000;
+let viewing = null; // { id, since } while the conditions hold
+const pendingAcks = new Map(); // id → rev PATCHed, applied over polled data until the server agrees
+const ackRetryAt = new Map(); // id → time before which a failed ack is not retried (warned once)
+
+function terminalOnScreen() {
+  return layoutMode !== "tabs" || activeTab === "terminal";
+}
+
+function ackTick() {
+  const s = sessions.find((x) => x.id === activeSessionId);
+  const looking = !!s && terminalOnScreen() && !document.hidden && document.hasFocus();
+  if (!looking) { viewing = null; return; }
+  if (!viewing || viewing.id !== s.id) { viewing = { id: s.id, since: Date.now() }; return; }
+  if (Date.now() - viewing.since < ACK_DWELL_MS) return;
+  if (needsMe(s)) ackAttention(s, s.attentionRev);
+}
+setInterval(ackTick, 250);
+
+async function ackAttention(s, rev) {
+  if ((pendingAcks.get(s.id) || 0) >= rev) return;
+  if ((ackRetryAt.get(s.id) || 0) > Date.now()) return;
+  pendingAcks.set(s.id, rev);
+  s.ackRev = Math.max(s.ackRev || 0, rev);
+  renderDeck();
+  renderWorkHeader();
+  try {
+    const r = await fetch(`/api/sessions/${encodeURIComponent(s.id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ackRev: rev }),
+    });
+    if (!r.ok) ackFailed(s, `HTTP ${r.status}`);
+  } catch (e) { ackFailed(s, e && e.message ? e.message : "network"); }
+}
+// A failing ack must not be invisible: the card would re-light on every poll
+// and the counter never drop while the PATCH is retried forever. Warn once
+// per agent, then retry every 5 s instead of every tick.
+function ackFailed(s, why) {
+  pendingAcks.delete(s.id);
+  const first = !ackRetryAt.has(s.id);
+  ackRetryAt.set(s.id, Date.now() + 5000);
+  if (first) console.warn(`[hadron] ack for ${s.id} failed (${why}); will keep retrying every 5 s`);
+}
+
+// Fold un-confirmed acks over a fresh /api/sessions list so a card does not
+// flicker back to "needs me" between the PATCH and the poll that reflects it.
+function applyPendingAcks(list) {
+  for (const s of list) {
+    const rev = pendingAcks.get(s.id);
+    if (rev === undefined) continue;
+    if ((s.ackRev || 0) >= rev) { pendingAcks.delete(s.id); continue; }
+    s.ackRev = Math.max(s.ackRev || 0, Math.min(rev, s.attentionRev || 0));
+  }
+}
+
+// Topbar count + one-click "take me to the next one" (also Alt+N).
+function renderNeedsMe() {
+  const el = document.getElementById("needs-me");
+  if (!el) return;
+  if (!el._bound) { el._bound = true; el.addEventListener("click", jumpToNeedsMe); }
+  const n = needsMeList().length;
+  el.hidden = n === 0 && deckFilter !== "needs";
+  el.classList.toggle("nm-filtered", deckFilter === "needs");
+  el.innerHTML = n
+    ? `<span class="nm-dot"></span><span class="nm-count">${n}</span> need${n === 1 ? "s" : ""} me`
+    : `<span class="nm-count">0</span> need me`;
+  el.title = n ? "Jump to the next agent that needs you (Alt+N)" : "Nobody needs you right now";
+}
+
+function jumpToNeedsMe() {
+  const ordered = getDisplayOrder();
+  const n = ordered.length;
+  if (!n) return;
+  const cur = ordered.findIndex((s) => s.id === activeSessionId);
+  for (let k = 1; k <= n; k++) {
+    const s = ordered[(cur + k + n) % n];
+    if (needsMe(s)) { switchSession(s.id); return; }
+  }
+}
+
+function setDeckFilter(mode) {
+  deckFilter = mode === "needs" ? "needs" : "all";
+  renderDeck();
   saveUIState();
 }
 
@@ -2074,6 +2178,7 @@ function renderShortcutBar() {
     `<kbd>${mod}+K</kbd> command palette`,
     `<kbd>${alt}+1</kbd>–<kbd>${alt}+9</kbd> switch agent`,
     `<kbd>${alt}+H</kbd> / <kbd>${alt}+L</kbd> prev/next agent`,
+    `<kbd>${alt}+N</kbd> next that needs me`,
     `<kbd>${alt}+T</kbd> new shell`,
     `<kbd>${alt}+J</kbd> / <kbd>${alt}+K</kbd> prev/next tab`,
   ];
@@ -2113,6 +2218,7 @@ function initKeyboard() {
     if (isAltKey(e, "j")) { e.preventDefault(); cycleTab(-1); return true; }
     if (isAltKey(e, "k")) { e.preventDefault(); cycleTab(1); return true; }
     if (isAltKey(e, "t")) { e.preventDefault(); createShellTab(); return true; }
+    if (isAltKey(e, "n")) { e.preventDefault(); jumpToNeedsMe(); return true; }
 
     // Cmd/Ctrl+K: command palette (preventDefault to override the browser's own).
     if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.code === "KeyK") {
@@ -2151,7 +2257,7 @@ function initKeyboard() {
   term.attachCustomKeyEventHandler((e) => {
     const digit = getAltDigit(e);
     const isPaletteKey = (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.code === "KeyK";
-    if ((digit >= 1 && digit <= 9) || isAltKey(e, "h") || isAltKey(e, "l") || isAltKey(e, "j") || isAltKey(e, "k") || isAltKey(e, "t") || isPaletteKey) {
+    if ((digit >= 1 && digit <= 9) || isAltKey(e, "h") || isAltKey(e, "l") || isAltKey(e, "j") || isAltKey(e, "k") || isAltKey(e, "t") || isAltKey(e, "n") || isPaletteKey) {
       if (e.type === "keydown") {
         e._hadronHandled = true;
         handleGlobalShortcut(e);
@@ -2370,6 +2476,7 @@ async function showMenu(menuId, anchorEl) {
     menu.innerHTML = [
       menuItem("Deck Layout", "", { submenu: groupBySub }),
       menuItem("Agent Sorting", "", { submenu: sortSub }),
+      menuItem("Only Agents That Need Me", "toggle-needs-filter", { checked: deckFilter === "needs" }),
       menuItem("Theme", "", { submenu: themeSub }),
       menuItem("Editor", "", { submenu: editorSub }),
       menuItem("Notifications", "", { submenu: notifySub }),
@@ -2440,6 +2547,8 @@ async function handleMenuAction(action, item) {
     deckGroupBy = item.dataset.groupby || "group";
     renderDeck();
     saveUIState();
+  } else if (action === "toggle-needs-filter") {
+    setDeckFilter(deckFilter === "needs" ? "all" : "needs");
   } else if (action === "set-theme") {
     applyTheme(item.dataset.theme || "default");
   } else if (action === "set-notify") {

@@ -111,6 +111,15 @@ export function saveAgent(agent) {
   if (autostartedAt) data.autostartedAt = autostartedAt;
   // v0.9 resume: the runtime checkpoint and the opt-in post-resume command
   // (both absent unless the resume machinery / the user set them).
+  // Triage: attentionRev counts entries into done/blocked, ackRev how far the
+  // operator has acknowledged; both survive a restart so an unseen "done" is
+  // still lit after a deploy (state itself is not persisted — it is re-detected).
+  if (Number.isInteger(agent.attentionRev) && agent.attentionRev > 0) {
+    data.attentionRev = agent.attentionRev;
+    if (Number.isInteger(agent.ackRev) && agent.ackRev > 0) data.ackRev = Math.min(agent.ackRev, agent.attentionRev);
+    if (agent.attentionAt) data.attentionAt = agent.attentionAt;
+    if (agent.attentionState === "done" || agent.attentionState === "blocked") data.attentionState = agent.attentionState;
+  }
   if (agent.runtime) data.runtime = agent.runtime;
   if (agent.resumeCommand) data.resumeCommand = agent.resumeCommand;
   data.updatedAt = new Date().toISOString();

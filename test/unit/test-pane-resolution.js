@@ -45,7 +45,7 @@ process.env.HADRON_TMUX_SOCKET = SOCK;
 const {
   StateDetector, parseCmdProbe, stripLine, CMD_PROBE_FORMAT,
   parsePaneList, probePanes, BATCH_CMD_FORMAT, BATCH_PATH_FORMAT,
-  QUIET_AFTER_POLLS, CAPTURE_BACKOFF_POLLS, livePollerCount,
+  QUIET_AFTER_POLLS, CAPTURE_BACKOFF_POLLS, livePollerCount, raiseAttention, needsAttention,
 } = await import("../../server/state-detector.js");
 const { tmux, tmuxSafe, tmuxAsync, TMUX_TIMEOUT_MS, tmuxArgv, exactTarget } = await import("../../server/tmux.js");
 
@@ -177,6 +177,54 @@ function makeDetector(name) {
   return { det, session };
 }
 async function pump(det, n) { for (let i = 0; i < n; i++) { await det._poll(); await sleep(20); } }
+
+console.log("attention revision (no tmux needed)");
+{
+  // _setState is the detector's only mutation point, so this pins the contract
+  // the HTTP tests can only exercise through the manual-PATCH twin: entering
+  // done/blocked raises attentionRev exactly once per ENTRY, persists via the
+  // injected onAttention, and nothing else touches it.
+  const session = { id: "att", state: "idle", blockReason: undefined, substatus: null };
+  const det = new StateDetector("att", session, { poll: false });
+  const persisted = [];
+  det.onAttention = (s) => persisted.push(s.attentionRev);
+  det._setState("working");
+  ok(session.attentionRev === undefined, "idle→working raises nothing");
+  det._setState("done");
+  ok(session.attentionRev === 1 && typeof session.attentionAt === "string", "working→done → attentionRev 1 + attentionAt");
+  det._setState("done", undefined, { type: "shell", count: 1 });
+  ok(session.attentionRev === 1, "done while already done is not an entry (same-state early return) — ticks never bump");
+  det._setState("idle");
+  det._setState("blocked", "permission");
+  ok(session.attentionRev === 2 && (session.ackRev || 0) < 2, "idle→blocked raises again");
+  session._manualOverrideUntil = Date.now() + 5000;
+  det._setState("done");
+  ok(session.state === "blocked" && session.attentionRev === 2, "a suppressed transition (manual override window) raises nothing");
+  session._manualOverrideUntil = 0;
+  ok(persisted.join(",") === "1,2", `onAttention called once per raise with the new rev (${persisted.join(",")})`);
+  ok(needsAttention(session) === true, "needsAttention: attentionRev 2 > ackRev 0");
+  session.ackRev = 2;
+  ok(needsAttention(session) === false, "…and false once acked to the current rev");
+  raiseAttention(session);
+  ok(session.attentionRev === 3 && needsAttention(session), "raiseAttention() past an ack re-lights");
+
+  // After a service restart the loader resets state to idle but keeps the revs
+  // and the state that raised. The detector's first verdict re-recognising that
+  // same turn is not an entry (a triaged-to-zero fleet must not re-light on
+  // restart); a different first verdict, or any later transition, is.
+  const booted = { id: "boot", state: "idle", attentionRev: 3, ackRev: 3, attentionState: "done" };
+  const d2 = new StateDetector("boot", booted, { poll: false });
+  d2._setState("done");
+  ok(booted.attentionRev === 3 && !needsAttention(booted), "first verdict after boot == attentionState → no raise (still read)");
+  d2._setState("idle"); d2._setState("done");
+  ok(booted.attentionRev === 4 && needsAttention(booted) && booted.attentionState === "done", "…the next real entry raises again");
+  const booted2 = { id: "boot2", state: "idle", attentionRev: 3, ackRev: 3, attentionState: "done" };
+  new StateDetector("boot2", booted2, { poll: false })._setState("blocked", "permission");
+  ok(booted2.attentionRev === 4 && booted2.attentionState === "blocked", "a first verdict of a DIFFERENT kind (blocked after done) is an entry");
+  const unread = { id: "boot3", state: "idle", attentionRev: 2, ackRev: 1, attentionState: "done" };
+  new StateDetector("boot3", unread, { poll: false })._setState("done");
+  ok(unread.attentionRev === 2 && needsAttention(unread), "an UNREAD agent stays unread (2 > 1) without a spurious extra raise");
+}
 
 if (!haveTmux) {
   skipped++;

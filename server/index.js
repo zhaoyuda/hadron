@@ -11,7 +11,7 @@ import { connect as netConnect } from "net";
 import { networkInterfaces, hostname, tmpdir } from "os";
 import { URL } from "url";
 import { randomBytes } from "crypto";
-import { StateDetector, isShellCmd, POLL_INTERVAL_MS } from "./state-detector.js";
+import { StateDetector, isShellCmd, POLL_INTERVAL_MS, raiseAttention } from "./state-detector.js";
 import { probeClaudeCaps, RuntimeTracker, performResume, BOOT, isClaudeCmd, decideResume, verifyAdoption, UUID_RE, PINNED_CONFIDENCE, sessionFileExists, claudeProjectDir } from "./resume.js";
 import { randomUUID } from "crypto";
 import { loadAgents, loadAgent, saveAgent, saveAgentLocked, archiveAgent, deleteAgent, initWorkspace, getWorkspaceDir, appendAgentField, removeAgentArtifact, isSelfWrite } from "./agent-store.js";
@@ -1010,16 +1010,30 @@ app.patch("/api/sessions/:id", async (req, res) => {
   if (pinned !== undefined && typeof pinned !== "boolean") {
     return res.status(400).json({ error: "pinned must be a boolean" });
   }
+  // ackRev: "I have seen attention revision N" — a non-negative integer, never
+  // above attentionRev (a client can only ack what exists), never moving back
+  // (an older tab's late ack must not un-ack a newer one). The client sends the
+  // rev it SAW rather than "ack everything" so a round that finished between
+  // its fetch and its ack stays lit.
+  const { ackRev } = req.body;
+  if (ackRev !== undefined && (!Number.isInteger(ackRev) || ackRev < 0)) {
+    return res.status(400).json({ error: "ackRev must be a non-negative integer" });
+  }
   const { state, blockReason, name, task } = req.body;
   if (state !== undefined) {
     const prevState = session.state;
     session.state = state;
-    // Only suppress detector for intentional manual overrides, not auto-ack (done→idle)
-    if (!(prevState === "done" && state === "idle")) {
-      session._manualOverrideUntil = Date.now() + 5000;
-    }
+    session._manualOverrideUntil = Date.now() + 5000;
     const detector = monitors.get(id);
     if (detector) detector.resetCooldown();
+    // A manual state change counts like a detected one: entering done/blocked
+    // is one attention event (idempotent for a same-state PATCH).
+    if (prevState !== state && (state === "done" || state === "blocked")) raiseAttention(session, undefined, state);
+  }
+  let acked = false;
+  if (ackRev !== undefined) {
+    const next = Math.min(ackRev, session.attentionRev || 0);
+    if (next > (session.ackRev || 0)) { session.ackRev = next; acked = true; }
   }
   if (blockReason !== undefined) session.blockReason = blockReason;
   if (name !== undefined) session.name = name;
@@ -1036,7 +1050,8 @@ app.patch("/api/sessions/:id", async (req, res) => {
     if (pinned) session.pinned = true;
     else delete session.pinned; // stored form: absent unless true (like icon/sortOrder)
   }
-  const shouldSave = [name, task, notes, artifacts, relatedAgents, group, icon, sortOrder, deletable, pinned].some(v => v !== undefined);
+  const shouldSave = [name, task, notes, artifacts, relatedAgents, group, icon, sortOrder, deletable, pinned].some(v => v !== undefined)
+    || acked || (state !== undefined && (state === "done" || state === "blocked"));
   if (shouldSave) await saveAgentLocked(session); // same lock as append/delete — no interleaved read-modify-write
   res.json(resolvedSession(session));
 });
@@ -1969,6 +1984,28 @@ const runtimeSaveTimers = new Map();
 // doctor` can tell a live-but-throttled checkpoint (fine) from one whose durable
 // write never happened (a reboot would lose it). Durability, not just liveness.
 // (RUNTIME_SAVE_INTERVAL_MS is defined earlier, beside the doctor threshold.)
+// Input typed into an agent's PRIMARY pane acks everything raised so far (a
+// shell tab is another tmux session — typing there says nothing about the
+// agent's own screen). Only ever moves ackRev up to the current attentionRev.
+// xterm answers the pane's terminal queries on the SAME input channel — device
+// attributes (ESC[?..c / ESC[>..c), cursor position (ESC[r;cR), focus in/out
+// (ESC[I / ESC[O), DSR-OK (ESC[0n), DECXCPR (ESC[?r;cR), DECRPM (ESC[..$y),
+// OSC and DCS replies — and tmux asks on every attach. Those
+// are the terminal talking, not the operator: they must not count as "seen".
+// Arrow keys (ESC[A..D), Alt+key (ESC x) and bracketed paste are keystrokes.
+const TERMINAL_REPLY_RE = /^\x1b(\[[?>][\d;]*c|\[\??[\d;]*(R|n|\$y)|\[[IO]|\]|P)/;
+function isKeystroke(data) {
+  return typeof data === "string" && data.length > 0 && !TERMINAL_REPLY_RE.test(data);
+}
+function ackByInput(sessionId) {
+  const s = sessions.get(sessionId);
+  if (!s) return;
+  const rev = s.attentionRev || 0;
+  if (rev <= (s.ackRev || 0)) return;
+  s.ackRev = rev;
+  saveAgentLocked(s).catch((e) => console.error(`[attention] ${sessionId}: ${e.message}`));
+}
+
 function persistCheckpoint(session) {
   if (session.runtime) session.runtime.lastPersistedAt = new Date().toISOString();
   saveAgent(session);
@@ -2020,6 +2057,7 @@ function startMonitor(sessionId) {
 
   const created = ensureTmuxSession(sessionId, resolveAgentCwd(session));
   const detector = new StateDetector(tmuxSessionName(sessionId), session);
+  detector.onAttention = (s) => saveAgentLocked(s).catch((e) => console.error(`[attention] ${sessionId}: ${e.message}`));
   monitors.set(sessionId, detector);
 
   const tracker = new RuntimeTracker(session, {
@@ -2340,6 +2378,7 @@ wss.on("connection", (ws) => {
       if (message.type === "input") {
         pty.write(message.data);
         monitors.get(sessionId)?.wake();   // keystrokes: end any capture backoff
+        if (!isShell && isKeystroke(message.data)) ackByInput(sessionId); // typing into the agent's pane = you have seen it
       } else if (message.type === "resize") {
         const { cols, rows } = message;
         // Resize the pty only — tmux gets SIGWINCH and refits the window to this client

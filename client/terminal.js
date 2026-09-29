@@ -422,7 +422,10 @@ function makeShellInstance(sid, shellId, shellName, { connect = true } = {}) {
       return e.code === "Key" + letter.toUpperCase();
     }
     const digit = getAltDigit(e);
-    if ((digit >= 1 && digit <= 9) || isAltKey(e, "h") || isAltKey(e, "l") || isAltKey(e, "j") || isAltKey(e, "k") || isAltKey(e, "t")) {
+    // Alt+N (next agent that needs me) is only kept away from the shell here;
+    // the document-level handler in app.js acts on it (this handler does not
+    // mark the event handled, so adding a branch here would fire it twice).
+    if ((digit >= 1 && digit <= 9) || isAltKey(e, "h") || isAltKey(e, "l") || isAltKey(e, "j") || isAltKey(e, "k") || isAltKey(e, "t") || isAltKey(e, "n")) {
       if (e.type === "keydown") {
         if (isAltKey(e, "t")) { e.preventDefault(); createShellTab(); }
         else if (isAltKey(e, "h")) { e.preventDefault(); cycleAgent(-1); }

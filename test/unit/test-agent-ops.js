@@ -364,6 +364,64 @@ async function main() {
     }
   }
 
+  console.log("\n[triage: attentionRev / ackRev — the mail model over PATCH]");
+  {
+    const get = async () => (await liveList()).find((s) => s.id === A);
+    const before = await get();
+    ok(!before.attentionRev && !before.ackRev, "fresh agent carries no attention revision");
+    // Entering done raises attention; the detector path (_setState) does the
+    // same for a real pane, the manual PATCH is the HTTP-testable twin.
+    let r = await req("PATCH", `/api/sessions/${A}`, { state: "done" });
+    ok(r.status === 200, "PATCH state=done → 200");
+    let s = await get();
+    ok(s.attentionRev === 1 && !s.ackRev && typeof s.attentionAt === "string",
+      `entering done → attentionRev 1, ackRev unset, attentionAt stamped (${s.attentionRev}/${s.ackRev || 0})`);
+    ok(s.state === "done", "state stays done — looking is not doing (no auto idle)");
+    r = await req("PATCH", `/api/sessions/${A}`, { state: "done" });
+    s = await get();
+    ok(s.attentionRev === 1, "PATCHing the same state again does not bump attentionRev (entries, not ticks)");
+    let disk = readAgentFile(A);
+    ok(disk.attentionRev === 1 && disk.ackRev === undefined && typeof disk.attentionAt === "string",
+      "attentionRev/attentionAt persisted, ackRev absent-unless-set");
+
+    // Ack: clamp to attentionRev, monotonic, validated.
+    for (const bad of [-1, 1.5, "1", null, true]) {
+      r = await req("PATCH", `/api/sessions/${A}`, { ackRev: bad });
+      ok(r.status === 400, `ackRev ${JSON.stringify(bad)} → 400`);
+    }
+    r = await req("PATCH", `/api/sessions/${A}`, { ackRev: 99 });
+    s = await get();
+    ok(r.status === 200 && s.ackRev === 1, `ackRev 99 clamps to attentionRev (ackRev ${s.ackRev})`);
+    ok(readAgentFile(A).ackRev === 1, "ackRev persisted to disk");
+    r = await req("PATCH", `/api/sessions/${A}`, { ackRev: 0 });
+    s = await get();
+    ok(s.ackRev === 1, "ackRev never moves backwards (0 after 1 ignored)");
+    ok(s.state === "done", "ack leaves the detector state alone (still done)");
+
+    // Blocked is a fresh entry → re-lights even though done was acked.
+    await req("PATCH", `/api/sessions/${A}`, { state: "blocked", blockReason: "permission" });
+    s = await get();
+    ok(s.attentionRev === 2 && s.ackRev === 1, "done→blocked is a new entry: attentionRev 2 > ackRev 1 (needs me again)");
+    // Working / idle never raise attention.
+    await req("PATCH", `/api/sessions/${A}`, { state: "working" });
+    await req("PATCH", `/api/sessions/${A}`, { state: "idle" });
+    s = await get();
+    ok(s.attentionRev === 2, "working/idle do not raise attention");
+    // done → idle → done is two entries (the 'finished another round while I looked' case).
+    await req("PATCH", `/api/sessions/${A}`, { ackRev: 2 });
+    await req("PATCH", `/api/sessions/${A}`, { state: "done" });
+    s = await get();
+    ok(s.attentionRev === 3 && s.ackRev === 2, "a later round re-raises attention past the ack (3 > 2)");
+    // state + ackRev in one PATCH: the ack names a revision, so a stale ack
+    // cannot swallow the bump that the same request causes.
+    await req("PATCH", `/api/sessions/${A}`, { state: "idle" });
+    r = await req("PATCH", `/api/sessions/${A}`, { state: "blocked", ackRev: 3 });
+    s = await get();
+    ok(s.attentionRev === 4 && s.ackRev === 3, "PATCH {state:blocked, ackRev:3} → rev 4 raised, ack stays 3 (still needs me)");
+    ok(readAgentFile(A).attentionState === "blocked", "the state that raised is persisted (attentionState) for the post-restart re-recognition rule");
+    await req("PATCH", `/api/sessions/${A}`, { state: "idle" });
+  }
+
   console.log("\n[server restart — pinned survives a full store reload]");
   {
     await req("PATCH", `/api/sessions/${A}`, { pinned: true });
@@ -376,6 +434,8 @@ async function main() {
     const live = (await liveList()).find((s) => s.id === A);
     ok(live?.pinned === true, "pinned survives server restart (fresh loadAgents)");
     ok(live?.state === "idle", "restart still resets state to idle (loader contract intact)");
+    ok(live?.attentionRev === 4 && live?.ackRev === 3,
+      `attentionRev/ackRev survive the restart (${live?.attentionRev}/${live?.ackRev}) — an unread agent stays unread across a service restart`);
   }
 
   console.log("\n[archive kills shell sub-sessions; orphan adopt restores a record instead of blanking it]");

@@ -352,6 +352,56 @@ async function main() {
     tmuxQ(["kill-session", "-t", `=hadron-${WS_NAME}-pty-b-sh7`]);
   }
 
+  console.log("\n[typing into the agent's pane acks its attention; a shell tab does not]");
+  {
+    const H = { "Content-Type": "application/json", "x-hadron-token": TOKEN, "Origin": BASE };
+    const patch = (body) => fetch(`${BASE}/api/sessions/pty-a`, { method: "PATCH", headers: H, body: JSON.stringify(body) });
+    const get = async () => (await (await fetch(`${BASE}/api/sessions`)).json()).find((s) => s.id === "pty-a");
+    await patch({ state: "done" });
+    let s = await get();
+    ok(s.attentionRev >= 1 && (s.ackRev || 0) < s.attentionRev, `pty-a needs attention (rev ${s.attentionRev}, ack ${s.ackRev || 0})`);
+    let rev = s.attentionRev;
+    // A keystroke through a SHELL-TAB socket is the operator working in a side
+    // shell, not answering the agent — it must not ack.
+    const sh = await connectTerminal("pty-a&shell=sh3");
+    sh.send(JSON.stringify({ type: "input", data: "\r" }));
+    await sleep(600);
+    s = await get();
+    ok((s.ackRev || 0) < rev, "input on the shell-tab WS does not ack");
+    sh.close(); await waitFor(async () => (await health()).livePtys, 0);
+    tmuxQ(["kill-session", "-t", `=hadron-${WS_NAME}-pty-a-sh3`]);
+    // Terminal REPLIES ride the same channel (xterm answers tmux's attach-time
+    // queries): device attributes, cursor position, focus-in, an OSC reply.
+    // None of them is the operator, none may ack.
+    const ws = await connectTerminal("pty-a");
+    for (const reply of ["\x1b[?1;2c", "\x1b[>0;276;0c", "\x1b[24;80R", "\x1b[?24;80R", "\x1b[0n", "\x1b[?2026;2$y", "\x1b[I", "\x1b]11;rgb:0d/11/17\x1b\\"]) {
+      ws.send(JSON.stringify({ type: "input", data: reply }));
+    }
+    await sleep(600);
+    s = await get();
+    ok((s.ackRev || 0) < rev, "terminal query replies (DA / CPR / DECXCPR / DSR / DECRPM / focus / OSC) on the agent's WS do not ack");
+    // Keystrokes that start with ESC are still keystrokes: arrows (CSI and SS3),
+    // modified arrows, function keys, bracketed paste, Alt+letter.
+    for (const key of ["\x1b[A", "\x1bOA", "\x1b[1;5C", "\x1b[15~", "\x1b[200~x\x1b[201~", "\x1bx"]) {
+      ws.send(JSON.stringify({ type: "input", data: key }));
+    }
+    await sleep(600);
+    s = await get();
+    ok(s.ackRev === rev, "ESC-prefixed keystrokes (arrows / SS3 / modified / F-keys / paste / Alt+x) do ack");
+    // Re-raise (a new round) so the plain keystroke below has something to ack.
+    await patch({ state: "blocked" });
+    s = await get();
+    ok(s.attentionRev === rev + 1 && s.ackRev === rev, `blocked re-raises (rev ${s.attentionRev}, ack ${s.ackRev})`);
+    rev = s.attentionRev;
+    // A keystroke through the primary socket is an answer → acked, persisted.
+    ws.send(JSON.stringify({ type: "input", data: "\r" }));
+    ok(await waitFor(async () => (await get()).ackRev, rev), `input on the agent's own WS acks (ackRev ${rev})`);
+    ok(await waitFor(() => { try { return JSON.parse(readFileSync(join(WS, ".hadron", "agents", "pty-a.json"), "utf-8")).ackRev; } catch { return undefined; } }, rev),
+      "…and the ack is persisted to the agent file");
+    ws.close(); await waitFor(async () => (await health()).livePtys, 0);
+    await patch({ state: "idle" });
+  }
+
   console.log("\n[repeated connect/close cycles do not accumulate fds]");
   {
     for (let i = 0; i < 5; i++) {

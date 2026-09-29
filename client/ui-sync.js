@@ -48,6 +48,7 @@ function saveUIState() {
     openTabs,
     deckSortMode,
     deckGroupBy,
+    deckFilter,
     currentTheme,
     notifyLevel,
   };
@@ -113,6 +114,7 @@ function restoreUIState() {
     }
     if (state.deckSortMode) deckSortMode = state.deckSortMode;
     if (state.deckGroupBy) deckGroupBy = state.deckGroupBy;
+    if (state.deckFilter === "needs" || state.deckFilter === "all") deckFilter = state.deckFilter;
     if (state.currentTheme) currentTheme = state.currentTheme;
     if (state.notifyLevel) notifyLevel = state.notifyLevel;
     activeTab = perSessionTab[activeSessionId] || "terminal";

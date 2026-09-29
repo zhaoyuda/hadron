@@ -291,6 +291,18 @@ html, body {
 .dk.dk-blocked { background: #2a1318; border-color: rgba(248,81,73,.4); }
 /* Active overrides state border */
 .dk.active.dk-done, .dk.active.dk-blocked, .dk.active.dk-working { border-color: var(--blue); }
+/* Seen (acked) done/blocked: quiet outline, no glow, muted label — state text unchanged */
+.dk.dk-acked { background: #252a32; border-color: rgba(139,148,158,.25); }
+.dk.dk-acked:hover { background: #2e343e; }
+.dk.dk-acked .dk-av { box-shadow: 0 0 6px rgba(72,79,88,.3); }
+.dk.dk-acked .dk-sub.dk-sub-done { color: rgba(86,211,100,.55); }
+.dk.dk-acked .dk-sub.dk-sub-blocked { color: rgba(248,81,73,.6); }
+.dk.active.dk-acked { background: #1a2332; border-color: var(--blue); }
+/* Unread while the state has moved on (idle/working again): the gray dot plus a
+   quiet outline, so the "needs me" bit is visible independent of state tint */
+.dk.dk-needs:not(.dk-done):not(.dk-blocked) { border-color: rgba(139,148,158,.55); }
+[data-theme="exploration"] .dk.dk-needs:not(.dk-done):not(.dk-blocked) .dk-name::after { content: " ·"; color: var(--text3); }
+.deck-empty { color: var(--text3); font-size: 11px; padding: 8px 4px 12px; align-self: center; }
 
 /* ── Drag and drop ── */
 .dk.dragging { opacity: 0.4; }
@@ -2094,6 +2106,8 @@ html, body {
 }
 [data-theme="exploration"] .dk-code { display: none; }
 [data-theme="exploration"] .dk-dot { display: none; }
+[data-theme="exploration"] .dk.dk-acked { background: none; border: none; }
+[data-theme="exploration"] .dk.dk-acked .dk-sub { opacity: .55; }
 [data-theme="exploration"] .dk-ring { display: none; }
 
 /* ── Classic CSS box-shadow sprite (v0.2) ── */
@@ -2701,6 +2715,20 @@ mark.ann-mark.ann-mark-flash { background: rgba(210, 153, 34, .8); outline: 1px 
   background: var(--bg3); border: 1px solid var(--border);
   border-radius: 3px; padding: 0 4px;
 }
+
+/* Topbar "N need me" — click = jump to the next one (Alt+N) */
+#needs-me {
+  display: flex; align-items: center; gap: 5px;
+  margin-left: 10px; padding: 1px 8px;
+  font-size: 11px; color: var(--text2);
+  border: 1px solid var(--border); border-radius: 5px;
+  cursor: pointer; user-select: none; background: var(--bg);
+}
+#needs-me[hidden] { display: none; }
+#needs-me:hover { color: var(--text); border-color: var(--text3); }
+#needs-me.nm-filtered { border-color: var(--blue); color: var(--blue); }
+#needs-me .nm-dot { width: 7px; height: 7px; border-radius: 50%; background: #3fb950; box-shadow: 0 0 6px rgba(63,185,80,.6); }
+#needs-me .nm-count { font-weight: 700; }
 
 #palette-overlay {
   display: none; position: fixed; inset: 0; z-index: 600;

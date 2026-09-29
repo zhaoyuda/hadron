@@ -49,7 +49,7 @@ scripts/
   setup-workspace.js  # Interactive workspace initializer
 test/
   unit/               # detectState/nextState fixtures + security HTTP suite (npm test)
-  e2e/                # Playwright browser modules M1-M20 (npm run test:e2e)
+  e2e/                # Playwright browser modules M1-M21 (npm run test:e2e)
 ```
 
 ## Conventions
@@ -126,7 +126,13 @@ npm test
 #                            un-archived) instead of saving a blank one over it — for -shN and -vim-<ts>
 #                            leftovers alike, never minting "<id>-vim-<ts>"; whoami/adopt try the full
 #                            suffix as an id first, so a real agent foo-vim-3 (live or archived) is never
-#                            read as a vim pane of foo)
+#                            read as a vim pane of foo; triage: PATCH state done/blocked raises attentionRev
+#                            once per ENTRY (same state again does not), PATCH ackRev is a non-negative
+#                            integer (400 otherwise), clamped to attentionRev, never moves back, leaves state
+#                            alone; {state, ackRev} in one request cannot swallow its own bump; both revs
+#                            persist and survive the restart block while state resets to idle; test-pane-resolution
+#                            covers the boot rule: a first post-boot verdict equal to the persisted attentionState is a
+#                            re-recognition, not an entry — a read agent stays read across a restart)
 #   + test-terminal-ws.js   (terminal pty lifecycle — the macOS ptmx-exhaustion class: normal close
 #                            releases the master fd (kill+destroy), ws heartbeat reaps half-open
 #                            connections' ptys, /api/health livePtys count, no fd accumulation.
@@ -138,7 +144,10 @@ npm test
 #                            a WS for an unknown or archived id is refused with close code 4404 — never
 #                            mints an agent, no pty, no shell tmux session, archived record untouched;
 #                            restore → attaches again; ?shell= must be sh<N> or vim-<ts> (the client's
-#                            shapes) or the upgrade is refused with 400 — no pty, no tmux session)
+#                            shapes) or the upgrade is refused with 400 — no pty, no tmux session;
+#                            {type:"input"} on the agent's OWN WS acks its attention (persisted), on a
+#                            shell-tab WS it does not, and neither do xterm's terminal-query replies (DA / CPR /
+#                            focus / OSC) on the agent's WS — attaching is not typing)
 #   + test-resume-live.js   (auto-resume at the REAL boundary: private tmux server (HADRON_TMUX_SOCKET) +
 #                            a process actually named claude/claude.exe; checkpoint on disk, shared-cwd
 #                            refusal warned once per agent, tombstone, reboot via HADRON_BOOT_ID (same id →
@@ -245,6 +254,7 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #   + test/e2e/m18-comment-rail.js (comment rail: cards permanently visible at ≥560px previews (width-adaptive 190-260px — split panes qualify), aligned with highlights; rail composer + in-rail edit/delete; mark↔card two-way linking; orphan + doc sections; annRailBusy edit guard; split-layout context derivation; <560px falls back to the P0 hover card)
 #   + test/e2e/m19-artifacts-ux.js (artifacts add/remove UX: Browse popover survives folder clicks (pointerdown close model) + keyboard nav + hidden-files toggle; atomic add with canonical de-dupe; URL validation + escaped labels; remove with 409 drift recovery; dir artifacts — live folder groups where new on-disk files appear automatically; ephemeral file: tabs; add concurrency; viewport clamp)
 #   + test/e2e/m20-agent-ops.js  (agent ops: context-menu Pin → "📌 Pinned" section first in BOTH deck modes, card moved not duplicated, survives 3s refresh + reload; `hadron pin <name>`; `hadron close <name>` → tmux dead + JSON archived + ls --archived + restore, with the dashboard left ON the closed agent: its WS is refused (4404), no reconnect loop, record not blanked/resurrected; in-pane `hadron message` sender attribution + --raw; ambiguous names exit 1, nothing delivered)
+#   + test/e2e/m21-needs-me.js   (triage: cards light on unseen done/blocked with a "N need me" counter; a 1-s dwell on the agent's terminal in a focused window acks it — card goes quiet, ackRev persisted, and the client never PATCHes `state`; an unread agent stays lit when its state moves on; Alt+N jumps to the next unread and wraps; a re-raise on the active agent is acked as the rev moves; "Only Agents That Need Me" keeps the active card and survives a reload; the palette lists all agents (no 8-row cap) with a "needs me" hint)
 ```
 
 `npm run test:e2e` runs `test/e2e/run-all.js`, which executes every `m*.js`
@@ -295,7 +305,7 @@ staging first:
    changes.
 2. `npm test` + `npm run test:e2e` in the worktree. The runner reports M10 as
    `XFAIL` (known headless-chromium clipboard issue, fails identically on main)
-   and exits 0 when it's the only failure — so a green run means M1–M9, M11–M20
+   and exits 0 when it's the only failure — so a green run means M1–M9, M11–M21
    all passed. Any `FAIL` (non-xfail) gates the branch.
 3. `scripts/predeploy-check.sh` — live-fire proof on staging that a service
    restart does NOT interrupt running agents (claude PIDs survive, a

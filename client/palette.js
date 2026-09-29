@@ -107,17 +107,21 @@ function buildPaletteItems(query) {
   const items = [];
 
   // ── Agents (global) → switch ──
-  const order = (typeof getDisplayOrder === "function") ? getDisplayOrder() : sessions;
+  // Unfiltered: the palette is the way back to a quiet agent while the deck's
+  // "needs me" filter hides it.
+  const order = (typeof getDisplayOrder === "function") ? getDisplayOrder({ filtered: false }) : sessions;
+  // No row cap: with a fleet of 25+ the 9th agent must still be reachable by
+  // name (the list scrolls; ↑/↓ keep the selection in view).
+  const needs = (s) => (typeof needsMe === "function") && needsMe(s);
   const agentRows = order
     .map((s) => ({ s, score: fuzzyScore(query, s.name) }))
     .filter((x) => x.score >= 0)
     .sort((a, b) => b.score - a.score)
-    .slice(0, 8)
     .map(({ s }) => ({
       cat: "Agents",
       icon: mkIcon(s.state, 14),
       label: s.name,
-      sub: s.group || "",
+      sub: [s.group || "", needs(s) ? "needs me" : ""].filter(Boolean).join(" · "),
       action: () => { closeCommandPalette(); switchSession(s.id); },
     }));
 
