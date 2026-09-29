@@ -11,7 +11,7 @@
  * Run: node test/unit/test-resume.js
  */
 import { decideResume, scrapeSessionId, validateSessionFile, claudeProjectDir, RuntimeTracker, performResume, isClaudeCmd, verifyAdoption, PINNED_CONFIDENCE, REGISTRY_POLL_MS, REGISTRY_POLL_NO_ID_MS } from "../../server/resume.js";
-import { findRegistrySession, readRegistry, processIdentity } from "../../server/session-registry.js";
+import { findRegistrySession, findTmuxlessRecordFor, readRegistry, processIdentity, parentPid } from "../../server/session-registry.js";
 import { warnOnce, firedWarnings, resetWarnOnce } from "../../server/log.js";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "fs";
 import { tmpdir } from "os";
@@ -294,7 +294,41 @@ console.log("\n[session registry — ~/.claude/sessions/<pid>.json → this pane
   ok(findRegistrySession({ tmuxSession: "hadron-ws-a", paneTarget: "@1.%7", root, identity, registry: readRegistry({ root }) }).status === "matched", "a pre-read registry snapshot is used instead of re-reading the dir");
   ok(find({ paneTarget: () => "@3.%7" }).status === "matched", "same %pane in another @window (break-pane / move-pane) still matches — the pane id is the key");
   put(41, { kind: "batch" });
-  ok(find().status === "none" && readRegistry({ root }).malformed === 1, "a non-interactive record (claude -p) is never a candidate");
+  ok(find().status === "none" && readRegistry({ root }).malformed === 1 && readRegistry({ root }).rejected["not-interactive"] === 1, "a non-interactive record (claude -p) is never a candidate (rejected: not-interactive)");
+  // An old claude (2.1.212 on the Mac fleet, 2026-09-29) writes the record
+  // WITHOUT `tmux`: rejected by reason, listed as tmux-less (pid/version only),
+  // and matchable to a pane by process tree — diagnosis, never an id source.
+  put(41, { tmux: undefined, version: "2.1.212" });
+  {
+    const reg = readRegistry({ root });
+    ok(reg.entries.length === 0 && reg.rejected["no-tmux"] === 1 && reg.tmuxless.length === 1 && reg.tmuxless[0].pid === 41 && reg.tmuxless[0].version === "2.1.212" && !("sessionId" in reg.tmuxless[0]),
+      `tmux-less record → rejected no-tmux, listed with pid + version, no session id (${JSON.stringify(reg.tmuxless[0])})`);
+    ok(find().status === "none", "…and findRegistrySession still says none (no pane target to match)");
+    // process tree: 41's parent is 40 (the pane shell), 40's parent is 1
+    const parent = (pid) => ({ 41: 40, 40: 39, 39: 1 }[pid] || null); // claude 41 ← pane shell 40 ← 39 ← init
+    const tl = (panePid, extra = {}) => findTmuxlessRecordFor({ panePid, registry: reg, identity, parent, ...extra });
+    ok(tl(41)?.pid === 41 && tl(41).version === "2.1.212", "tmux-less record whose pid IS the pane pid → matched with its version");
+    ok(tl(40)?.pid === 41, "tmux-less record whose pid is a child of the pane pid (launched from the pane shell) → matched");
+    ok(tl(99) === null, "a pane that is not an ancestor → null");
+    ok(tl(40, { depth: 0 }) === null, "depth 0 only matches the pane pid itself");
+    ok(tl(39)?.pid === 41 && tl(1) === null, "default depth 2: grandparent (pane shell → wrapper → claude) matches, a deeper ancestor does not");
+    // Both parentPid branches agree on a live pid and on a dead one — the
+    // `ps -o ppid=` branch is what the Mac fleet runs and is otherwise untested here.
+    ok(parentPid(process.pid, "linux") === parentPid(process.pid, "darwin") && parentPid(process.pid, "linux") > 0, `parentPid /proc and ps branches agree (${parentPid(process.pid, "linux")})`);
+    ok(parentPid(999999, "linux") === null && parentPid(999999, "darwin") === null, "dead pid → null on both branches");
+    let calls = 0;
+    const counting = (pid) => { calls++; return identity(pid); };
+    findTmuxlessRecordFor({ panePid: 40, registry: reg, identity: counting, parent });
+    ok(calls === 1, `identity is consulted once per tmux-less record (${calls}) — callers memoise across agents`);
+    live.set(41, { alive: true, claude: true, start: 9999 });
+    ok(tl(41) === null, "procStart mismatch (pid reused) → null");
+    live.set(41, { alive: true, claude: false, start: 1041 });
+    ok(tl(41) === null, "pid alive but not claude → null");
+    live.set(41, { alive: true, claude: true, start: 1041 });
+    put(41, { tmux: undefined, version: "2.1.212", procStart: undefined });
+    ok(findTmuxlessRecordFor({ panePid: 40, registry: readRegistry({ root }), identity, parent })?.pid === 41, "a record without procStart matches on liveness + name alone");
+    ok(findTmuxlessRecordFor({ panePid: 40, registry: { tmuxless: [] }, identity, parent }) === null && findTmuxlessRecordFor({ panePid: null, registry: reg, identity, parent }) === null, "no tmux-less records / no pane pid → null");
+  }
   put(41);
   ok(find({ paneTarget: () => "@1.%8" }).status === "none", "same tmux session, different pane (user split) → none, not matched");
   ok(find({ paneTarget: () => null }).status === "unavailable", "pane target unresolved → unavailable (never a prefix match)");

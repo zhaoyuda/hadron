@@ -348,7 +348,7 @@ Several workspaces on one machine need one watchdog per workspace, exactly like 
 **Resume constraints worth knowing**
 
 - Agents that were spawned by Hadron carry an authoritative session id (`--session-id` is injected at launch) and resume cleanly.
-- Agents whose Claude session started some other way get their session id from Claude Code's own session registry (`~/.claude/sessions/`, Claude ≥ 2.1.26x: it records which tmux pane each live claude runs in, so the match is exact — a shell-tab claude in the same directory is never confused with the agent's). On older Claude versions Hadron falls back to scraping the newest transcript under `~/.claude/projects/` — except when **several agents share one `cwd`**: the transcripts there are indistinguishable per agent, so Hadron refuses to guess and those agents do not auto-resume (`hadron adopt` fixes that by hand; `hadron doctor` shows what the registry knew).
+- Agents whose Claude session started some other way get their session id from Claude Code's own session registry (`~/.claude/sessions/`, Claude ≥ 2.1.26x: it records which tmux pane each live claude runs in, so the match is exact — a shell-tab claude in the same directory is never confused with the agent's). On older Claude versions Hadron falls back to scraping the newest transcript under `~/.claude/projects/` — except when **several agents share one `cwd`**: the transcripts there are indistinguishable per agent, so Hadron refuses to guess and those agents do not auto-resume (`hadron adopt` fixes that by hand; `hadron doctor` shows what the registry knew — including when the pane's claude is simply too old to write the pane field, in which case it names the version and says to upgrade).
 
 ## Roadmap
 

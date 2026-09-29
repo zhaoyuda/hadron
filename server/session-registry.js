@@ -41,49 +41,118 @@ const toIso = (v) => {
   return null;
 };
 
-// One registry record, shape-checked. Returns null for anything that is not a
-// complete INTERACTIVE record of a version we understand (extra fields are
-// fine; a `claude -p` child that ever writes a record is not the pane's
-// conversation and must never be matched to it).
+// The claude version verified to write the `tmux` field (2.1.284 on the Mac
+// fleet, 2026-09-29; 2.1.212 wrote records WITHOUT it — every one was rejected
+// and shared-cwd agents went red with a guessed "claude too old?").
+export const REGISTRY_TMUX_SINCE = "2.1.284";
+
+// One registry record, shape-checked. { rec } for a complete INTERACTIVE
+// record of a version we understand (extra fields are fine); otherwise
+// { reject, version, pid, procStart } naming WHY, so doctor can count rejects
+// by reason instead of calling them all "unreadable". A `claude -p` child that
+// ever writes a record is not the pane's conversation and must never match.
 function parseRecord(text, file) {
   let d;
-  try { d = JSON.parse(text); } catch { return null; }
-  if (!d || typeof d !== "object") return null;
+  try { d = JSON.parse(text); } catch { return { reject: "not-json" }; }
+  if (!d || typeof d !== "object") return { reject: "not-json" };
+  const version = typeof d.version === "string" ? d.version : null;
   const pid = Number(d.pid);
-  if (!Number.isInteger(pid) || pid <= 0 || basename(file) !== `${pid}.json`) return null;
-  if (typeof d.sessionId !== "string" || !UUID_RE.test(d.sessionId)) return null;
-  if (typeof d.tmux !== "string" || !d.tmux) return null;
-  if (typeof d.cwd !== "string" || !d.cwd) return null;
-  if (d.kind != null && d.kind !== "interactive") return null;
   const procStart = d.procStart == null || d.procStart === "" ? null : Number(d.procStart);
-  if (procStart !== null && !Number.isFinite(procStart)) return null;
-  return {
+  const base = { version, pid: Number.isInteger(pid) && pid > 0 ? pid : null, procStart: Number.isFinite(procStart) ? procStart : null };
+  if (base.pid === null || basename(file) !== `${pid}.json`) return { reject: "bad-pid", ...base };
+  if (typeof d.sessionId !== "string" || !UUID_RE.test(d.sessionId)) return { reject: "bad-session-id", ...base };
+  // ORDER IS LOAD-BEARING: not-interactive is checked before no-tmux so a
+  // `claude -p` child never lands in `tmuxless` (an old claude that omits
+  // `kind` altogether would slip through — unverified for 2.1.212).
+  if (d.kind != null && d.kind !== "interactive") return { reject: "not-interactive", ...base };
+  if (typeof d.tmux !== "string" || !d.tmux) return { reject: "no-tmux", ...base };
+  if (typeof d.cwd !== "string" || !d.cwd) return { reject: "no-cwd", ...base };
+  if (procStart !== null && !Number.isFinite(procStart)) return { reject: "bad-procstart", ...base };
+  return { rec: {
     pid, procStart, pidDomain: typeof d.pidDomain === "string" ? d.pidDomain : null,
     sessionId: d.sessionId, cwd: d.cwd, tmux: d.tmux,
     status: typeof d.status === "string" ? d.status : null,
     updatedAt: toIso(d.updatedAt),
-    version: typeof d.version === "string" ? d.version : null,
-  };
+    version,
+  } };
 }
 
-// { available, reason, entries, malformed } — available=false when the dir is
-// missing/unreadable (claude too old, or a relocated CLAUDE_CONFIG_DIR).
+// { available, reason, entries, malformed, rejected, tmuxless } —
+// available=false when the dir is missing/unreadable (claude too old, or a
+// relocated CLAUDE_CONFIG_DIR). `malformed` is the total reject count;
+// `rejected` counts them by reason; `tmuxless` lists the interactive records
+// that only lack the tmux field (pid, procStart, version — never the session
+// id), so a pane's claude can be matched to one by process instead.
 export function readRegistry({ root = REGISTRY_ROOT } = {}) {
   let names;
   try { names = readdirSync(root); } catch (e) {
-    return { available: false, reason: e && e.code === "ENOENT" ? "missing" : "unreadable", entries: [], malformed: 0 };
+    return { available: false, reason: e && e.code === "ENOENT" ? "missing" : "unreadable", entries: [], malformed: 0, rejected: {}, tmuxless: [] };
   }
   const entries = [];
+  const rejected = {};
+  const tmuxless = [];
   let malformed = 0;
   for (const name of names) {
     if (!/^\d+\.json$/.test(name)) continue;
     const file = join(root, name);
     let text;
     try { text = readFileSync(file, "utf-8"); } catch { continue; } // removed between readdir and read (claude exited)
-    const rec = parseRecord(text, file);
-    if (rec) entries.push(rec); else malformed++;
+    const r = parseRecord(text, file);
+    if (r.rec) { entries.push(r.rec); continue; }
+    malformed++;
+    rejected[r.reject] = (rejected[r.reject] || 0) + 1;
+    if (r.reject === "no-tmux") tmuxless.push({ pid: r.pid, procStart: r.procStart, version: r.version });
   }
-  return { available: true, reason: null, entries, malformed };
+  return { available: true, reason: null, entries, malformed, rejected, tmuxless };
+}
+
+// Parent pid of <pid>, or null (dead, or no cheap source). Linux reads
+// /proc/<pid>/stat field 4; elsewhere `ps -o ppid=`.
+export function parentPid(pid, platform = process.platform) {
+  if (platform === "linux") {
+    let stat;
+    try { stat = readFileSync(`/proc/${pid}/stat`, "utf-8"); } catch { return null; }
+    const ppid = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
+    return Number.isInteger(ppid) && ppid > 0 ? ppid : null;
+  }
+  try {
+    const out = execFileSync("ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf-8", timeout: 3000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+    const ppid = Number(out);
+    return Number.isInteger(ppid) && ppid > 0 ? ppid : null;
+  } catch { return null; }
+}
+
+// An old claude (< REGISTRY_TMUX_SINCE) writes records without `tmux`, so the
+// pane cannot be matched by target — but the record's pid IS the claude
+// process, and it runs in the pane: it is the pane process itself, or a
+// descendant when launched from the pane's shell. This finds the tmux-less
+// record whose live claude pid sits under panePid (at most `depth` levels,
+// procStart-verified where the record carries one), so doctor can say "your
+// claude <version> lacks the tmux field — upgrade" instead of guessing.
+// Returns { pid, version } or null. Never the session id — the record has
+// one, but a process-tree match is not the pane-target proof the tracker
+// requires, so this is a DIAGNOSIS, not an identity source.
+// depth 2 covers the real topology (pane shell → claude, or → wrapper →
+// claude) and keeps the per-record spawn count small on macOS, where every
+// step is a `ps`. Callers scanning many agents pass memoised identity/parent.
+export function findTmuxlessRecordFor({ panePid, registry, identity = processIdentity, parent = parentPid, depth = 2 }) {
+  if (!Number.isInteger(panePid) || panePid <= 0 || !registry || !registry.tmuxless || !registry.tmuxless.length) return null;
+  const underPane = (pid) => {
+    let p = pid;
+    for (let i = 0; i <= depth && p; i++) {
+      if (p === panePid) return true;
+      p = parent(p);
+    }
+    return false;
+  };
+  for (const r of registry.tmuxless) {
+    if (!r.pid) continue;
+    const p = identity(r.pid);
+    if (!p.alive || !p.claude) continue;
+    if (r.procStart !== null && p.start !== null && r.procStart !== p.start) continue;
+    if (underPane(r.pid)) return { pid: r.pid, version: r.version };
+  }
+  return null;
 }
 
 // What is process <pid>, right now? { alive, claude, start } — `claude` is true
@@ -140,7 +209,7 @@ export function processIdentity(pid, platform = process.platform) {
 const paneIdOf = (target) => { const m = /%\d+$/.exec(String(target || "")); return m ? m[0] : null; };
 export function findRegistrySession({ tmuxSession, paneTarget, root = REGISTRY_ROOT, identity = processIdentity, registry = null }) {
   const reg = registry || readRegistry({ root });
-  const base = { entries: reg.entries.length };
+  const base = { entries: reg.entries.length, tmuxless: (reg.tmuxless || []).length };
   if (!reg.available) return { status: "unavailable", reason: `registry ${reg.reason}`, ...base };
   const prefix = `${tmuxSession}:`;
   const named = reg.entries.filter((e) => e.tmux.startsWith(prefix));

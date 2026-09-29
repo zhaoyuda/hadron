@@ -163,7 +163,15 @@ npm test
 #                            claude (red, shared-cwd text), a third shared-cwd claude that a registry record
 #                            (written for the fixture's real pid + pane) names → green "resumes as registry"
 #                            within the no-id poll interval, row registry=matched, a dead-pid record is
-#                            registry=stale and never adopted, payload sessionRegistry carries counts only, registryAgrees
+#                            registry=stale and never adopted, a record for the pane's OWN claude that lacks `tmux` (claude
+#                            2.1.212) is never adopted either but turns the red row into "claude 2.1.212 under this pane writes
+#                            its session registry record without the tmux field — upgrade claude (2.1.284 verified)…"; a sibling
+#                            shared-cwd agent with no record of its own says both facts ("no record naming this pane; N records
+#                            in it lack the tmux field … none was found under this pane's process" — proof the process-tree
+#                            match never crosses panes); a tmux-less record whose version is a token-shaped string reads
+#                            "(version unknown)" and the string reaches neither payload nor CLI (safeVersion); the CLI header
+#                            says "2 records (claude 2.1.212) lack the tmux field" (never "unreadable"); payload sessionRegistry
+#                            carries counts only (rejected by reason + tmuxlessVersions, capped at 5), registryAgrees
 #                            is a boolean (never an id); a pinned id with a never-seen transcript is yellow, seen-then-gone is red;
 #                            a disk-seeded MANUAL id without a transcript stays on disk but is red
 #                            "checkpoint transcript missing … id is kept"; claude.exe with recognition disabled via

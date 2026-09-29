@@ -168,13 +168,15 @@ function procStartOf(pid) {
   const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
   return Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19]);
 }
-function writeRegistryRecord(id, sid, { pid = fixturePid(id), procStart = procStartOf(pid), tmux = `${paneOf(id)}:${tmuxSafe(["display-message", "-t", paneOf(id), "-p", "#{window_id}.#{pane_id}"])}` } = {}) {
+function writeRegistryRecord(id, sid, { pid = fixturePid(id), procStart = procStartOf(pid), tmux = `${paneOf(id)}:${tmuxSafe(["display-message", "-t", paneOf(id), "-p", "#{window_id}.#{pane_id}"])}`, version = "2.1.283" } = {}) {
   mkdirSync(REG, { recursive: true });
   // pidDomain as claude writes it: linux:<machine-id>:pid:[<ns>] — a machine id, NOT the boot id
-  writeFileSync(join(REG, `${pid}.json`), JSON.stringify({
+  const rec = {
     pid, procStart, pidDomain: `linux:${randomUUID().replace(/-/g, "")}:pid:[4026531836]`, sessionId: sid, cwd: onDisk(id).cwd, tmux,
-    status: "idle", updatedAt: new Date().toISOString(), startedAt: new Date().toISOString(), version: "2.1.283", kind: "interactive", entrypoint: "cli",
-  }, null, 2));
+    status: "idle", updatedAt: new Date().toISOString(), startedAt: new Date().toISOString(), version, kind: "interactive", entrypoint: "cli",
+  };
+  if (tmux === null) delete rec.tmux; // what claude 2.1.212 writes
+  writeFileSync(join(REG, `${pid}.json`), JSON.stringify(rec, null, 2));
   return pid;
 }
 
@@ -211,6 +213,7 @@ async function main() {
   const sharedCwd = join(WS, "shared");
   const shA = await createAgent("doc-shared-a", sharedCwd);
   const shB = await createAgent("doc-shared-b", sharedCwd);
+  const shC = await createAgent("doc-shared-c", sharedCwd);
 
   const untrackedId = await createAgent("doc-untracked", join(WS, "untracked"));
   // doc-registry: a THIRD claude in the shared cwd — unscrapable like its
@@ -224,6 +227,7 @@ async function main() {
   sendLine(greenId, "claude");
   sendLine(shA, "claude");
   sendLine(shB, "claude");
+  sendLine(shC, "claude");
   sendLine(untrackedId, "claude.exe");
   sendLine(regId, "claude");
   // green must reach a scraped sessionId; the others just need to settle (~3 polls)
@@ -235,6 +239,16 @@ async function main() {
   const deadPid = (() => { const r = execFileSync("bash", ["-c", "sleep 0.01 & echo $!"], { encoding: "utf-8" }).trim(); return Number(r); })();
   execFileSync("sleep", ["0.3"]);
   writeRegistryRecord(greenId, randomUUID(), { pid: deadPid, procStart: 1 });
+  // doc-shared-b: its own claude has a record that lacks `tmux` (old claude).
+  // The tracker must NOT take it (no pane proof) and doctor must name the
+  // real reason with the version, not guess "too old?".
+  const oldSid = randomUUID();
+  const oldPid = writeRegistryRecord(shB, oldSid, { tmux: null, version: "2.1.212" });
+  // doc-shared-c: same, but the record's version string is a token-shaped
+  // corruption — safeVersion must keep it out of the row, the payload and the CLI.
+  const badVer = "sk-ant-api03-XXXXXXXXXXXXXXXXXXXX";
+  const badSid = randomUUID();
+  writeRegistryRecord(shC, badSid, { tmux: null, version: badVer });
   const regDisk = await waitDisk(regId, (a) => a.runtime?.confidence === "registry", 15000);
   ok(regDisk.runtime?.sessionId === regSid && regDisk.runtime?.confidence === "registry", `tracker took the registry's id for the shared-cwd agent within the no-id poll interval (confidence ${regDisk.runtime?.confidence})`);
   ok(onDisk(greenId).runtime?.confidence === "correlated", "a stale record (dead pid) never replaced the green agent's scraped id");
@@ -269,10 +283,18 @@ async function main() {
   ok(byName["doc-registry"].registry === "matched" && byName["doc-registry"].confidence === "registry", `row: registry=matched, confidence=registry (${byName["doc-registry"].registry}/${byName["doc-registry"].confidence})`);
   ok(byName["doc-registry"].registryAgrees === true && byName["doc-green"].registryAgrees === null && byName["doc-shell"].registryAgrees === null, `registryAgrees: true when matched with the checkpoint id, null otherwise (${byName["doc-registry"].registryAgrees}/${byName["doc-green"].registryAgrees})`);
   ok(byName["doc-green"].registry === "stale", `row: green agent's dead-pid record reads as registry=stale (${byName["doc-green"].registry})`);
-  ok(sharedFinding && /session registry has no record for this pane/.test(sharedFinding.message) && (byName["doc-shared-a"].registry === "none" || byName["doc-shared-b"].registry === "none"), "shared-cwd red row says the registry had no record before blaming the scrape; row registry=none");
+  ok(F("doc-shared-a").level === "red" && /session registry has no record naming this pane; 2 records in it lack the tmux field — an old claude \(upgrade to 2\.1\.284\+\), though none was found under this pane's process/.test(F("doc-shared-a").message) && byName["doc-shared-a"].registry === "none", `shared-cwd red row with tmux-less records elsewhere says both facts (no record for THIS pane; N old-claude records exist); row registry=none (${F("doc-shared-a").message})`);
+  ok(F("doc-shared-b").level === "red" && /claude 2\.1\.212 under this pane writes its session registry record without the tmux field — upgrade claude \(2\.1\.284 verified\)/.test(F("doc-shared-b").message) && /hadron adopt/.test(F("doc-shared-b").message) && byName["doc-shared-b"].registry === "none",
+    `old-claude tmux-less record for the pane's own claude → red names the version and the fix, not "too old?" (${F("doc-shared-b").message})`);
+  ok(F("doc-shared-c").level === "red" && /claude \(version unknown\) under this pane writes its session registry record without the tmux field/.test(F("doc-shared-c").message),
+    `a token-shaped version string is sanitised to "(version unknown)" in the row (${F("doc-shared-c").message})`);
+  ok(!onDisk(shB).runtime?.sessionId && !onDisk(shC).runtime?.sessionId, "…and the tracker never took a tmux-less record's id (process-tree match is diagnosis, not identity)");
+  ok(doc.sessionRegistry.rejected && doc.sessionRegistry.rejected["no-tmux"] === 2 && doc.sessionRegistry.malformed === 2 && Array.isArray(doc.sessionRegistry.tmuxlessVersions) && doc.sessionRegistry.tmuxlessVersions.length === 1 && doc.sessionRegistry.tmuxlessVersions[0] === "2.1.212",
+    `payload counts rejects by reason (no-tmux: 2) and lists only the SANITISED old claude version (${JSON.stringify(doc.sessionRegistry.rejected)} ${JSON.stringify(doc.sessionRegistry.tmuxlessVersions)})`);
+  ok(!raw.includes(oldSid) && !raw.includes(badSid) && !raw.includes(badVer) && !raw.includes("sk-ant"), "doctor response leaks neither tmux-less record's session id nor the token-shaped version string");
   ok(byName["doc-shell"].registry === null, "a shell pane has registry=null (not consulted)");
   ok(doc.sessionRegistry && doc.sessionRegistry.available === true && doc.sessionRegistry.entries === 2 && typeof doc.sessionRegistry.root === "string", `payload summarises the registry: available, 2 records (${JSON.stringify(doc.sessionRegistry)})`);
-  ok(!raw.includes(regSid) && !raw.includes(String(regPid)), "doctor response leaks neither the registry session id nor the pid");
+  ok(!raw.includes(regSid) && !raw.includes(String(regPid)) && !raw.includes(String(oldPid)), "doctor response leaks neither the registry session ids nor the pids");
 
   // PATH column: fresh-shell PATH resolves `claude` to the fixture
   ok(byName["doc-green"].pathResolvesClaudeTo === join(FIX, "claude"), `green pathResolvesClaudeTo = fixture claude (${byName["doc-green"].pathResolvesClaudeTo})`);
@@ -287,7 +309,8 @@ async function main() {
   ok(/no session id \(.*shared cwd cannot be scraped/.test(cli.stdout), "CLI output shows the shared-cwd red row");
   ok(/untracked/.test(cli.stdout), "CLI output shows the untracked red row");
   ok(/resumes as correlated/.test(cli.stdout), "CLI output shows the green row");
-  ok(/resumes as registry/.test(cli.stdout) && /· registry: matched/.test(cli.stdout) && /^registry \d+ live claude records in /m.test(cli.stdout), "CLI shows the registry-green row, per-row registry status and the registry header line");
+  ok(/resumes as registry/.test(cli.stdout) && /· registry: matched/.test(cli.stdout) && /^registry \d+ live claude records in .*\(2 records \(claude 2\.1\.212\) lack the tmux field — upgrade claude \(2\.1\.284 verified\)\)/m.test(cli.stdout), `CLI shows the registry-green row, per-row registry status and a header that counts the tmux-less records with the sanitised version (${(cli.stdout.match(/^registry .*/m) || [""])[0]})`);
+  ok(!/unreadable\)/.test(cli.stdout) && !cli.stdout.includes(oldSid) && !cli.stdout.includes(badSid) && !cli.stdout.includes("sk-ant"), "CLI header no longer calls a tmux-less record \"unreadable\" and leaks no id or token-shaped version");
   ok(!cli.stdout.includes(regSid), "CLI leaks no registry session id");
   ok(/will NOT restart after a reboot/.test(cli.stdout), "CLI flags the hand-started server as red (won't survive reboot)");
   ok(/tmux session PATH resolves claude to/.test(cli.stdout), "CLI prints the PATH-resolves-claude column for claude panes");

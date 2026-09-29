@@ -17,7 +17,7 @@ import { randomUUID } from "crypto";
 import { loadAgents, loadAgent, saveAgent, saveAgentLocked, archiveAgent, deleteAgent, initWorkspace, getWorkspaceDir, appendAgentField, removeAgentArtifact, isSelfWrite } from "./agent-store.js";
 import { resolve } from "path";
 import { tmux, tmuxSafe, isValidId, shellQuoteArgv, tmuxArgv } from "./tmux.js";
-import { findRegistrySession, readRegistry, REGISTRY_ROOT, REGISTRY_STATUSES } from "./session-registry.js";
+import { findRegistrySession, findTmuxlessRecordFor, readRegistry, processIdentity, parentPid, REGISTRY_ROOT, REGISTRY_STATUSES, REGISTRY_TMUX_SINCE } from "./session-registry.js";
 import { syncSkills } from "./skills.js";
 import { collectProvenance } from "./provenance.js";
 import { transcriptPath, readTranscriptSummary, transcriptWire } from "./transcript.js";
@@ -501,6 +501,9 @@ const allowlist = (set) => (v) => (v == null || v === "" ? null : set.has(v) ? v
 const safeConfidence = allowlist(CONFIDENCE_VALUES);
 const safeRuntime = allowlist(RUNTIME_VALUES);
 const safeRestoreState = allowlist(RESTORE_STATES);
+// A claude version string from a registry record (untrusted file under HOME):
+// only a plain dotted version survives, never free text.
+const safeVersion = (v) => (typeof v === "string" && /^\d{1,5}\.\d{1,5}\.\d{1,6}([-.][0-9A-Za-z.]{1,20})?$/.test(v) ? v : null);
 const safeRegistryStatus = allowlist(REGISTRY_STATUSES);
 // Untrusted on-disk timestamp strings. A corrupted checkpoint could place a
 // token in one, or a materially-future value that defeats every "is it fresh /
@@ -544,7 +547,7 @@ function resolveClaudeInPath(pathStr) {
 
 // The classifier — the row-classification table from the reliability plan. Order
 // matters: earlier rows win. decideResume() is only a cross-check on green rows.
-function classifyAgentHealth(session, { paneExists, paneCmd, cwdShared, now, registry = null }) {
+function classifyAgentHealth(session, { paneExists, paneCmd, cwdShared, now, registry = null, oldClaude = null, tmuxlessCount = 0 }) {
   const rt = session.runtime || {};
   if (!paneExists) return { level: "red", message: "no pane — tmux session missing" };
   const looksClaude = /^claude/i.test((paneCmd || "").trim());
@@ -563,7 +566,20 @@ function classifyAgentHealth(session, { paneExists, paneCmd, cwdShared, now, reg
     if (!rt.sessionId) {
       // The registry is the deterministic source; say why it did not answer
       // before blaming the scrape (which is only the fallback).
-      const reg = { none: "claude's session registry has no record for this pane (claude too old?)", stale: "claude's session registry names this pane only for exited processes", ambiguous: "claude's session registry has two live claudes for this pane", unavailable: "claude's session registry is unavailable", unverified: "claude's session registry names this pane but the pid's start time is not checkable here — the tracker takes it at scrape grade on its next poll" }[registry] || "claude's session registry was not consulted";
+      // A tmux-less record for the pane's own claude is a KNOWN reason: that
+      // claude predates the tmux field. Say so, with the version and the fix,
+      // instead of "too old?".
+      const oldVer = oldClaude && oldClaude.version ? safeVersion(oldClaude.version) : null;
+      // Three "none" stories: the pane's own claude has a tmux-less record
+      // (definite); other tmux-less records exist but none is under this pane
+      // (the header contradicts a bare "no record", so say both); no record at
+      // all. The pane IS claude here (regHit is only computed for claude panes).
+      const none = oldClaude
+        ? `claude ${oldVer || "(version unknown)"} under this pane writes its session registry record without the tmux field — upgrade claude (${REGISTRY_TMUX_SINCE} verified) and restart the agent, or \`hadron adopt\` now`
+        : tmuxlessCount > 0
+          ? `claude's session registry has no record naming this pane; ${tmuxlessCount} record${tmuxlessCount === 1 ? "" : "s"} in it lack${tmuxlessCount === 1 ? "s" : ""} the tmux field — an old claude (upgrade to ${REGISTRY_TMUX_SINCE}+), though none was found under this pane's process`
+          : "claude's session registry has no record for this pane (a claude launched before the registry existed)";
+      const reg = { none, stale: "claude's session registry names this pane only for exited processes", ambiguous: "claude's session registry has two live claudes for this pane", unavailable: "claude's session registry is unavailable", unverified: "claude's session registry names this pane but the pid's start time is not checkable here — the tracker takes it at scrape grade on its next poll" }[registry] || "claude's session registry was not consulted";
       return cwdShared
         ? { level: "red", message: `no session id (${reg}; shared cwd cannot be scraped — run \`hadron adopt <agent> --session-id <uuid>\`, or relaunch through Hadron)` }
         : { level: "red", message: `no session id (${reg}; scrape found nothing — run \`hadron adopt <agent> --session-id <uuid>\` if you know it)` };
@@ -604,6 +620,12 @@ app.get("/api/doctor", async (req, res) => {
   const live = [...sessions.values()].filter((s) => !s.archived);
 
   const registrySnapshot = readRegistry();
+  // Request-scoped memo for the tmux-less process-tree match: on macOS every
+  // identity/parent step is a `ps` spawn, and N red agents would otherwise
+  // re-walk the same records N times inside the CLI's 8 s budget.
+  const identMemo = new Map(), parentMemo = new Map();
+  const identity = (pid) => { if (!identMemo.has(pid)) identMemo.set(pid, processIdentity(pid)); return identMemo.get(pid); };
+  const parent = (pid) => { if (!parentMemo.has(pid)) parentMemo.set(pid, parentPid(pid)); return parentMemo.get(pid); };
   const agents = live.map((session) => {
     const tmuxName = tmuxSessionName(session.id);
     const paneExists = tmuxSafe(["has-session", "-t", tmuxName]) !== null;
@@ -617,13 +639,19 @@ app.get("/api/doctor", async (req, res) => {
     // uses), so the row says what the registry knows NOW, not at the last poll.
     const regHit = paneExists && /^claude/i.test((paneCmd || "").trim()) ? registryLookupFor(session.id, registrySnapshot)() : null;
     const registry = regHit ? regHit.status : null;
+    // No record by pane target: is there one for the pane's claude PROCESS that
+    // merely lacks the tmux field (old claude)? Diagnosis only (see
+    // findTmuxlessRecordFor) — the row still reads registry=none.
+    // Only rows that would actually be red for "no session id" pay for it.
+    const rt = session.runtime || {};
+    const panePid = registry === "none" && !rt.sessionId && registrySnapshot.tmuxless.length ? Number(tmuxSafe(["display-message", "-t", tmuxName, "-p", "#{pane_pid}"])) : null;
+    const oldClaude = panePid ? findTmuxlessRecordFor({ panePid, registry: registrySnapshot, identity, parent }) : null;
     // The row's checkpoint id vs what the registry says NOW: false for the
     // ≤30 s window before the tracker reconciles a /clear (or before it
     // settles after a restart) — otherwise "matched" next to a stale id reads
     // like agreement. Booleans only; never the ids.
-    const rt = session.runtime || {};
     const registryAgrees = regHit && (regHit.status === "matched" || regHit.status === "unverified") ? regHit.sessionId === rt.sessionId : null;
-    const finding = classifyAgentHealth(session, { paneExists, paneCmd, cwdShared, now, registry });
+    const finding = classifyAgentHealth(session, { paneExists, paneCmd, cwdShared, now, registry, oldClaude, tmuxlessCount: registrySnapshot.tmuxless.length });
     // Cross-check: a green row MUST also satisfy decideResume — it is the code
     // that actually fires on reboot. Doctor asks "if the machine reboots NOW,
     // does this come back?", so it evaluates decideResume against a SIMULATED
@@ -693,7 +721,14 @@ app.get("/api/doctor", async (req, res) => {
     checkpointPersistThresholdMs: CHECKPOINT_PERSIST_THRESHOLD_MS,
     // Claude's own pane → session registry (~/.claude/sessions): the
     // deterministic id source. Counts only — no ids, no pids.
-    sessionRegistry: { root: REGISTRY_ROOT, available: registrySnapshot.available, reason: registrySnapshot.reason, entries: registrySnapshot.entries.length, malformed: registrySnapshot.malformed },
+    sessionRegistry: {
+      root: REGISTRY_ROOT, available: registrySnapshot.available, reason: registrySnapshot.reason, entries: registrySnapshot.entries.length, malformed: registrySnapshot.malformed,
+      // rejects by reason, and the claude versions behind the tmux-less ones
+      // (so the header can say "upgrade claude" with a number, not "unreadable")
+      rejected: registrySnapshot.rejected || {},
+      tmuxlessVersions: [...new Set((registrySnapshot.tmuxless || []).map((r) => safeVersion(r.version)).filter(Boolean))].sort().slice(0, 5),
+      tmuxSince: REGISTRY_TMUX_SINCE,
+    },
     agents,
   });
 });

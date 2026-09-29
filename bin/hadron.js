@@ -693,7 +693,15 @@ async function main() {
       }
       if (doctor && doctor.sessionRegistry) {
         const r = doctor.sessionRegistry;
-        console.log(`registry ${r.available ? `${r.entries} live claude record${r.entries === 1 ? "" : "s"} in ${r.root}${r.malformed ? ` (${r.malformed} unreadable)` : ""}` : `${r.root} ${r.reason || "unavailable"} — claude's session registry is the deterministic pane→session source (claude ≥ 2.1.26x); falling back to transcript scraping`}`);
+        // Rejected records by reason: a tmux-less one is an old claude (say
+        // which version and the fix), anything else is genuinely malformed.
+        const rej = r.rejected || {};
+        const noTmux = rej["no-tmux"] || 0;
+        const other = Object.entries(rej).filter(([k]) => k !== "no-tmux").reduce((n, [, v]) => n + v, 0);
+        const parts = [];
+        if (noTmux) parts.push(`${noTmux} record${noTmux === 1 ? "" : "s"}${r.tmuxlessVersions && r.tmuxlessVersions.length ? ` (claude ${r.tmuxlessVersions.join("/")})` : ""} lack${noTmux === 1 ? "s" : ""} the tmux field — upgrade claude (${r.tmuxSince ? `${r.tmuxSince} verified` : "see server"})`);
+        if (other) parts.push(`${other} malformed`);
+        console.log(`registry ${r.available ? `${r.entries} live claude record${r.entries === 1 ? "" : "s"} in ${r.root}${parts.length ? ` (${parts.join("; ")})` : ""}` : `${r.root} ${r.reason || "unavailable"} — claude's session registry is the deterministic pane→session source (claude ≥ 2.1.26x); falling back to transcript scraping`}`);
       }
 
       console.log("\nLocal:");
