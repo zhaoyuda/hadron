@@ -8,6 +8,7 @@
  *
  * Run: node test/unit/test-quota.js
  */
+import "./hadron-home.js"; // private HADRON_HOME before any server spawns
 import { spawn, spawnSync } from "child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, utimesSync, statSync } from "fs";
 import { tmpdir } from "os";

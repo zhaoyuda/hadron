@@ -19,6 +19,7 @@
  *
  * Run: node test/unit/test-doctor.js      Requires: tmux, bash.
  */
+import "./hadron-home.js"; // private HADRON_HOME before any server spawns
 import { spawn, execFileSync } from "child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync, existsSync, appendFileSync } from "fs";
 import { tmpdir } from "os";

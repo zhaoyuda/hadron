@@ -298,6 +298,13 @@ const API_ERROR_LINE_RE = new RegExp(
     "Goal paused after \\d+ automatic retries ·",
     "AWS (?:credentials expired or invalid|authentication failed)(?: ·|\\.|$)",
     "Google Cloud (?:credentials expired or invalid|authentication failed)(?: ·|\\.|$)",
+    // Same family (2.1.284 bundle, the "auth from the environment" messages, each
+    // rendered as the head then " · credentials are managed by this environment —
+    // retry, or contact your administrator"). "OAuth authentication failed" in the
+    // same bundle is an MCP server's OAuth callback error — a tool result, never a
+    // block — so it is deliberately NOT here.
+    "Microsoft Foundry authentication failed(?: ·|\\.|$)",
+    "Gateway refused the request(?: ·|$)",   // no `\.`: this one is ordinary English — a reply ending "Gateway refused the request." must not match
   ].join("|") + ")",
 );
 // The retry banner's head carries the error. v2.1.269 picks it in exactly three ways:
@@ -356,7 +363,7 @@ const hasApiError = (lines) => findApiError(lines) !== null;
 // whole message ("rate limit" anywhere before a "·"), so it goes last.
 const API_HEAD = "^(?:[●⏺⚠∴∷∵]\uFE0F? ?| {0,2}|✻\\s+)(?:Error: )?";
 const API_ERROR_KIND_RES = [
-  ["Login needed", new RegExp(API_HEAD + "(?:Please run /login|Not logged in|OAuth token revoked|Login expired|Invalid API key|Authentication error|AWS (?:credentials|authentication)|Google Cloud (?:credentials|authentication)|API Error: 40[13]\\b|40[13]\\b)")],
+  ["Login needed", new RegExp(API_HEAD + "(?:Please run /login|Not logged in|OAuth token revoked|Login expired|Invalid API key|Authentication error|AWS (?:credentials|authentication)|Google Cloud (?:credentials|authentication)|Microsoft Foundry authentication|Gateway refused the request|API Error: 40[13]\\b|40[13]\\b)")],
   ["Model unavailable", new RegExp(API_HEAD + "(?:There's an issue with the selected model|The model \\S+ is not available|no healthy deployments)")],
   ["Usage limit", new RegExp(API_HEAD + "(?:Credit balance too low|You've hit your|You're out of usage credits|Your organization(?:'s usage credit cap| is out of usage credits)|Goal paused · (?:usage limit reached|the request was rate limited)|API Error: 429\\b|429\\b|[^·]*\\b(?:limit reached|rate.?limit))")],
 ];

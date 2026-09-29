@@ -7,6 +7,7 @@
  * Run: node test/unit/test-annotations.js
  * Requires: tmux on PATH.
  */
+import "./hadron-home.js"; // private HADRON_HOME before any server spawns
 import { spawn, execFileSync } from "child_process";
 import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync } from "fs";
 import { tmpdir } from "os";

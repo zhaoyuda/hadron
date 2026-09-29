@@ -9,6 +9,7 @@
  * a suite that can't measure something prints an honest `skip` and passes.
  */
 import { spawnSync } from "child_process";
+import "./hadron-home.js"; // private HADRON_HOME for every suite's server (each suite imports it too)
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 

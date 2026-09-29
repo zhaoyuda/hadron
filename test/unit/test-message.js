@@ -11,6 +11,7 @@
  * Run: node test/unit/test-message.js
  * Requires: tmux on PATH.
  */
+import "./hadron-home.js"; // private HADRON_HOME before any server spawns
 import { spawn, execFileSync } from "child_process";
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "fs";
 import { tmpdir } from "os";

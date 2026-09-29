@@ -13,6 +13,11 @@
  * regressions just like the old chain did.
  */
 import { spawnSync } from "child_process";
+import { mkdtempSync } from "fs";
+import { tmpdir } from "os";
+// Every test server registers itself under HADRON_HOME/servers (hadron ls --all);
+// keep the suite's records out of the user's real ~/.hadron.
+process.env.HADRON_HOME = process.env.HADRON_HOME || mkdtempSync(join(tmpdir(), "hadron-home-"));
 import { readdirSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";

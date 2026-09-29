@@ -105,6 +105,7 @@ Agents (and humans) script the server through the `hadron` CLI (`npm link` puts 
 
 ```bash
 hadron ls                                # list all agents
+hadron ls --all                          # every running Hadron server of this user, across workspaces
 hadron whoami                            # show the current agent (resolved by the server)
 hadron spawn <name> --task "..." --start # create + launch an agent
 hadron message <id> "text"               # deliver a prompt to a running agent — reliable for

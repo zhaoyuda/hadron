@@ -7,6 +7,7 @@
  * Run: node test/unit/test-security.js
  * Requires: tmux on PATH.
  */
+import "./hadron-home.js"; // private HADRON_HOME before any server spawns
 import { spawn, execFileSync } from "child_process";
 import { mkdtempSync, readFileSync, existsSync, rmSync, mkdirSync, writeFileSync } from "fs";
 import { tmpdir, networkInterfaces } from "os";

@@ -14,7 +14,7 @@
  * Requires: tmux on PATH.
  */
 import { spawn, execFileSync } from "child_process";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync, symlinkSync, mkdirSync } from "fs";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync, symlinkSync, mkdirSync, readdirSync } from "fs";
 import { tmpdir } from "os";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -32,6 +32,10 @@ function ok(cond, msg) {
 }
 
 const WS = mkdtempSync(join(tmpdir(), "hadron-opstest-"));
+// The server registers itself under HADRON_HOME/servers (hadron ls --all): a
+// private dir keeps this suite's records out of the user's ~/.hadron.
+const HH = mkdtempSync(join(tmpdir(), "hadron-opshome-"));
+process.env.HADRON_HOME = HH;
 const WS_NAME = WS.split("/").pop().replace(/[^a-zA-Z0-9_-]/g, "");
 let server, TOKEN;
 
@@ -467,6 +471,30 @@ async function main() {
     await req("PATCH", `/api/sessions/${A}`, { state: "idle" });
   }
 
+  console.log("\n[hadron ls --all: every running server of this user, from ~/.hadron/servers]");
+  {
+    const recDir = join(HH, "servers");
+    const recs = readdirSync(recDir).filter((n) => n.endsWith(".json"));
+    ok(recs.length === 1, `the server registered one record under HADRON_HOME/servers (${recs.length})`);
+    const rec = JSON.parse(readFileSync(join(recDir, recs[0]), "utf-8"));
+    ok(rec.workspace === WS && String(rec.port) === String(PORT) && rec.pid === server.pid, `record names workspace, port and the server's pid (${JSON.stringify(rec)})`);
+    // A crash leftover: a record whose pid is dead is skipped by the CLI (and
+    // pruned by the next server boot — checked in the restart block below).
+    writeFileSync(join(recDir, "deadbeef00000000.json"), JSON.stringify({ workspace: "/nowhere/stale", port: 1, pid: 2147483000, startedAt: 1 }));
+    // No workspace context at all: --all finds the server through the record,
+    // not through HADRON_PORT / the cwd's .hadron.
+    const bare = { ...process.env, TMUX: "" }; delete bare.HADRON_PORT; delete bare.HADRON_TOKEN;
+    const out = execFileSync("node", [join(REPO, "bin", "hadron.js"), "ls", "--all"], { encoding: "utf-8", env: bare, cwd: tmpdir() });
+    ok(out.includes(`== ${WS}  :${PORT}  pid ${server.pid}`) && out.includes("Ops Alpha"), `text lists the workspace header and its agents:\n${out.split("\n").slice(0, 3).join("\n")}`);
+    ok(!out.includes("/nowhere/stale"), "a record with a dead pid is not listed");
+    const js = JSON.parse(execFileSync("node", [join(REPO, "bin", "hadron.js"), "ls", "--all", "--json"], { encoding: "utf-8", env: bare, cwd: tmpdir() }));
+    const mine = js.find((r) => r.workspace === WS), stale = js.find((r) => r.workspace === "/nowhere/stale");
+    ok(mine && mine.status === "ok" && Array.isArray(mine.agents) && mine.agents.some((a) => a.name === "Ops Alpha") && mine.pid === server.pid, "--json: status ok + the agents array for the live server");
+    ok(stale && stale.status === "stale" && stale.agents === undefined, "--json still reports the dead record as stale (no agents)");
+    ok(!JSON.stringify(js).includes(TOKEN), "the listing carries no token");
+    ok(/--all/.test(hadron(["ls", "--help"])), "ls usage mentions --all");
+  }
+
   console.log("\n[server restart — pinned/parked survive a full store reload]");
   {
     await req("PATCH", `/api/sessions/${A}`, { pinned: true, parked: true });
@@ -477,6 +505,11 @@ async function main() {
       stdio: ["ignore", "pipe", "pipe"],
     });
     await waitForServer();
+    {
+      const recs = readdirSync(join(HH, "servers")).filter((n) => n.endsWith(".json"));
+      const rec = JSON.parse(readFileSync(join(HH, "servers", recs.find((n) => n !== "deadbeef00000000.json") || recs[0]), "utf-8"));
+      ok(recs.length === 1 && rec.pid === server.pid, `after a SIGKILL + reboot the record names the new pid and the dead sibling is pruned (${recs.join(",")})`);
+    }
     const live = (await liveList()).find((s) => s.id === A);
     ok(live?.pinned === true, "pinned survives server restart (fresh loadAgents)");
     ok(live?.parked === true, "parked survives server restart");
@@ -607,5 +640,6 @@ main()
     if (server) try { server.kill("SIGKILL"); } catch {}
     killTmux();
     try { rmSync(WS, { recursive: true, force: true }); } catch {}
+    try { rmSync(HH, { recursive: true, force: true }); } catch {}
     process.exit(failed === 0 ? 0 : 1);
   });

@@ -9,6 +9,7 @@
  *
  * Run: node test/unit/test-provenance.js
  */
+import "./hadron-home.js"; // private HADRON_HOME before any server spawns
 import { spawn, spawnSync, execFileSync } from "child_process";
 import { createServer as createNetServer } from "net";
 import { createServer as createHttpServer } from "http";

@@ -97,7 +97,10 @@ npm test
 #   = test-state-eval.js   (detectState snapshot fixtures; a background shell at an empty prompt is idle
 #                            with substatus {type:"shell",count} — not working — and a permission dialog
 #                            with a shell in the chrome is blocked; an API error's blockReason names what to DO —
-#                            "Login needed" / "Usage limit" / "Model unavailable" / transient "API error"
+#                            "Login needed" / "Usage limit" / "Model unavailable" / transient "API error";
+#                            the environment-managed auth family (AWS / Google Cloud / Microsoft Foundry /
+#                            "Gateway refused the request") is Login needed — "OAuth authentication failed" is an
+#                            MCP server's callback error, a tool result, deliberately not an API block
 #                            (apiErrorReason, classification only: it never decides `blocked`); contextFromPane
 #                            reads claude's context footer only from the bottom 16 rows under the last ❯ prompt line —
 #                            a reply quoting "91% context used" is null, so is the phrase with no prompt line at all)
@@ -131,7 +134,10 @@ npm test
 #                            chars, > 200 entries), de-duplicated, replaced whole, absent on disk when empty, on the
 #                            token-bearing list only
 #                            (parking leaves tmux running and never sets archived; both survive the restart block),
-#                            archive/restore lifecycle over HTTP, CLI pin/unpin/park/unpark/close/restore/ls --archived
+#                            archive/restore lifecycle over HTTP, CLI pin/unpin/park/unpark/close/restore/ls --archived;
+#                            `hadron ls --all` walks HADRON_HOME/servers (default ~/.hadron/servers — each server writes
+#                            {workspace, port, pid} at boot, removes it on clean exit, prunes dead-pid siblings at boot;
+#                            the CLI lists only live hadron-server pids, --json marks the rest stale, no token needed)
 #                            with name→id resolution — ambiguous names exit 1 with candidates; custom
 #                            launchers incl. argv quoting; Bearer alias; bulk close; kernels CLI with
 #                            atomic PATCH merge; /api/file .hadron write jail; restart persistence; archive kills
@@ -145,7 +151,9 @@ npm test
 #                            integer (400 otherwise), clamped to attentionRev, never moves back, leaves state
 #                            alone; {state, ackRev} in one request cannot swallow its own bump; both revs
 #                            persist and survive the restart block while state resets to idle; an accepted ack
-#                            stamps ackAt ("you last looked", persisted, an ignored ack does not restamp it); test-pane-resolution
+#                            stamps ackAt ("you last looked", persisted, an ignored ack does not restamp it); test-pane-resolution also pins the
+#                            context meter's sticky rule at the tmux boundary (agent-process pane with the footer → contextPct,
+#                            a shell foreground keeps the reading while working and drops it otherwise, read before _applySnap); it
 #                            covers the boot rule: a first post-boot verdict equal to the persisted attentionState is a
 #                            re-recognition, not an entry — a read agent stays read across a restart)
 #   + test-terminal-ws.js   (terminal pty lifecycle — the macOS ptmx-exhaustion class: normal close

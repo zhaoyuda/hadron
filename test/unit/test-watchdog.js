@@ -19,6 +19,7 @@
  *
  * Run: node test/unit/test-watchdog.js
  */
+import "./hadron-home.js"; // private HADRON_HOME before any server spawns
 import { spawn, spawnSync } from "child_process";
 import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync, statSync } from "fs";
 import { tmpdir } from "os";

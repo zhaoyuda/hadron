@@ -8,9 +8,9 @@ import { dirname, join, basename } from "path";
 import { execSync, execFileSync, spawn as cpSpawn } from "child_process";
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, watch as fsWatch, chmodSync, unlinkSync, mkdtempSync, mkdirSync, rmSync, renameSync, realpathSync } from "fs";
 import { connect as netConnect } from "net";
-import { networkInterfaces, hostname, tmpdir } from "os";
+import { networkInterfaces, hostname, tmpdir, homedir } from "os";
 import { URL } from "url";
-import { randomBytes } from "crypto";
+import { randomBytes, createHash } from "crypto";
 import { StateDetector, isShellCmd, POLL_INTERVAL_MS, raiseAttention } from "./state-detector.js";
 import { probeClaudeCaps, RuntimeTracker, performResume, BOOT, isClaudeCmd, decideResume, verifyAdoption, UUID_RE, PINNED_CONFIDENCE, sessionFileExists, claudeProjectDir } from "./resume.js";
 import { randomUUID } from "crypto";
@@ -164,6 +164,49 @@ function writeRuntimeFile() {
 }
 function removeRuntimeFile() {
   try { unlinkSync(runtimeFilePath()); } catch {}
+  // Only OUR record: the path is keyed by the workspace, so a second server on
+  // the same workspace (another port) may have overwritten it — never delete
+  // that one's registration on our way out.
+  try {
+    const { pid } = JSON.parse(readFileSync(serverRecordPath(), "utf-8"));
+    if (pid === process.pid) unlinkSync(serverRecordPath());
+  } catch {}
+}
+// The per-USER record of this server (`hadron ls --all` walks them): every
+// workspace's server registers itself under ~/.hadron/servers/<hash>.json
+// with its workspace path, port and pid — the same three facts as runtime.json,
+// findable without knowing the workspace first. The CLI trusts a record only
+// while its pid is alive and is a hadron server (a crash leaves it behind, like
+// runtime.json). HADRON_HOME relocates the directory (tests; a second user).
+export function hadronHome() {
+  return process.env.HADRON_HOME || join(homedir(), ".hadron");
+}
+function serverRecordPath() {
+  const key = createHash("sha1").update(WORKSPACE).digest("hex").slice(0, 16);
+  return join(hadronHome(), "servers", `${key}.json`);
+}
+function writeServerRecord() {
+  try {
+    const dir = join(hadronHome(), "servers");
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // Crash leftovers: a sibling record whose pid is gone is dropped here so the
+    // directory does not grow with every SIGKILLed server (tests, watchdog).
+    for (const n of readdirSync(dir)) {
+      if (!n.endsWith(".json")) continue;
+      let drop = false;
+      try {
+        const { pid } = JSON.parse(readFileSync(join(dir, n), "utf-8"));
+        if (!Number.isInteger(pid)) drop = true;          // malformed: never self-heals otherwise
+        else if (pid !== process.pid) process.kill(pid, 0);
+      } catch (e) {
+        drop = !e || e.code !== "EPERM";                  // ESRCH (dead) or unparsable; EPERM = alive, another user
+      }
+      if (drop) { try { unlinkSync(join(dir, n)); } catch {} }
+    }
+    writeFileSync(serverRecordPath(), JSON.stringify({ workspace: WORKSPACE, port: PORT, pid: process.pid, startedAt: Date.now() }), { mode: 0o600 });
+  } catch (e) {
+    console.warn(`[boot] could not write the server record under ${hadronHome()}/servers (hadron ls --all will not list this workspace): ${e.message}`);
+  }
 }
 // Event-loop liveness beat (server/heartbeat.js): `hadron watchdog` reads the
 // mtime of .hadron/heartbeat out-of-process and SIGKILLs a wedged server.
@@ -463,7 +506,7 @@ function ensureDefaults() {
 // `hadron doctor` compare it against the working tree.
 let PROVENANCE = null;
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true, livePtys: livePtys.size, liveSessions: sessions.size, wsClients: wss.clients.size, ...(heartbeat ? heartbeat.status() : {}), ...(PROVENANCE || {}) });
+  res.json({ ok: true, pid: process.pid, livePtys: livePtys.size, liveSessions: sessions.size, wsClients: wss.clients.size, ...(heartbeat ? heartbeat.status() : {}), ...(PROVENANCE || {}) });
 });
 
 // GET but AUTHENTICATED: requireAuth waves GET through, and this returns per-agent
@@ -809,8 +852,8 @@ app.get("/api/sessions", (req, res) => {
     if (aSort !== bSort) return aSort - bSort;
     return a.id.localeCompare(b.id);
   });
-  const withTranscript = tokenPresent(req);
-  res.json(sorted.map((s) => resolvedSession(s, { withTranscript })));
+  const authenticated = tokenPresent(req);
+  res.json(sorted.map((s) => resolvedSession(s, { authenticated })));
 });
 
 // Full last prompt/reply text for one agent (the list carries WIRE_TEXT chars).
@@ -889,11 +932,14 @@ function coreHidden(s) {
 function coreFor(s, core) {
   return core.slice(0, FILES_CORE).map((e) => ({ ...e, path: sessionFilePath(s, e.path) }));
 }
-function resolvedSession(s, { withTranscript = false } = {}) {
+// `authenticated`: the request carried the token. It gates everything that is
+// the agent's own business (transcript text, files, coreDismissed, context
+// arithmetic); the single-session POST/PATCH responses are the reduced form.
+function resolvedSession(s, { authenticated = false } = {}) {
   const { transcript, contextPct, files, coreDismissed, ...rest } = s;
   const context = contextWire(s);
   let fw = null;
-  if (withTranscript && files) {
+  if (authenticated && files) {
     const hidden = coreHidden(s);
     fw = filesWire(files, { coreSkip: (p) => hidden.has(sessionFilePath(s, p)) });
   }
@@ -901,8 +947,8 @@ function resolvedSession(s, { withTranscript = false } = {}) {
     ...rest,
     // coreDismissed is the operator's own list, but its entries are paths the
     // transcript named — same class as `files`, token-bearing readers only.
-    ...(withTranscript && Array.isArray(coreDismissed) && coreDismissed.length ? { coreDismissed } : {}),
-    ...(withTranscript && transcript ? { transcript: transcriptWire(transcript) } : {}),
+    ...(authenticated && Array.isArray(coreDismissed) && coreDismissed.length ? { coreDismissed } : {}),
+    ...(authenticated && transcript ? { transcript: transcriptWire(transcript) } : {}),
     // `files` (what the session edited — file paths, not conversation, but
     // still the agent's private business): token-bearing readers only. A path
     // is whatever claude was given; an agent that Reads a transcript under
@@ -910,7 +956,7 @@ function resolvedSession(s, { withTranscript = false } = {}) {
     // same reader can fetch the whole transcript, so nothing new is exposed.
     ...(fw ? { files: { ...fw, changed: fw.changed.map((e) => ({ ...e, path: sessionFilePath(s, e.path) })), core: coreFor(s, fw.core) } } : {}),
     // The open GET gets the badge (pct + colour), the token-bearing one the arithmetic too.
-    ...(context ? { context: withTranscript ? context : { pct: context.pct, source: context.source, level: context.level } } : {}),
+    ...(context ? { context: authenticated ? context : { pct: context.pct, source: context.source, level: context.level } } : {}),
     artifacts: (s.artifacts || []).map(a => ({
       ...a,
       value: a.value ? resolveFilePath(a.value) : a.value
@@ -2682,6 +2728,7 @@ server.listen(PORT, HADRON_HOST, () => {
   const config = initWorkspace(WORKSPACE);
   AUTH_TOKEN = loadOrCreateToken();
   writeRuntimeFile();
+  writeServerRecord();
   // A previous server that was SIGKILLed (by the watchdog, say) left its last
   // beat on disk; drop it so it can't be judged against THIS pid while we boot.
   try { unlinkSync(join(getWorkspaceDir(), ".hadron", "heartbeat")); } catch {}

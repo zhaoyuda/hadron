@@ -12,6 +12,7 @@
  * Self-contained: boots its own Hadron server on a throwaway workspace + port.
  * Run: node test/unit/test-artifacts.js
  */
+import "./hadron-home.js"; // private HADRON_HOME before any server spawns
 import { spawn, execFileSync } from "child_process";
 import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, symlinkSync, existsSync, rmSync, realpathSync } from "fs";
 import { tmpdir } from "os";

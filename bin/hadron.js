@@ -7,7 +7,8 @@
  * by asking the SERVER to resolve its tmux session — it never reverse-engineers ids.
  */
 import { execFileSync } from "child_process";
-import { readFileSync, existsSync, writeSync, statSync } from "fs";
+import { readFileSync, existsSync, writeSync, statSync, readdirSync } from "fs";
+import { homedir } from "os";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { syncSkills, removeSkills, skillsStatus, userSkillsDir } from "../server/skills.js";
@@ -203,12 +204,12 @@ function printSkillsStatus() {
 // ── flag parsing ──
 // Presence-only flags must be declared here or they swallow the next positional
 // (`hadron message --raw "Beta Two" hi` would resolve "hi" as the target).
-const BOOLEAN_FLAGS = new Set(["json", "archived", "raw", "no-enter", "start", "auto", "force", "restart", "tee", "install", "uninstall"]);
+const BOOLEAN_FLAGS = new Set(["json", "archived", "all", "raw", "no-enter", "start", "auto", "force", "restart", "tee", "install", "uninstall"]);
 // Every --flag a command accepts. Anything else is rejected up front with
 // `unknown option: --x` (exit 1) — a typo like `watchdog --restrat` used to be
 // silently ignored and exit 0, which from a timer unit looks like success.
 const COMMAND_FLAGS = {
-  ls: ["json", "archived"],
+  ls: ["json", "archived", "all"],
   whoami: ["json"],
   spawn: ["group", "task", "cwd", "launch", "start", "related", "artifact"],
   skills: [],
@@ -283,6 +284,51 @@ function pidIsHadronServer(pid) {
     return /server[\\/]index\.js/.test(args);
   } catch { return false; }
 }
+// `hadron ls --all`: every running Hadron server of this user, whatever
+// workspace the shell is in. Each server registers itself under
+// ~/.hadron/servers/<hash>.json (server/index.js writeServerRecord); a record
+// whose pid is dead or not a hadron server is a crash leftover and is skipped.
+// Agents come from each server's own open GET /api/sessions on 127.0.0.1 (no
+// token needed for the list; a server bound elsewhere is still local).
+function serverRecords() {
+  const dir = join(process.env.HADRON_HOME || join(homedir(), ".hadron"), "servers");
+  let names = [];
+  try { names = readdirSync(dir).filter((n) => n.endsWith(".json")); } catch { return []; }
+  const out = [];
+  for (const n of names) {
+    let rt;
+    try { rt = JSON.parse(readFileSync(join(dir, n), "utf-8")); } catch { continue; }
+    const port = Number(rt && rt.port);
+    if (!rt || typeof rt.workspace !== "string" || !Number.isInteger(port) || port < 1 || port > 65535 || !Number.isInteger(rt.pid)) continue;
+    out.push({ workspace: rt.workspace, port: String(port), pid: rt.pid, startedAt: rt.startedAt, live: pidAlive(rt.pid) && pidIsHadronServer(rt.pid) });
+  }
+  return out.sort((a, b) => a.workspace.localeCompare(b.workspace));
+}
+async function lsAll(json) {
+  const recs = serverRecords();
+  // A live pid proves a hadron server holds it, not that it is the server the
+  // record describes (SIGKILLed prod, pid reused by staging): the port's own
+  // /api/health must answer with the record's pid before its agents are shown.
+  const probe = async (r) => {
+    if (!r.live) return { ...r, status: "stale" };
+    try {
+      const h = await fetch(`http://127.0.0.1:${r.port}/api/health`, { signal: AbortSignal.timeout(3000) });
+      const hj = h.ok ? await h.json() : null;
+      if (!hj || hj.pid !== r.pid) return { ...r, status: "stale" };
+      const res = await fetch(`http://127.0.0.1:${r.port}/api/sessions`, { signal: AbortSignal.timeout(3000) });
+      if (!res.ok) return { ...r, status: `http ${res.status}` };
+      return { ...r, status: "ok", agents: await res.json() };
+    } catch { return { ...r, status: "unreachable" }; }
+  };
+  const rows = await Promise.all(recs.map(probe));
+  if (json) { console.log(JSON.stringify(rows.map(({ live, ...x }) => x), null, 2)); return; }
+  const shown = rows.filter((r) => r.status !== "stale");
+  if (!shown.length) { console.log("no running Hadron servers registered for this user (a server registers itself at boot)"); return; }
+  for (const r of shown) {
+    console.log(`== ${r.workspace}  :${r.port}  pid ${r.pid}${r.status === "ok" ? `  ${r.agents.length} agent${r.agents.length === 1 ? "" : "s"}` : `  (${r.status})`}`);
+    for (const a of r.agents || []) printAgent(a);
+  }
+}
 function heartbeatAgeMs() {
   try { return Date.now() - statSync(join(HADRON_DIR, "heartbeat")).mtimeMs; } catch { return null; }
 }
@@ -338,6 +384,7 @@ async function main() {
 
   switch (cmd) {
     case "ls": {
+      if (flags.all) { await lsAll(!!flags.json); break; }
       if (flags.archived) {
         const list = await api("GET", "/api/sessions/archived");
         if (flags.json) { console.log(JSON.stringify(list, null, 2)); break; }
@@ -871,7 +918,8 @@ async function main() {
       (known ? console.log : console.error)(`hadron — manage Hadron agents from the terminal
 
 Commands:
-  hadron ls [--json] [--archived]          list all agents (--archived: the archive instead)
+  hadron ls [--json] [--archived] [--all]  list all agents (--archived: the archive instead; --all: every running
+                                          Hadron server of this user, across workspaces)
   hadron whoami [--json]                   show the current agent (resolved by the server)
   hadron spawn <name> [flags]              create an agent
        --group G  --task "..."  --cwd path

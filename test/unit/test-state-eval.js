@@ -143,6 +143,11 @@ const EXPECTED = {
   "blocked-invalid-api-key":           { state: "blocked", blockReason: "Login needed" },
   "blocked-not-logged-in":             { state: "blocked", blockReason: "Login needed" },
   "blocked-gateway-auth":              { state: "blocked", blockReason: "Login needed" },
+  "blocked-foundry-auth":              { state: "blocked", blockReason: "Login needed" },
+  // "Gateway refused the request" is ordinary English: an agent's own sentence ending
+  // with it (no " · credentials …" tail) must not read as an auth error (Opus review);
+  // like the other in-prose fixtures the snapshot is undetermined (null), never blocked.
+  "idle-gateway-prose":                { state: null },
   "blocked-request-timed-out":         { state: "blocked", blockReason: "API error" },
   // (2026-09-15 review of d88d9f5) forms the client emits that d88d9f5 missed
   "blocked-request-timed-out-env":     { state: "blocked", blockReason: "API error" },
@@ -275,6 +280,8 @@ for (const [line, want] of [
   ["● API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\"}}", "Login needed"],
   ["● OAuth token revoked · Please run /login", "Login needed"],
   ["● AWS credentials expired or invalid · run aws sso login", "Login needed"],
+  ["● Microsoft Foundry authentication failed · credentials are managed by this environment — retry, or contact your administrator", "Login needed"],
+  ["● Gateway refused the request · credentials are managed by this environment — retry, or contact your administrator", "Login needed"],
   ["✻ Session limit reached · Retrying in 3s (5pm) · attempt 3/10", "Usage limit"],
   ["✻ Weekly limit reached · Retrying in 1h · attempt 3/10", "Usage limit"],
   ["✻ 429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}} · Retrying in 8s · attempt 3/10", "Usage limit"],

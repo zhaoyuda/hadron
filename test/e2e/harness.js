@@ -40,7 +40,7 @@ export async function bootWorkspace({ name = "e2e", seed } = {}) {
 
   const port = await freePort();
   const proc = spawn("node", [join(REPO, "server", "index.js"), ws], {
-    env: { ...process.env, PORT: String(port), HADRON_HOST: "127.0.0.1" },
+    env: { ...process.env, PORT: String(port), HADRON_HOST: "127.0.0.1", HADRON_HOME: process.env.HADRON_HOME || mkdtempSync(join(tmpdir(), "hadron-home-")) },
     stdio: ["ignore", "pipe", "pipe"],
   });
   proc.stderr.on("data", (d) => process.env.DEBUG && console.error(`[server] ${d}`));

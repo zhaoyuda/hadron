@@ -9,6 +9,7 @@
  *
  * Run: node test/unit/test-file-revision.js
  */
+import "./hadron-home.js"; // private HADRON_HOME before any server spawns
 import { spawn } from "child_process";
 import { mkdtempSync, readFileSync, writeFileSync, readdirSync, rmSync } from "fs";
 import { tmpdir } from "os";

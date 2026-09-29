@@ -17,6 +17,7 @@
  * Run: node test/unit/test-terminal-ws.js
  * Requires: tmux on PATH.
  */
+import "./hadron-home.js"; // private HADRON_HOME before any server spawns
 import { spawn as spawnProc, execFileSync } from "child_process";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync } from "fs";
 import { tmpdir, platform } from "os";

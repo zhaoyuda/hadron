@@ -176,6 +176,16 @@ function makeDetector(name) {
   det.minStateDuration = 0;       // canTransition always true → deterministic
   return { det, session };
 }
+// Wait (≤ 5 s) until the pane shows `text` — never a fixed sleep, so a slow box
+// cannot pass an assertion against a pane that has not painted yet.
+async function untilOnScreen(name, text) {
+  for (let i = 0; i < 100; i++) {
+    let cap = ""; try { cap = tx(["capture-pane", "-p", "-t", name]); } catch {}
+    if (cap.includes(text)) return;
+    await sleep(50);
+  }
+  throw new Error(`pane ${name} never showed ${JSON.stringify(text)}`);
+}
 async function pump(det, n) { for (let i = 0; i < n; i++) { await det._poll(); await sleep(20); } }
 
 console.log("attention revision (no tmux needed)");
@@ -436,8 +446,42 @@ if (!haveTmux) {
       }
       ok(txSafe(["display-message", "-p", "ok"]) === "ok", "the tmux server itself is unaffected by killing the parked client");
     }
+    // ── Test 5: the context meter's sticky rule. A pane whose foreground is an
+    // agent process (node counts, like claude) showing claude's footer sets
+    // contextPct; when the foreground becomes a tool child / shell the last
+    // reading STANDS while the agent is working (the meter is still on screen
+    // behind the child; the badge must not flip between sources every capture)
+    // and is dropped once it is not. The read happens before _applySnap in the
+    // same poll — the order the rule depends on — so the held value is checked
+    // on the very poll whose snapshot could move the state.
+    {
+      const FOOTER_CMD = "node -e \"process.stdout.write('\\u276f fix the tests\\n\\n72% context used\\n');setInterval(()=>{},1e9)\"";
+      newSession("ctx", FOOTER_CMD);
+      await untilOnScreen("ctx", "72% context used");
+      const { det, session } = makeDetector("ctx");
+      await pump(det, 2);
+      ok(session.contextPct === 72, `agent-process pane with claude's footer → contextPct 72 (got ${session.contextPct})`);
+      // The node process exits → the session's shell shows its prompt under the
+      // footer text (a tool child in front of the agent looks the same to the
+      // detector: foreground is not an agent process, text still on screen).
+      // Session started WITH a command dies with it, so run the footer inside a
+      // shell instead: prompt-then-footer text stays, foreground becomes bash.
+      txSafe(["kill-session", "-t", "ctx"]);
+      newSession("ctx", null);              // keystrokes queue in the pty until bash reads them
+      tx(["send-keys", "-t", "ctx", FOOTER_CMD.replace("setInterval(()=>{},1e9)", "0"), "Enter"]);
+      await untilOnScreen("ctx", "72% context used");
+      session.state = "working";
+      session.contextPct = 72;                       // what the last agent-process capture left
+      // Not a tautology: the pane's own ❯ line makes this poll's verdict idle, so a
+      // read placed AFTER _applySnap would see idle, drop to null and fail here.
+      await pump(det, 1);
+      ok(session.contextPct === 72, `shell foreground while working: the last reading stands (${session.contextPct})`);
+      session.state = "idle";
+      await pump(det, 1);
+      ok(session.contextPct === null, `shell foreground while not working: meter dropped (${session.contextPct})`);
+    }
   } finally {
-    for (const s of ["agentA", "foreign", "prefix2"]) txSafe(["kill-session", "-t", s]);
+    for (const s of ["agentA", "foreign", "prefix2", "ctx"]) txSafe(["kill-session", "-t", s]);
     txSafe(["kill-server"]);   // private socket only — never the developer's server
   }
 }
