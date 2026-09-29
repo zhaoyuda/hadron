@@ -49,7 +49,7 @@ scripts/
   setup-workspace.js  # Interactive workspace initializer
 test/
   unit/               # detectState/nextState fixtures + security HTTP suite (npm test)
-  e2e/                # Playwright browser modules M1-M27 (npm run test:e2e)
+  e2e/                # Playwright browser modules M1-M28 (npm run test:e2e)
 ```
 
 ## Conventions
@@ -398,6 +398,16 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                                 with coloured +/− lines and a hunk header, × closes it; an edit on disk moves the
 #                                 numbers and the open diff within the poll with the selection kept; a non-git agent's
 #                                 view says so; Primary hides the view)
+#   + test/e2e/m28-system-notifications.js (OS-level notifications: View → Notifications → "System Notifications" asks for
+#                                 permission once, ✓, persists in the ui state across a reload, raises a confirmation;
+#                                 while the tab is hidden (document.hidden / hasFocus stubbed) a done/blocked agent —
+#                                 the active one included — raises "<Name> is done|blocked" tagged hadron-<id> with
+#                                 the block reason as body, click switches to the agent and closes it; visible + focused
+#                                 raises nothing (banner + title flash cover it); Notifications Off silences it, Banner
+#                                 Only makes it silent, System off stops it while the level stays; no Notification API or
+#                                 permission denied → an in-page message saying why, item stays off. Notification is
+#                                 stubbed via addInitScript (headless raises none). Fixed on the way: submenu items were
+#                                 bound twice in bindMenuClicks, every submenu action fired twice)
 ```
 
 `npm run test:e2e` runs `test/e2e/run-all.js`, which executes every `m*.js`

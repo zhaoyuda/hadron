@@ -8,7 +8,7 @@
 //
 // This is a classic <script> loaded BEFORE app.js; top-level globals it reads
 // (activeSessionId, activeTab, layoutMode, perSessionTab, perSessionLayout,
-// deckSortMode, deckGroupBy, currentTheme, notifyLevel, openTabsPerSession) and
+// deckSortMode, deckGroupBy, currentTheme, notifyLevel, sysNotify, openTabsPerSession) and
 // render fns (renderWorkHeader/renderWorkContent in app.js, deferredFit in
 // terminal.js) are only dereferenced at call time, so there's no load-order TDZ.
 const uiSync = (() => {
@@ -33,6 +33,10 @@ function broadcastUIState() {
   } catch {}
 }
 
+let sysNotifyOff = false; // set by the toggle when the user turns it off
+function readPersistedSysNotify() {
+  try { const st = JSON.parse(localStorage.getItem("hadron-ui-state") || "{}"); return st.sysNotify === true; } catch { return false; }
+}
 function saveUIState() {
   const openTabs = {};
   for (const [k, v] of Object.entries(openTabsPerSession)) {
@@ -54,7 +58,12 @@ function saveUIState() {
     quotaShowFrom,
     currentTheme,
     notifyLevel,
+    // sysNotify: a tab that never enabled it (false in memory) must not write
+    // false over the tab that went through the OS permission prompt — only an
+    // explicit off (sysNotifyOff, set by the toggle) clears the persisted true.
+    sysNotify: sysNotify || (!sysNotifyOff && readPersistedSysNotify()),
   };
+  sysNotifyOff = false;
   localStorage.setItem("hadron-ui-state", JSON.stringify(state));
   // Per-tab: each browser tab restores the agent IT was showing after a reload,
   // rather than snapping to whichever tab wrote localStorage last.
@@ -123,6 +132,7 @@ function restoreUIState() {
     if (Array.isArray(QUOTA_SHOW_FROM) && QUOTA_SHOW_FROM.includes(state.quotaShowFrom)) quotaShowFrom = state.quotaShowFrom;
     if (state.currentTheme) currentTheme = state.currentTheme;
     if (state.notifyLevel) notifyLevel = state.notifyLevel;
+    if (typeof state.sysNotify === "boolean") sysNotify = state.sysNotify;
     activeTab = perSessionTab[activeSessionId] || "terminal";
     layoutMode = perSessionLayout[activeSessionId] || "tabs";
   } catch {}

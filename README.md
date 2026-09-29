@@ -29,7 +29,7 @@ Hadron solves this by giving each agent a card on a shared deck. At a glance you
 - **Artifact panel** — Attach files to any agent: Markdown (rendered), Python (syntax-highlighted, editable via vim), CSV (table view), SQL, Jupyter notebooks, and Marimo notebooks.
 - **Live artifacts** — File artifacts auto-reload when changed on disk. Marimo notebooks support `--watch`, and notebook state survives agent switches.
 - **Kernel config** — Configure which Python environment runs marimo/Jupyter per workspace, via the `/hadron-notebook-kernel` skill.
-- **Notifications** — Sound + banner alerts when agents change state. Configurable: sound+banner, banner only, or off (View > Notifications).
+- **Notifications** — Sound + banner alerts when agents change state. Configurable: sound+banner, banner only, or off (View > Notifications). **System Notifications** (same submenu) adds OS-level notifications while the tab is hidden or the window unfocused — click one to jump to the agent. Needs HTTPS or localhost (see [HTTPS on a tailnet](#https-on-a-tailnet-system-notifications)).
 - **Agent lifecycle** — Create, archive, restore, and permanently delete agents from the menu. Agents persist as JSON files — no database needed.
 - **Groups & organization** — Organize agents into named groups (e.g., "DevOps", "Workers"). Drag to reorder. Lock groups to prevent ad-hoc additions.
 - **Shell tabs** — Each agent can have multiple shell tabs (Alt+T) for parallel terminal work within one agent.
@@ -248,6 +248,27 @@ open http://<tailscale-ip>:3000
 ```
 
 The auto-generated token (`.hadron/token`) still gates every mutating request, but only expose the port on a trusted network (e.g. Tailscale), never the public internet.
+
+### HTTPS on a tailnet (system notifications)
+
+Browsers hand out the Notification API (and every other secure-context API) only over HTTPS or `localhost`. An SSH tunnel (`http://localhost:3000`) qualifies as-is. Over Tailscale, put Hadron behind `tailscale serve` — a Let's Encrypt cert, tailnet-only, auto-renewed, survives reboots:
+
+```bash
+# On the Hadron host (MagicDNS + HTTPS certs enabled in the tailnet admin console)
+sudo tailscale serve --bg --https=8444 http://127.0.0.1:3000
+# → https://<host>.<tailnet>.ts.net:8444/   (use --https=443 for a bare hostname)
+```
+
+The proxy keeps the browser's `Host` header, so the server must be told to accept it — the host name **with the port** as the browser sees it (no port when serving on 443):
+
+```bash
+HADRON_HOST=0.0.0.0 HADRON_ALLOWED_HOSTS=<host>.<tailnet>.ts.net:8444 node server/index.js ~/work &
+# under systemd: a drop-in — sudo systemctl edit hadron → [Service] Environment=HADRON_ALLOWED_HOSTS=<host>.<tailnet>.ts.net:8444
+```
+
+Open GETs and `/api/health` answer through the proxy without it; every mutating request and the terminal WebSocket check the host and answer 403 "host not allowed" until it is set (a page from any other origin stays 403 either way).
+
+Then View → Notifications → System Notifications, allow the browser prompt once. Never `tailscale funnel` a Hadron server: the token gates writes, but the terminals are yours. Verify from another tailnet node (`curl -sI https://<host>.<tailnet>.ts.net:8444/api/health`) rather than from the host itself if something else holds `*:443` there.
 
 ### Run at login (so auto-resume gets its chance)
 

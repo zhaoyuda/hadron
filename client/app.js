@@ -44,6 +44,11 @@ let quotaShowFrom = 30;
 let deckStaleOpen = false; // the Stale section is collapsed unless the operator opened it
 let currentTheme = "default"; // "default", "exploration"
 let notifyLevel = "all"; // "all" (sound+banner+flash), "banner" (banner+flash), "off"
+// System (OS-level) notifications on top of the level above: fire only while
+// this tab is hidden or the window unfocused — the in-page banner covers the
+// rest. Needs a secure context (HTTPS or localhost) and a granted permission;
+// the toggle asks and explains, never silently drops.
+let sysNotify = false;
 let titleFlashInterval = null;
 let pendingAlerts = new Set();
 let wsName = "Hadron";
@@ -2622,6 +2627,91 @@ function showNotification(session, newState) {
   el._dismissTimer = setTimeout(() => dismissNotification(el), timeout);
 }
 
+// A plain in-page message in the same banner slot (no agent behind it).
+function showCenterMessage(text, kind = "info") {
+  const container = document.getElementById("notifications");
+  const el = document.createElement("div");
+  el.className = `center-notif cn-${kind}`;
+  el.innerHTML = `<div class="cn-name">${esc(text)}</div>`;
+  el.addEventListener("click", () => dismissNotification(el));
+  container.appendChild(el);
+  requestAnimationFrame(() => { requestAnimationFrame(() => { el.classList.add("active"); }); });
+  el._dismissTimer = setTimeout(() => dismissNotification(el), 7000);
+}
+
+// ═══ SYSTEM NOTIFICATIONS ═══
+function systemNotifyBlocker() {
+  if (!("Notification" in window)) return "This browser has no Notification API";
+  if (!window.isSecureContext) return "System notifications need HTTPS or localhost — see README → HTTPS on a tailnet";
+  return null;
+}
+async function toggleSystemNotifications() {
+  if (sysNotify) { sysNotify = false; sysNotifyOff = true; saveUIState(); return; }
+  const why = systemNotifyBlocker();
+  if (why) { showCenterMessage(why, why.startsWith("This browser") ? "info" : "blocked"); return; }
+  let perm = Notification.permission;
+  if (perm === "default") {
+    // Safari ≤15 / WKWebView implement only the callback form, which resolves
+    // to undefined — re-read the property rather than trusting the return.
+    try { const r = await Notification.requestPermission(); perm = typeof r === "string" ? r : Notification.permission; } catch { perm = Notification.permission; }
+    if (perm === "default") perm = "denied";
+  }
+  if (perm !== "granted") { showCenterMessage(`Notification permission ${perm} — allow notifications for this site in the browser`, "blocked"); return; }
+  sysNotify = true;
+  saveUIState();
+  try {
+    const n = new Notification("Hadron", { body: "System notifications on — agents reach you while this tab is in the background", tag: "hadron-enabled", silent: true });
+    setTimeout(() => { try { n.close(); } catch {} }, 4000);
+  } catch {}
+}
+// The ✓ never outlives the grant: a permission revoked in site settings (or by
+// Chrome's unused-permission cleanup) or a constructor that throws (iOS Safari
+// wants ServiceWorker notifications) turns the toggle off and says so once —
+// the client-side shape of the silent-failure rule.
+function systemNotifyLost(why) {
+  if (!sysNotify) return;
+  sysNotify = false;
+  sysNotifyOff = true;
+  saveUIState();
+  showCenterMessage(`System notifications were turned off — ${why}`, "blocked");
+}
+// One poll can flip many agents at once (a server restart settling, a shared
+// rate limit blocking the fleet): within a SYS_NOTIFY_WINDOW_MS window the
+// first SYS_NOTIFY_BURST are raised as themselves, the rest collapse into a
+// single "N agents need you" (the window spans polls — a fleet event settles
+// over a few of them).
+const SYS_NOTIFY_BURST = 3;
+const SYS_NOTIFY_WINDOW_MS = 5000;
+let sysNotifyTick = { at: 0, count: 0, burst: null, extra: 0 };
+function sendSystemNotification(s, newState) {
+  if (!sysNotify || !("Notification" in window)) return;
+  if (Notification.permission !== "granted") { systemNotifyLost("the browser no longer grants permission for this site"); return; }
+  if (!document.hidden && document.hasFocus()) return; // you are looking — the banner + title flash cover it
+  const now = Date.now();
+  if (now - sysNotifyTick.at > SYS_NOTIFY_WINDOW_MS) sysNotifyTick = { at: now, count: 0, burst: null, extra: 0 };
+  sysNotifyTick.count++;
+  if (sysNotifyTick.count > SYS_NOTIFY_BURST) {
+    sysNotifyTick.extra++;
+    const n = sysNotifyTick.burst;
+    if (n) { try { n.close(); } catch {} }
+    try {
+      const b = new Notification(`${SYS_NOTIFY_BURST + sysNotifyTick.extra} agents need you`, { body: "Open Hadron to triage them", tag: "hadron-burst", renotify: false, silent: true });
+      b.onclick = () => { try { window.focus(); } catch {} try { b.close(); } catch {} };
+      sysNotifyTick.burst = b;
+      setTimeout(() => { try { b.close(); } catch {} }, 20000);
+    } catch {}
+    return;
+  }
+  const title = `${s.name} ${newState === "blocked" ? "is blocked" : "is done"}`;
+  const body = newState === "blocked" ? String(s.blockReason || "Needs attention").slice(0, 120) : "Task complete";
+  let n;
+  try { n = new Notification(title, { body, tag: `hadron-${s.id}`, renotify: true, silent: notifyLevel !== "all" }); } catch (e) { systemNotifyLost(`this browser cannot show them (${(e && e.name) || "error"})`); return; }
+  // Focusing is the whole job for the active agent: switchSession is a no-op
+  // on the active id, and an agent archived meanwhile is simply not switched to.
+  n.onclick = () => { try { window.focus(); } catch {} if (sessions.some((x) => x.id === s.id)) switchSession(s.id); try { n.close(); } catch {} };
+  setTimeout(() => { try { n.close(); } catch {} }, 20000);
+}
+
 function dismissNotification(el) {
   if (el._dismissed) return;
   el._dismissed = true;
@@ -2695,6 +2785,7 @@ function detectStateChanges(oldStates, newSessions) {
     if (oldState !== undefined && oldState !== newState) {
       if ((newState === "blocked" || newState === "done") && notifyLevel !== "off") {
         if (s.id !== activeSessionId) showNotification(s, newState);
+        sendSystemNotification(s, newState);
         if (notifyLevel === "all") playAlertSound(newState);
         if (document.hidden) startTitleFlash(s.name, newState);
       }
@@ -2719,14 +2810,17 @@ function menuItem(label, action, opts = {}) {
   if (submenu) cls.push("has-submenu");
   let inner = "";
   if (checked !== undefined) inner += `<span class="menu-check">${checked ? "✓" : ""}</span>`;
-  inner += `<span class="menu-label">${label}</span>`;
+  inner += `<span class="menu-label">${esc(label)}</span>`;
   if (shortcut) inner += `<span class="menu-shortcut">${shortcut}</span>`;
   if (submenu) inner += `<span class="menu-arrow">▸</span><div class="menu-submenu">${submenu}</div>`;
   return `<div class="${cls.join(" ")}" data-action="${action || ""}"${opts.data ? ` ${opts.data}` : ""}>${inner}</div>`;
 }
 
 function bindMenuClicks(menu) {
+  // Top-level items only: submenu items are bound below (binding them here too
+  // fired every submenu action twice — harmless for set-x, fatal for a toggle).
   menu.querySelectorAll(".menu-dropdown-item:not(.has-submenu)").forEach(item => {
+    if (item.closest(".menu-submenu")) return;
     item.addEventListener("click", (e) => {
       e.stopPropagation();
       const action = item.dataset.action;
@@ -2780,6 +2874,7 @@ async function showMenu(menuId, anchorEl) {
       menuItem("Sound + Banner", "set-notify", { checked: notifyLevel === "all", data: 'data-level="all"' }),
       menuItem("Banner Only", "set-notify", { checked: notifyLevel === "banner", data: 'data-level="banner"' }),
       menuItem("Off", "set-notify", { checked: notifyLevel === "off", data: 'data-level="off"' }),
+      menuItem("System Notifications", "toggle-sysnotify", { checked: sysNotify }),
     ].join("");
     const editorSub = [
       menuItem("Text (built-in)", "set-editor", { checked: editorPref() === "text", data: 'data-editor="text"' }),
@@ -2883,6 +2978,8 @@ async function handleMenuAction(action, item) {
   } else if (action === "set-notify") {
     notifyLevel = item.dataset.level || "all";
     saveUIState();
+  } else if (action === "toggle-sysnotify") {
+    toggleSystemNotifications();
   } else if (action === "set-editor") {
     setEditorPref(item.dataset.editor === "vim" ? "vim" : "text");
   } else if (action === "toggle-preview") {
