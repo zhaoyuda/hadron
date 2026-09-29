@@ -2087,7 +2087,8 @@ function isCwdShared(sessionId) {
 // state detector reads, so the registry can never attribute a split pane's or
 // a shell tab's claude to the agent. The tmux spawn only happens when a record
 // names the session at all (see findRegistrySession). Pid reuse is guarded by
-// the record's procStart (kernel start time) — see session-registry.js.
+// the record's procStart (kernel start time: clock ticks on Linux, the `ps
+// lstart` date on macOS) — see session-registry.js.
 function registryLookupFor(sessionId, registry = null) {
   const tmuxName = tmuxSessionName(sessionId);
   return () => findRegistrySession({

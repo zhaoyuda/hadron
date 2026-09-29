@@ -11,7 +11,7 @@
  * Run: node test/unit/test-resume.js
  */
 import { decideResume, scrapeSessionId, validateSessionFile, claudeProjectDir, RuntimeTracker, performResume, isClaudeCmd, verifyAdoption, PINNED_CONFIDENCE, REGISTRY_POLL_MS, REGISTRY_POLL_NO_ID_MS } from "../../server/resume.js";
-import { findRegistrySession, findTmuxlessRecordFor, readRegistry, processIdentity, parentPid } from "../../server/session-registry.js";
+import { findRegistrySession, findTmuxlessRecordFor, readRegistry, processIdentity, psIdentity, psArgs, PS_ENV, sameStart, normalizeProcStart, parentPid } from "../../server/session-registry.js";
 import { warnOnce, firedWarnings, resetWarnOnce } from "../../server/log.js";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "fs";
 import { tmpdir } from "os";
@@ -346,10 +346,79 @@ console.log("\n[session registry — ~/.claude/sessions/<pid>.json → this pane
   ok(find({ paneTarget: () => "@1.%7" }).status === "matched" && findRegistrySession({ tmuxSession: "hadron-ws-a", paneTarget: "@1.%7", root, identity }).status === "matched", "pidDomain is not compared (machine id, not boot id)");
   live.set(41, { alive: true, claude: true, start: null });
   const unv = find();
-  ok(unv.status === "unverified" && unv.sessionId === rec(41).sessionId, "no start time on this platform (macOS) but the record has procStart → unverified, id offered, never 'matched'");
+  ok(unv.status === "unverified" && unv.sessionId === rec(41).sessionId, "no live start time (ps lstart unparsable) but the record has procStart → unverified, id offered, never 'matched'");
   put(41, { procStart: null });
   live.set(41, { alive: true, claude: true, start: 1041 });
   ok(find().status === "unverified", "…a record without procStart (older claude) is unverified too — the rule is 'start time verified or not', not 'the record asked'");
+  // macOS (Mac fleet 2026-09-29, claude 2.1.212–2.1.284): procStart is the
+  // `ps lstart` date string, not ticks. Every record was rejected as
+  // bad-procstart, so the registry never matched on a Mac. A date string is a
+  // valid start time on its platform: accepted, compared as a normalised
+  // string against processIdentity's darwin `start`, unknown shapes → null.
+  const darwin = { procStart: "Tue Sep 29 03:50:58 2026", pidDomain: "darwin", version: "2.1.284" };
+  put(41, darwin);
+  {
+    const reg = readRegistry({ root });
+    ok(!("bad-procstart" in reg.rejected) && reg.entries.some((e) => e.pid === 41 && e.procStart === "Tue Sep 29 03:50:58 2026"), `darwin-shaped record (date-string procStart) is accepted, kept as a string (rejected: ${JSON.stringify(reg.rejected)})`);
+  }
+  live.set(41, { alive: true, claude: true, start: "Tue Sep 29 03:50:58 2026" });
+  ok(find().status === "matched" && find().sessionId === rec(41).sessionId, "darwin: identity start equal to the record's date string → matched");
+  live.set(41, { alive: true, claude: true, start: "Tue Sep  29 03:50:58 2026" });
+  ok(find().status === "matched", "darwin: whitespace differences (ps pads the day) do not break the match");
+  live.set(41, { alive: true, claude: true, start: "Tue Sep 29 04:00:00 2026" });
+  ok(find().status === "stale", "darwin: a different lstart (pid reused) → stale");
+  live.set(41, { alive: true, claude: true, start: null });
+  ok(find().status === "unverified", "darwin: ps output unparsable → unverified (today's macOS behaviour, no regression)");
+  put(41, { ...darwin, procStart: "Tue Sep  9 03:50:58 2026" });
+  live.set(41, { alive: true, claude: true, start: "Tue Sep 9 03:50:58 2026" });
+  ok(find().status === "matched", "darwin: single-digit day padded in the record, not in ps → matched");
+  put(41, { procStart: { ticks: 1041 } });
+  live.set(41, { alive: true, claude: true, start: 1041 });
+  {
+    const reg = readRegistry({ root });
+    ok(!("bad-procstart" in reg.rejected) && reg.entries.some((e) => e.pid === 41 && e.procStart === null) && find().status === "unverified", "an object procStart is unknown (null → unverified), never a reason to drop the record");
+  }
+  put(41, { procStart: " 1041 " });
+  ok(find().status === "matched", "a padded numeric string is still ticks (number) → matched");
+  put(41, { procStart: 1041 });
+  ok(find().status === "matched", "a numeric procStart (number, not string) → matched");
+  live.set(41, { alive: true, claude: true, start: "Tue Sep 29 03:50:58 2026" });
+  ok(find().status === "unverified", "record ticks vs live date string (formats drifted) → unverified, NEVER stale — a format drift costs verification, not the id");
+  put(41, darwin);
+  live.set(41, { alive: true, claude: true, start: 1041 });
+  ok(find().status === "unverified", "…and the mirror (record date, live ticks) → unverified too");
+  put(41, { ...darwin, tmux: undefined });
+  ok(findTmuxlessRecordFor({ panePid: 41, registry: readRegistry({ root }), identity, parent: () => null })?.pid === 41, "findTmuxlessRecordFor: different kinds (record date, live ticks) are not a mismatch either — the tmux-less record is still found");
+  live.set(41, { alive: true, claude: true, start: "Tue Sep 29 04:00:00 2026" });
+  ok(findTmuxlessRecordFor({ panePid: 41, registry: readRegistry({ root }), identity, parent: () => null }) === null, "…but a different date of the same kind is (pid reused → null)");
+  put(41, { procStart: undefined, procStartFt: "1041" });
+  live.set(41, { alive: true, claude: true, start: 1041 });
+  ok(find().status === "matched", "procStartFt (claude's gated field name, read as procStartFt ?? procStart) → matched");
+  ok(sameStart(1041, "1041") === true && sameStart(1041, 1042) === false && sameStart(1041, null) === null && sameStart("Tue Sep 29 03:50:58 2026", 1041) === null && sameStart("Tue Sep  9 03:50:58 2026", "Tue Sep 9 03:50:58 2026") === true, "sameStart: true / false / null (unknown or different kinds)");
+  {
+    const t = (v) => normalizeProcStart(v);
+    ok(t("") === null && t(null) === null && t(undefined) === null && t({}) === null && t([]) === null && t(NaN) === null && t(Infinity) === null, "normalizeProcStart: empty / null / object / NaN → null");
+    ok(t(0) === 0 && t("0") === 0 && t(" 12 ") === 12 && t("1e3") === "1e3" && t("0x10") === "0x10", "normalizeProcStart: digits-only strings are ticks; 1e3/0x10 stay strings (never silently 1000/16)");
+    ok(t("a".repeat(64)).length === 64 && t("a".repeat(65)) === null, "normalizeProcStart: 64-char cap");
+  }
+  {
+    const seen = [];
+    const linux = psIdentity(1, (args) => { seen.push(args); return "Tue Sep  9 03:50:58 2026 claude\n"; });
+    ok(JSON.stringify(seen) === JSON.stringify([["-ww", "-o", "lstart=,comm=", "-p", "1"]]) && JSON.stringify(seen[0]) === JSON.stringify(psArgs(1)), `psIdentity: one ps, -ww (macOS truncates comm paths otherwise), lstart+comm together (${JSON.stringify(seen)})`);
+    ok(PS_ENV.LC_ALL === "C" && PS_ENV.TZ === "UTC", "psIdentity env pins LC_ALL=C TZ=UTC — exactly how claude 2.1.284 renders procStart on macOS (a local-TZ ps would read every live claude as a reused pid)");
+    ok(linux.claude === true && linux.start === "Tue Sep 9 03:50:58 2026", "psIdentity: `ps -o lstart=,comm=` line → claude + normalised lstart");
+    const exe = psIdentity(1, () => "Tue Sep 29 03:50:58 2026 /usr/local/bin/claude.exe\n");
+    ok(exe.claude === true && exe.start === "Tue Sep 29 03:50:58 2026", "psIdentity: claude.exe path in comm still recognised");
+    const node = psIdentity(1, () => "Tue Sep 29 03:50:58 2026 node\n");
+    ok(node.claude === false && node.start === "Tue Sep 29 03:50:58 2026", "psIdentity: a non-claude process keeps its start (→ stale, not unverified)");
+    const calls = [];
+    const bad = psIdentity(1, (args) => { calls.push(args); return args.includes("comm=") && !args.includes("-ww") ? "claude\n" : "garbage\n"; });
+    ok(bad.claude === true && bad.start === null && calls.length === 2 && JSON.stringify(calls[1]) === JSON.stringify(["-o", "comm=", "-p", "1"]), `psIdentity: unparsable lstart → start null (unverified) but the name check falls back to plain ps -o comm= (${JSON.stringify(calls)})`);
+    const badBoth = psIdentity(1, () => "garbage\n");
+    ok(badBoth.claude === false && badBoth.start === null, "psIdentity: nothing parses → not claude, start null");
+    const thrown = psIdentity(1, () => { throw new Error("ps failed"); });
+    ok(thrown.claude === false && thrown.start === null, "psIdentity: ps failure → not claude, start null");
+  }
   put(41);
   put(42);
   live.set(41, { alive: true, claude: true, start: 1041 });

@@ -32,9 +32,13 @@ const PANE_TARGET_RE = /^@\d+\.%\d+$/;
 export const REGISTRY_STATUSES = new Set(["matched", "unverified", "none", "stale", "ambiguous", "unavailable"]);
 
 // Field types as claude actually writes them (2.1.28x): pid number,
-// procStart a STRING of clock ticks, updatedAt/startedAt epoch-ms NUMBERS,
-// kind "interactive". Both accepted forms are normalised here so a drift in
-// either direction cannot silently null a field.
+// procStart a STRING — clock ticks on Linux ("12345"), a `ps lstart` date on
+// macOS ("Tue Sep 29 03:50:58 2026", Mac fleet 2026-09-29: every record on
+// the machine was rejected as bad-procstart until this was known) —
+// updatedAt/startedAt epoch-ms NUMBERS, kind "interactive". Both accepted
+// forms are normalised here so a drift in either direction cannot silently
+// null a field. procStart keeps its platform's shape (number | string) and
+// is compared against processIdentity's `start` of the same shape.
 const toIso = (v) => {
   if (typeof v === "number" && Number.isFinite(v)) return new Date(v).toISOString();
   if (typeof v === "string" && v && Number.isFinite(Date.parse(v))) return new Date(v).toISOString();
@@ -45,6 +49,35 @@ const toIso = (v) => {
 // fleet, 2026-09-29; 2.1.212 wrote records WITHOUT it — every one was rejected
 // and shared-cwd agents went red with a guessed "claude too old?").
 export const REGISTRY_TMUX_SINCE = "2.1.284";
+
+// procStart as written (number, numeric string, or a `ps lstart` date string)
+// → a comparable value: clock ticks as a number, a date as a
+// whitespace-collapsed string (macOS `ps` pads a single-digit day with two
+// spaces; the record may not), anything else null (= "unknown", never a
+// reason to reject the record — an unverifiable start time makes the match
+// `unverified`, which is the honest grade, not a lost pane).
+export function normalizeProcStart(v) {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v !== "string") return null;
+  const s = v.replace(/\s+/g, " ").trim();
+  if (!s) return null;
+  if (/^\d+$/.test(s)) return Number(s);
+  return s.length <= 64 ? s : null;
+}
+
+// The record's start vs. the live process's start, both run through the same
+// normaliser so the source of either side (record file, /proc, ps, a test
+// fixture) cannot make "Tue Sep  9" and "Tue Sep 9" look like a reused pid.
+// Returns true / false / null: null = not comparable (either side unknown, or
+// the two are of different kinds — ticks vs a date, which happens when the
+// record and the live lookup disagree on format, not when a pid was reused).
+// Callers grade null as `unverified`, never as stale: a format drift must
+// cost verification, not the agent's id.
+export function sameStart(a, b) {
+  const x = normalizeProcStart(a), y = normalizeProcStart(b);
+  if (x === null || y === null || typeof x !== typeof y) return null;
+  return x === y;
+}
 
 // One registry record, shape-checked. { rec } for a complete INTERACTIVE
 // record of a version we understand (extra fields are fine); otherwise
@@ -57,8 +90,10 @@ function parseRecord(text, file) {
   if (!d || typeof d !== "object") return { reject: "not-json" };
   const version = typeof d.version === "string" ? d.version : null;
   const pid = Number(d.pid);
-  const procStart = d.procStart == null || d.procStart === "" ? null : Number(d.procStart);
-  const base = { version, pid: Number.isInteger(pid) && pid > 0 ? pid : null, procStart: Number.isFinite(procStart) ? procStart : null };
+  // claude's own reader is `procStartFt ?? procStart` (2.1.284 bundle: a
+  // feature gate moves the value to procStartFt); accept both names.
+  const procStart = normalizeProcStart(d.procStart ?? d.procStartFt);
+  const base = { version, pid: Number.isInteger(pid) && pid > 0 ? pid : null, procStart };
   if (base.pid === null || basename(file) !== `${pid}.json`) return { reject: "bad-pid", ...base };
   if (typeof d.sessionId !== "string" || !UUID_RE.test(d.sessionId)) return { reject: "bad-session-id", ...base };
   // ORDER IS LOAD-BEARING: not-interactive is checked before no-tmux so a
@@ -67,7 +102,6 @@ function parseRecord(text, file) {
   if (d.kind != null && d.kind !== "interactive") return { reject: "not-interactive", ...base };
   if (typeof d.tmux !== "string" || !d.tmux) return { reject: "no-tmux", ...base };
   if (typeof d.cwd !== "string" || !d.cwd) return { reject: "no-cwd", ...base };
-  if (procStart !== null && !Number.isFinite(procStart)) return { reject: "bad-procstart", ...base };
   return { rec: {
     pid, procStart, pidDomain: typeof d.pidDomain === "string" ? d.pidDomain : null,
     sessionId: d.sessionId, cwd: d.cwd, tmux: d.tmux,
@@ -149,7 +183,7 @@ export function findTmuxlessRecordFor({ panePid, registry, identity = processIde
     if (!r.pid) continue;
     const p = identity(r.pid);
     if (!p.alive || !p.claude) continue;
-    if (r.procStart !== null && p.start !== null && r.procStart !== p.start) continue;
+    if (sameStart(r.procStart, p.start) === false) continue;
     if (underPane(r.pid)) return { pid: r.pid, version: r.version };
   }
   return null;
@@ -159,8 +193,9 @@ export function findTmuxlessRecordFor({ panePid, registry, identity = processIde
 // when the executable name or argv[0] is claude (argv[0] is what tmux reports
 // as pane_current_command on Linux, so a fixture that `exec -a claude`s counts
 // the same way the state detector counts it); `start` is the kernel start
-// time in clock ticks (the value claude stores as procStart), null where the
-// platform has no cheap source (macOS: liveness + name only).
+// time in the shape claude stores as procStart — clock ticks on Linux, the
+// `ps lstart` date string on macOS (same `ps` claude reads, so it compares
+// equal after whitespace normalisation) — null where it cannot be read.
 export function processIdentity(pid, platform = process.platform) {
   if (platform === "linux") {
     let stat;
@@ -176,9 +211,32 @@ export function processIdentity(pid, platform = process.platform) {
     return { alive: true, claude: isClaude(comm) || isClaude(argv0), start: Number.isFinite(start) ? start : null };
   }
   try { process.kill(pid, 0); } catch (e) { if (e && e.code !== "EPERM") return { alive: false, claude: false, start: null }; }
+  return { alive: true, ...psIdentity(pid) };
+}
+
+// `ps -ww -o lstart=,comm=` for one pid → { claude, start }, run EXACTLY the
+// way claude renders the record's procStart on macOS (2.1.284 bundle:
+// `LC_ALL=C TZ=UTC ps -o lstart= -p <pid>`) — without the env pin a Mac in
+// America/Los_Angeles would read "Mon Sep 28 20:50:58" against a record
+// saying "Tue Sep 29 03:50:58" and grade every live claude as a reused pid.
+// lstart is a fixed 24-column "Tue Sep 29 03:50:58 2026" (day padded), comm
+// (the full executable path on macOS — hence -ww, ps truncates to the
+// terminal width otherwise) follows; both come from ONE ps so a pid reused
+// between two calls cannot mix processes. A line that does not parse keeps
+// the old `ps -o comm=` name check and yields start null (→ unverified).
+export const PS_ENV = { LC_ALL: "C", TZ: "UTC" };
+export const psArgs = (pid) => ["-ww", "-o", "lstart=,comm=", "-p", String(pid)];
+const IS_CLAUDE = /^claude(\.exe)?$/i;
+const defaultPsExec = (args) => execFileSync("ps", args, { encoding: "utf-8", timeout: 3000, stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, ...PS_ENV } });
+export function psIdentity(pid, exec = defaultPsExec) {
+  let out = "";
+  try { out = exec(psArgs(pid)); } catch { return { claude: false, start: null }; }
+  const line = out.split("\n").find((l) => l.trim()) || "";
+  const m = /^\s*([A-Za-z]{3}\s+[A-Za-z]{3}\s+\d{1,2}\s+\d\d:\d\d:\d\d\s+\d{4})\s+(.*)$/.exec(line);
+  if (m) return { claude: IS_CLAUDE.test(basename(m[2].trim())), start: normalizeProcStart(m[1]) };
   let comm = "";
-  try { comm = execFileSync("ps", ["-o", "comm=", "-p", String(pid)], { encoding: "utf-8", timeout: 3000, stdio: ["ignore", "pipe", "ignore"] }).trim(); } catch {}
-  return { alive: true, claude: /^claude(\.exe)?$/i.test(basename(comm)), start: null };
+  try { comm = exec(["-o", "comm=", "-p", String(pid)]).trim(); } catch {}
+  return { claude: IS_CLAUDE.test(basename(comm)), start: null };
 }
 
 // Resolve the agent's pane for tmuxSession. Returns "@w.%p" or null. Injected
@@ -192,7 +250,8 @@ export function processIdentity(pid, platform = process.platform) {
 // stale       — records name the pane but none belongs to a live claude with
 //               that start time (claude exited without cleanup, pid reused)
 // unverified  — one live claude by pid+name, but the start time could not be
-//               checked (macOS gives none; an older record carries none): pid
+//               checked (an older record carries none; `ps lstart` did not
+//               parse; record and live start are of different kinds): pid
 //               reuse after a crash cannot be excluded, so callers may fill an
 //               EMPTY id from it but never replace a known one
 // ambiguous   — two live claudes claim the same pane (never seen; refuse)
@@ -223,8 +282,9 @@ export function findRegistrySession({ tmuxSession, paneTarget, root = REGISTRY_R
   const live = exact.filter((e) => {
     const p = identity(e.pid);
     if (!p.alive || !p.claude) return false;
-    if (e.procStart === null || p.start === null) unverified++;
-    else if (e.procStart !== p.start) return false;
+    const same = sameStart(e.procStart, p.start);
+    if (same === null) unverified++;
+    else if (!same) return false;
     return true;
   });
   if (!live.length) return { status: "stale", ...base };
