@@ -117,12 +117,16 @@ async function saveWorkspaceGroups(groups) {
 // openTabsPerSession, wsTokenParam and the render/switch helpers from this file at call time.
 
 // ═══ SESSIONS API ═══
+let sessionsStale = true; // no successful poll yet (or the last one failed) — the badge must not claim "0"
 async function fetchSessions() {
   try {
     const res = await fetch("/api/sessions");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     sessions = await res.json();
+    sessionsStale = false;
     applyPendingAcks(sessions);
   } catch (e) {
+    sessionsStale = true;
     console.error("Failed to fetch sessions:", e);
   }
 }
@@ -2449,7 +2453,33 @@ function renderNeedsMe() {
     ? `<span class="nm-dot"></span><span class="nm-count">${n}</span> need${n === 1 ? "s" : ""} me`
     : `<span class="nm-count">0</span> need me`;
   el.title = n ? "Jump to the next agent that needs you (Alt+N)" : "Nobody needs you right now";
+  renderAppBadge(n);
 }
+
+// Dock badge (Badging API): the same "N need me" count on the installed app's
+// icon — Safari web apps (Add to Dock, macOS Sonoma+; shown once notifications
+// are allowed in the app) and Chrome PWAs. Called whenever available and the
+// browser ties it to the installed app itself; a plain tab ignores it. Never
+// clears on a failed poll: a frozen count beats a false zero. Rejections are
+// swallowed (the API exists but the platform declines) — the topbar counter
+// is the truth either way.
+let appBadgeShown = null;
+let appBadgeSeq = 0;
+function renderAppBadge(n) {
+  if (!navigator.setAppBadge || !navigator.clearAppBadge) return;
+  if (sessionsStale || n === appBadgeShown) return;
+  // Commit optimistically and roll back only if THIS call is the latest and it
+  // failed: two in-flight calls settling out of order must not leave the dedupe
+  // key on a value the Dock does not show. A platform that keeps declining
+  // (Safari before notifications are allowed) is retried on every render.
+  const seq = ++appBadgeSeq;
+  appBadgeShown = n;
+  try {
+    (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).then(() => {}, () => { if (seq === appBadgeSeq) appBadgeShown = null; });
+  } catch { appBadgeShown = null; }
+}
+// A suspended web app may have missed polls; on return the badge is re-derived from the next poll.
+document.addEventListener("visibilitychange", () => { if (!document.hidden) appBadgeShown = null; });
 
 function jumpToNeedsMe() {
   const ordered = getDisplayOrder();
@@ -2662,6 +2692,33 @@ function showCenterMessage(text, kind = "info") {
   el._dismissTimer = setTimeout(() => dismissNotification(el), 7000);
 }
 
+// A pane's OSC 52 copy that the browser refused: Safari (tab or installed web
+// app) only writes the clipboard from a user gesture, so the write from
+// terminal output rejects. Offer the same text behind one click — the click
+// IS the gesture — instead of a silent "/copy did nothing".
+let clipboardOffer = null;
+function offerClipboardCopy(text) {
+  if (clipboardOffer) dismissNotification(clipboardOffer);
+  const container = document.getElementById("notifications");
+  const el = document.createElement("div");
+  el.className = "center-notif cn-info cn-clipboard";
+  const n = text.length;
+  el.innerHTML = `<div class="cn-name">The terminal copied ${n} character${n === 1 ? "" : "s"} — this browser needs a click to put it on the clipboard</div>`
+    + `<div class="cn-actions"><button class="cn-btn" data-act="copy">Copy</button><button class="cn-btn" data-act="dismiss">Dismiss</button></div>`;
+  const done = () => { dismissNotification(el); if (clipboardOffer === el) clipboardOffer = null; };
+  el.querySelector('[data-act="copy"]').addEventListener("click", async (e) => {
+    e.stopPropagation();
+    try { await copyTextToClipboard(text); done(); }
+    catch { showCenterMessage("Copy failed — select the text in the terminal instead", "blocked"); }
+  });
+  el.querySelector('[data-act="dismiss"]').addEventListener("click", (e) => { e.stopPropagation(); done(); });
+  // It sits over the middle of the terminal: age it out rather than cover a pane nobody is looking at.
+  el._dismissTimer = setTimeout(done, 60000);
+  container.appendChild(el);
+  clipboardOffer = el;
+  requestAnimationFrame(() => { requestAnimationFrame(() => { el.classList.add("active"); }); });
+}
+
 // ═══ SYSTEM NOTIFICATIONS ═══
 function systemNotifyBlocker() {
   if (!("Notification" in window)) return "This browser has no Notification API";
@@ -2718,15 +2775,16 @@ function sendSystemNotification(s, newState) {
     const n = sysNotifyTick.burst;
     if (n) { try { n.close(); } catch {} }
     try {
-      const b = new Notification(`${SYS_NOTIFY_BURST + sysNotifyTick.extra} agents need you`, { body: "Open Hadron to triage them", tag: "hadron-burst", renotify: false, silent: true });
+      const b = new Notification(`${SYS_NOTIFY_BURST + sysNotifyTick.extra} agents need you`, { body: `Open Hadron · ${wsName} to triage them`, tag: "hadron-burst", renotify: false, silent: true });
       b.onclick = () => { try { window.focus(); } catch {} try { b.close(); } catch {} };
       sysNotifyTick.burst = b;
       setTimeout(() => { try { b.close(); } catch {} }, 20000);
     } catch {}
     return;
   }
+  // The workspace name is in the body: several Hadrons share one icon and agent names repeat across them.
   const title = `${s.name} ${newState === "blocked" ? "is blocked" : "is done"}`;
-  const body = newState === "blocked" ? String(s.blockReason || "Needs attention").slice(0, 120) : "Task complete";
+  const body = `${newState === "blocked" ? String(s.blockReason || "Needs attention").slice(0, 120) : "Task complete"} · ${wsName}`;
   let n;
   try { n = new Notification(title, { body, tag: `hadron-${s.id}`, renotify: true, silent: notifyLevel !== "all" }); } catch (e) { systemNotifyLost(`this browser cannot show them (${(e && e.name) || "error"})`); return; }
   // Focusing is the whole job for the active agent: switchSession is a no-op

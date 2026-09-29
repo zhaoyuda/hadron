@@ -24,9 +24,11 @@ import { dirname, join } from "path";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-// m10: OSC 52 → xterm.js → navigator.clipboard.writeText does not complete in
-// headless chromium (no fix known; fails identically on main). Documented in
-// CLAUDE.md. If you fix the clipboard bridge, delete this entry.
+// m10: the pane's OSC 52 never reaches xterm.js — tmux forwards it only with the
+// server option `set-clipboard on` (default `external` drops it), and the harness
+// must not change that on the shared tmux server (fails identically on main).
+// Documented in CLAUDE.md. If the harness gets a private tmux server with the
+// option set, delete this entry.
 const XFAIL = new Set(["m10-clipboard.js"]);
 
 const modules = readdirSync(here)

@@ -274,6 +274,18 @@ Open GETs and `/api/health` answer through the proxy without it; every mutating 
 
 Then View → Notifications → System Notifications, allow the browser prompt once. Never `tailscale funnel` a Hadron server: the token gates writes, but the terminals are yours. Verify from another tailnet node (`curl -sI https://<host>.<tailnet>.ts.net:8444/api/health`) rather than from the host itself if something else holds `*:443` there.
 
+### Install as a Mac app
+
+Hadron is an installable web app: each instance becomes its own Dock app named after its workspace, with its own window, a Dock badge showing how many agents need you, and system notifications. Nothing to build — the app is the same page.
+
+- **Safari 17+** (macOS Sonoma or later): open the instance, then **File → Add to Dock**. Launch it from the Dock or Spotlight.
+- **Chrome / Edge**: the install icon in the address bar, or the browser menu → *Install Hadron…* (the address-bar icon appears only after some use of the page; the menu entry is always there).
+- **Remote instance**: the same, on the HTTPS URL from the section above (`https://<host>.<tailnet>.ts.net:8444`). One app per URL — keep a port on the same workspace, since the installed app follows its URL.
+
+After installing, turn on **View → Notifications → System Notifications** inside the app once more: the installed app has its own storage, and on Safari the Dock badge shows only once the app is allowed to notify. The badge and the notifications come from the running page — keep the app open (in the background is fine) to hear from agents; a closed app is silent.
+
+Two Safari-specific notes: a pane's `/copy` (OSC 52) needs a click to reach the clipboard in Safari, so the app offers a **Copy** button when the terminal copies something; and links in rendered markdown open in your default browser.
+
 ### Run at login (so auto-resume gets its chance)
 
 Auto-resume (v0.9) fires from the server's boot path: on startup every agent whose tmux session is gone gets a fresh one, and a fresh checkpoint resumes its Claude session. That only helps after a reboot if the server itself comes back — a server started by hand in a tmux window does not. Run it as a service:

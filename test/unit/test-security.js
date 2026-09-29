@@ -76,6 +76,20 @@ async function main() {
     ok(r.status === 403, "POST from disallowed Origin rejected (403)");
   }
 
+  console.log("\n[web app manifest]");
+  {
+    // Open GET like index.html; explicit token-free fields only — never the config wholesale.
+    const r = await fetch(`${BASE}/manifest.webmanifest`);
+    const text = await r.text();
+    let m = null; try { m = JSON.parse(text); } catch {}
+    ok(r.status === 200 && /^application\/manifest\+json/.test(r.headers.get("content-type") || "") && m, "GET /manifest.webmanifest is open, application/manifest+json");
+    const allowed = ["id", "name", "short_name", "start_url", "scope", "display", "background_color", "theme_color", "icons"];
+    ok(m && Object.keys(m).every((k) => allowed.includes(k)) && allowed.every((k) => k in m), `manifest fields are exactly the allowlist (${m && Object.keys(m).join(",")})`);
+    ok(!text.includes(TOKEN) && !/groups|kernel|token/i.test(text), "manifest carries neither the token nor the rest of the workspace config");
+    const html = await (await fetch(`${BASE}/`)).text();
+    ok(html.includes(`<meta name="apple-mobile-web-app-title" content="${WS.split("/").pop()}" />`) && html.includes('<link rel="manifest" href="/manifest.webmanifest" />'), "index.html links the manifest and carries the workspace name as the web-app title");
+  }
+
   console.log("\n[notebook proxy guard]");
   {
     // The marimo/jupyter proxies front tokenless notebook servers, so they must

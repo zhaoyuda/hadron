@@ -105,13 +105,61 @@ app.use("/jupyter-proxy/:port", proxyGuard, (req, res) => {
 // JSON body parsing
 app.use(express.json());
 
+// The workspace's display name, for the manifest and the installed app's title.
+// Only the name is read — never the whole config (groups, kernels…) into a
+// token-free response.
+function workspaceDisplayName() {
+  try {
+    const cfg = JSON.parse(readFileSync(join(getWorkspaceDir(), ".hadron", "config.json"), "utf-8"));
+    const name = typeof cfg.name === "string" ? cfg.name.replace(/[\u0000-\u001f\u007f]/g, "").trim() : "";
+    return name.slice(0, 80) || "workspace";
+  } catch { return "workspace"; }
+}
+const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+// Web app manifest — Safari 17+ "Add to Dock" and Chrome's install use it to
+// make this instance its own Dock app, named after the workspace so several
+// Hadrons (one per workspace, one per port) stay apart. Generated, not static,
+// for that name; explicit fields only, token-free, so it can stay an open GET
+// like index.html (which is also served without the Host allowlist — the
+// allowlist gates mutating requests and the terminal WebSocket). `id: "/"`
+// means one app per origin: the same port re-pointed at another workspace
+// keeps the installed app (it follows the endpoint, renamed on next launch).
+// No service worker on purpose: a live terminal dashboard has no offline
+// state worth caching, and a cache would fight the no-cache shell + max-age=0
+// app.js; Safari never needed one and Chrome no longer requires one.
+app.get("/manifest.webmanifest", (req, res) => {
+  const name = workspaceDisplayName();
+  res.set("Cache-Control", "no-cache");
+  res.type("application/manifest+json").send(JSON.stringify({
+    id: "/",
+    name: `Hadron — ${name}`,
+    short_name: name,
+    start_url: "/",
+    scope: "/",
+    display: "standalone",
+    background_color: "#0d1117",
+    theme_color: "#0d1117",
+    icons: [
+      { src: "/assets/icons/icon-192.png", sizes: "192x192", type: "image/png" },
+      { src: "/assets/icons/icon-512.png", sizes: "512x512", type: "image/png" },
+      { src: "/assets/icons/icon-maskable-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
+    ],
+  }, null, 2));
+});
+
 // Serve index.html with the workspace token injected, so the browser app can
 // authenticate its own API/WS calls without the user ever copy-pasting a token.
+// The workspace name goes in as the installed web app's title (Safari reads
+// apple-mobile-web-app-title before the manifest name) — HTML-escaped, it is
+// operator text, not markup.
 app.get(["/", "/index.html"], (req, res, next) => {
   try {
     let html = readFileSync(join(__dirname, "..", "client", "index.html"), "utf-8");
-    const inject = `<script>window.HADRON_TOKEN=${JSON.stringify(AUTH_TOKEN || "")};</script>`;
-    html = html.includes("</head>") ? html.replace("</head>", `${inject}</head>`) : inject + html;
+    const inject = `<meta name="apple-mobile-web-app-title" content="${escapeHtml(workspaceDisplayName())}" />`
+      + `<script>window.HADRON_TOKEN=${JSON.stringify(AUTH_TOKEN || "")};</script>`;
+    // Function replacement: a `$&`/`$\`` in the workspace name must never act as a substitution pattern.
+    html = html.includes("</head>") ? html.replace("</head>", () => `${inject}</head>`) : inject + html;
     // Revalidate the shell on every load so a new app.js is picked up without a hard-refresh.
     // (app.js itself is served by express.static with max-age=0, which already revalidates.)
     res.set("Cache-Control", "no-cache");

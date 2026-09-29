@@ -42,8 +42,10 @@ try {
 
   browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 1400, height: 850 } });
-  // Record window.open so we can assert external links hand off to a new tab.
-  await page.addInitScript(() => { window.__opened = []; const o = window.open; window.open = (u) => { window.__opened.push(u); return null; }; });
+  // External links are plain target=_blank anchors (NOT window.open — an installed
+  // web app keeps window.open inside its own window, while an out-of-scope anchor
+  // goes to the default browser): record the popup pages the browser opens.
+  await page.context().route("**/example.com/**", (route) => route.fulfill({ status: 200, contentType: "text/html", body: "<title>ext</title>ok" }));
   await page.goto(env.baseUrl, { waitUntil: "domcontentloaded" });
 
   await page.locator('.dk[data-sid="linker"]').click();
@@ -76,15 +78,18 @@ try {
   await wait(400);
   r.ok((await artCount(page)) === beforeDup, "re-clicking the same link does not duplicate the artifact");
 
-  // ── (3) External link → new tab (window.open), never an artifact ──
+  // ── (3) External link → new tab (a target=_blank anchor, not window.open), never an artifact ──
   await page.locator('.af[data-art-idx]', { hasText: "guide.md" }).click();
   await page.locator("#artifact-container .md-preview:visible").waitFor({ state: "visible", timeout: 5000 });
   const beforeExt = await artCount(page);
-  await page.locator('.md-preview:visible a', { hasText: "external site" }).click();
-  await wait(300);
-  const opened = await page.evaluate(() => window.__opened);
-  r.ok(opened.some((u) => u.includes("example.com/docs")), `external link opens in a new tab: ${JSON.stringify(opened)}`);
+  const ext = page.locator('.md-preview:visible a', { hasText: "external site" });
+  const [popup] = await Promise.all([page.waitForEvent("popup", { timeout: 5000 }).catch(() => null), ext.click()]);
+  const popupUrl = popup ? (await popup.waitForLoadState("load").catch(() => {}), popup.url()) : null;
+  r.ok(popupUrl && popupUrl.includes("example.com/docs"), `external link opens in a new tab: ${popupUrl}`);
+  const extAttrs = await ext.evaluate((a) => ({ target: a.target, rel: a.rel }));
+  r.ok(extAttrs.target === "_blank" && /noopener/.test(extAttrs.rel), `…as a plain anchor (target=_blank rel=noopener), so an installed web app hands it to the default browser (${JSON.stringify(extAttrs)})`);
   r.ok((await artCount(page)) === beforeExt, "external link does not add an artifact");
+  if (popup) await popup.close().catch(() => {});
 
   // ── (4) Missing target → flashes, adds nothing ──
   const beforeMiss = await artCount(page);

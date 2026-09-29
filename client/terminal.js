@@ -31,7 +31,11 @@ function registerClipboardOsc(t) {
     try {
       text = new TextDecoder().decode(Uint8Array.from(atob(payload), (c) => c.charCodeAt(0)));
     } catch { return true; }
-    if (typeof copyTextToClipboard === "function") copyTextToClipboard(text).catch(() => {});
+    // Safari refuses clipboard writes outside a user gesture (installed web app included):
+    // hand the text to a one-click offer instead of dropping it.
+    if (typeof copyTextToClipboard === "function") {
+      copyTextToClipboard(text).catch(() => { if (typeof offerClipboardCopy === "function") offerClipboardCopy(text); });
+    }
     return true; // handled — swallow the sequence so it never prints
   });
 }

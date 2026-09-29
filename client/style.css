@@ -999,6 +999,11 @@ html, body {
 .cn-icon svg { width: 28px; height: 28px; }
 .cn-name { font-size: 18px; font-weight: 600; }
 .cn-sub { font-size: 13px; font-weight: 400; margin-top: 6px; opacity: .7; }
+.cn-clipboard { cursor: default; }
+.cn-clipboard .cn-name { font-size: 14px; font-weight: 500; }
+.cn-actions { display: flex; gap: 8px; justify-content: center; margin-top: 12px; }
+.cn-btn { font: inherit; font-size: 13px; padding: 5px 14px; border-radius: 6px; border: 1px solid currentColor; background: transparent; color: inherit; cursor: pointer; }
+.cn-btn:hover { background: rgba(88,166,255,0.2); }
 
 /* ═══ SHELL CONTAINERS ═══ */
 .shell-container {

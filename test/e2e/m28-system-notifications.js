@@ -97,7 +97,7 @@ try {
   await api("PATCH", "/api/sessions/bee", { state: "done" });
   r.ok(await until(async () => (await notifs(page)).some((n) => n.title === "Bee is done")), "hidden tab: Bee → done raises a system notification");
   const nb = (await notifs(page)).find((n) => n.title === "Bee is done");
-  r.ok(nb && nb.tag === "hadron-bee" && nb.body === "Task complete" && nb.silent === false, `tagged per agent, body "Task complete", not silent at Sound + Banner (${JSON.stringify(nb)})`);
+  r.ok(nb && nb.tag === "hadron-bee" && nb.body === "Task complete · m28" && nb.silent === false, `tagged per agent, body "Task complete · <workspace>" (several Hadrons share one icon), not silent at Sound + Banner (${JSON.stringify(nb)})`);
   r.ok((await page.locator(".center-notif.cn-done").count()) >= 1, "the in-page banner is raised as well");
 
   // click → switches to the agent
@@ -109,7 +109,7 @@ try {
   await api("PATCH", "/api/sessions/bee", { state: "blocked", blockReason: "permission" });
   r.ok(await until(async () => (await notifs(page)).some((n) => n.title === "Bee is blocked")), "hidden tab: the active agent's blocked is raised too");
   const nbb = (await notifs(page)).find((n) => n.title === "Bee is blocked");
-  r.ok(nbb && nbb.body === "permission", `blocked carries the block reason (${nbb && nbb.body})`);
+  r.ok(nbb && nbb.body === "permission · m28", `blocked carries the block reason + workspace (${nbb && nbb.body})`);
 
   // ── 3. visible + focused: nothing raised ──
   await setVisible(page, true);

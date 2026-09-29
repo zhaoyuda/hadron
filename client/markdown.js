@@ -779,16 +779,19 @@ function handleMdLinkClick(e) {
   if (!a || !a.closest(".md-preview")) return; // only links inside a rendered preview
   const href = a.getAttribute("href") || "";
   if (!href || href.startsWith("#")) return;    // in-page anchor → browser default
-  // External / non-file scheme → open in a new tab, don't hijack it into an artifact.
+  // External / non-file scheme → a plain new-tab anchor, don't hijack it into an
+  // artifact. Left to the browser's own navigation (not window.open): an installed
+  // web app keeps window.open inside its window, while an out-of-scope anchor goes
+  // to the default browser.
   if (/^[a-z][a-z0-9+.-]*:/i.test(href) && !/^file:/i.test(href)) {
-    e.preventDefault();
-    window.open(href, "_blank", "noopener");
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
     return;
   }
   const host = a.closest("[data-md-path]");
   const resolved = resolveMdLinkPath(host && host.dataset.mdPath, href);
+  e.preventDefault(); // never let a preview link (e.g. "?q=1", which resolves to nothing) navigate the dashboard itself
   if (!resolved) return;
-  e.preventDefault();
   // Confirm it exists before adding a tab, so a broken link doesn't leave junk;
   // otherwise flash the link so the click doesn't feel dead.
   fetch(`/api/file?path=${encodeURIComponent(resolved)}`, { method: "HEAD" })
