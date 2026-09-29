@@ -249,6 +249,21 @@ async function main() {
   const badVer = "sk-ant-api03-XXXXXXXXXXXXXXXXXXXX";
   const badSid = randomUUID();
   writeRegistryRecord(shC, badSid, { tmux: null, version: badVer });
+  // A live claude OUTSIDE every pane of this tmux server (desktop app, plain
+  // terminal — the Mac fleet had 5 of 6 tmux-less records like this) never
+  // writes `tmux` on any version: not an old claude, not a finding. Spawned
+  // from the test process, so it is under no pane of the private server.
+  outsideProc = spawn("bash", ["-c", "exec -a claude sleep 300"], { detached: true, stdio: "ignore" });
+  await sleep(300);
+  const outsideSid = randomUUID();
+  writeRegistryRecord(shC, outsideSid, { pid: outsideProc.pid, procStart: procStartOf(outsideProc.pid), tmux: null, version: "2.1.281" });
+  // and a tmux-less record whose process is gone: stale, not "upgrade claude"
+  // (its own dead pid — the registry is keyed by pid, so reusing deadPid would
+  // overwrite the green agent's stale record above)
+  const deadPid2 = (() => { const r = execFileSync("bash", ["-c", "sleep 0.01 & echo $!"], { encoding: "utf-8" }).trim(); return Number(r); })();
+  execFileSync("sleep", ["0.3"]);
+  const deadSid2 = randomUUID();
+  writeRegistryRecord(shC, deadSid2, { pid: deadPid2, procStart: 1, tmux: null, version: "2.1.212" });
   const regDisk = await waitDisk(regId, (a) => a.runtime?.confidence === "registry", 15000);
   ok(regDisk.runtime?.sessionId === regSid && regDisk.runtime?.confidence === "registry", `tracker took the registry's id for the shared-cwd agent within the no-id poll interval (confidence ${regDisk.runtime?.confidence})`);
   ok(onDisk(greenId).runtime?.confidence === "correlated", "a stale record (dead pid) never replaced the green agent's scraped id");
@@ -289,8 +304,11 @@ async function main() {
   ok(F("doc-shared-c").level === "red" && /claude \(version unknown\) under this pane writes its session registry record without the tmux field/.test(F("doc-shared-c").message),
     `a token-shaped version string is sanitised to "(version unknown)" in the row (${F("doc-shared-c").message})`);
   ok(!onDisk(shB).runtime?.sessionId && !onDisk(shC).runtime?.sessionId, "…and the tracker never took a tmux-less record's id (process-tree match is diagnosis, not identity)");
-  ok(doc.sessionRegistry.rejected && doc.sessionRegistry.rejected["no-tmux"] === 2 && doc.sessionRegistry.malformed === 2 && Array.isArray(doc.sessionRegistry.tmuxlessVersions) && doc.sessionRegistry.tmuxlessVersions.length === 1 && doc.sessionRegistry.tmuxlessVersions[0] === "2.1.212",
-    `payload counts rejects by reason (no-tmux: 2) and lists only the SANITISED old claude version (${JSON.stringify(doc.sessionRegistry.rejected)} ${JSON.stringify(doc.sessionRegistry.tmuxlessVersions)})`);
+  ok(doc.sessionRegistry.rejected && doc.sessionRegistry.rejected["no-tmux"] === 4 && doc.sessionRegistry.malformed === 4 && Array.isArray(doc.sessionRegistry.tmuxlessVersions) && doc.sessionRegistry.tmuxlessVersions.length === 1 && doc.sessionRegistry.tmuxlessVersions[0] === "2.1.212",
+    `payload counts rejects by reason (no-tmux: 4) and lists only the SANITISED version of the OLD claudes under a pane — never the outside-tmux 2.1.281 (${JSON.stringify(doc.sessionRegistry.rejected)} ${JSON.stringify(doc.sessionRegistry.tmuxlessVersions)})`);
+  ok(doc.sessionRegistry.tmuxless && doc.sessionRegistry.tmuxless.oldClaude === 2 && doc.sessionRegistry.tmuxless.notUnderPane === 1 && doc.sessionRegistry.tmuxless.stale === 1 && doc.sessionRegistry.tmuxless.panesKnown === true,
+    `tmux-less records are split: 2 old claudes under a pane of this server, 1 live claude under none of its panes, 1 stale, pane list read (${JSON.stringify(doc.sessionRegistry.tmuxless)})`);
+  ok(!raw.includes(outsideSid) && !raw.includes(deadSid2) && !raw.includes("2.1.281"), "doctor response leaks neither the outside-tmux nor the stale record's session id, and the outside claude's version reaches nothing");
   ok(!raw.includes(oldSid) && !raw.includes(badSid) && !raw.includes(badVer) && !raw.includes("sk-ant"), "doctor response leaks neither tmux-less record's session id nor the token-shaped version string");
   ok(byName["doc-shell"].registry === null, "a shell pane has registry=null (not consulted)");
   ok(doc.sessionRegistry && doc.sessionRegistry.available === true && doc.sessionRegistry.entries === 2 && typeof doc.sessionRegistry.root === "string", `payload summarises the registry: available, 2 records (${JSON.stringify(doc.sessionRegistry)})`);
@@ -309,7 +327,7 @@ async function main() {
   ok(/no session id \(.*shared cwd cannot be scraped/.test(cli.stdout), "CLI output shows the shared-cwd red row");
   ok(/untracked/.test(cli.stdout), "CLI output shows the untracked red row");
   ok(/resumes as correlated/.test(cli.stdout), "CLI output shows the green row");
-  ok(/resumes as registry/.test(cli.stdout) && /· registry: matched/.test(cli.stdout) && /^registry \d+ live claude records in .*\(2 records \(claude 2\.1\.212\) lack the tmux field — upgrade claude \(2\.1\.284 verified\)\)/m.test(cli.stdout), `CLI shows the registry-green row, per-row registry status and a header that counts the tmux-less records with the sanitised version (${(cli.stdout.match(/^registry .*/m) || [""])[0]})`);
+  ok(/resumes as registry/.test(cli.stdout) && /· registry: matched/.test(cli.stdout) && /^registry \d+ live claude records in .*\(2 records \(claude 2\.1\.212\) lack the tmux field — upgrade claude \(2\.1\.284 verified\); 1 not under a pane of this tmux server \(a claude outside tmux never writes the field\); 1 stale \(process exited or pid reused\)\)/m.test(cli.stdout) && !cli.stdout.includes(outsideSid) && !cli.stdout.includes(deadSid2) && !cli.stdout.includes("2.1.281"), `CLI header counts only the old claudes under a pane as "upgrade" (sanitised version), names the live claude under none of its panes without calling it fine, the dead one stale, and leaks none of the new records' ids or the outside version (${(cli.stdout.match(/^registry .*/m) || [""])[0]})`);
   ok(!/unreadable\)/.test(cli.stdout) && !cli.stdout.includes(oldSid) && !cli.stdout.includes(badSid) && !cli.stdout.includes("sk-ant"), "CLI header no longer calls a tmux-less record \"unreadable\" and leaks no id or token-shaped version");
   ok(!cli.stdout.includes(regSid), "CLI leaks no registry session id");
   ok(/will NOT restart after a reboot/.test(cli.stdout), "CLI flags the hand-started server as red (won't survive reboot)");
@@ -560,7 +578,11 @@ async function main() {
   // Second boot claims launchd provenance (XPC_SERVICE_NAME is what launchd
   // sets) — Report 3: doctor only ever accepted systemd, so a launchd-managed
   // Mac fleet could never go green.
-  bootServer({ XPC_SERVICE_NAME: "com.example.hadron" });
+  // …and an UNREADABLE pane list (test knob): the tmux-less records from the
+  // first boot are all still live/dead exactly as before, but now nothing can
+  // be placed under a pane — the header and the per-agent row must say so
+  // instead of "upgrade" or "not under a pane" (silent-failure rule).
+  bootServer({ XPC_SERVICE_NAME: "com.example.hadron", HADRON_TEST_DOCTOR_PANE_LIST_FAIL: "1" });
   await waitForServer();
   TOKEN = readFileSync(join(WS, ".hadron", "token"), "utf-8").trim();
   // Before the tracker settles (3 one-second polls; this fetch follows the
@@ -576,6 +598,8 @@ async function main() {
   ok(nfRow.finding?.level === "red" && /no session id \(.*scrape found nothing/.test(nfRow.finding?.message) && nfRow.hasCheckpointId === false,
     `after settle the tracker dropped the stale id: red "no session id", hasCheckpointId=false (${nfRow.finding?.level}: ${nfRow.finding?.message})`);
   ok(onDisk(nfId).runtime.sessionId === null, "…and the on-disk checkpoint no longer carries the dead id");
+  ok(/no record naming this pane; 3 records in it lack the tmux field — an old claude or a claude outside tmux \(the pane list could not be read\), none was found under this pane's process/.test(nfRow.finding?.message),
+    `with the pane list unreadable the row keeps the tmux-less fact and claims neither "upgrade" nor "not under a pane" (${nfRow.finding?.message})`);
   const pmEarly = docEarly.agents.find((a) => a.name === "doc-pinmiss")?.finding || {};
   ok(pmEarly.level === "red" && /checkpoint transcript missing/.test(pmEarly.message) && /manual id is kept \(its transcript existed before\)/.test(pmEarly.message),
     `pinned (manual) id whose transcript was seen and is gone → red, identity kept, not resumable (${pmEarly.level}: ${pmEarly.message})`);
@@ -625,8 +649,14 @@ async function main() {
   ok(!seedRaw.includes(btCleanTok) && !seedRaw.includes(btObservedTok) && !seedRaw.includes(btFutureIso) && !seedRaw.includes("badts-"),
     "reboot doctor response never echoes any raw timestamp token or the future ISO value");
 
+  ok(doc2.sessionRegistry.tmuxless && doc2.sessionRegistry.tmuxless.panesKnown === false && doc2.sessionRegistry.tmuxless.oldClaude === 0 && doc2.sessionRegistry.tmuxless.notUnderPane === 3 && doc2.sessionRegistry.tmuxless.stale === 1 && doc2.sessionRegistry.rejected["no-tmux"] === 4 && Array.isArray(doc2.sessionRegistry.tmuxlessVersions) && doc2.sessionRegistry.tmuxlessVersions.length === 0,
+    `unreadable pane list: panesKnown=false, NO record in the upgrade bucket, every live one unplaced, stale still stale, raw count unchanged, no versions (${JSON.stringify(doc2.sessionRegistry.tmuxless)} ${JSON.stringify(doc2.sessionRegistry.tmuxlessVersions)})`);
+  ok((serverLog.match(/\[doctor\] tmux list-panes failed — tmux-less registry records cannot be placed under a pane/g) || []).length === 1,
+    `the unreadable pane list is warned exactly once across the doctor calls since the restart (${(serverLog.match(/list-panes failed/g) || []).length})`);
   const cli2 = runCli(["doctor"]);
   ok(cli2.code === 1, `hadron doctor exits 1 with the demoted-green red rows (exit ${cli2.code})`);
+  ok(/^registry \d+ live claude records in .*\(3 lack the tmux field — old claude or outside tmux, the pane list could not be read; 1 stale \(process exited or pid reused\)\)/m.test(cli2.stdout) && !/upgrade claude/.test((cli2.stdout.match(/^registry .*/m) || [""])[0]) && !cli2.stdout.includes(outsideSid) && !cli2.stdout.includes(deadSid2) && !cli2.stdout.includes("2.1.281") && !/2\.1\.212/.test((cli2.stdout.match(/^registry .*/m) || [""])[0]),
+    `CLI header with an unreadable pane list says so and never "upgrade" / "not under a pane", leaks no id and names no version (${(cli2.stdout.match(/^registry .*/m) || [""])[0]})`);
   ok(/server is managed by launchd \(boot-restarts\)/.test(cli2.stdout) && !/will NOT restart after a reboot/.test(cli2.stdout),
     "launchd-managed server is green in hadron doctor (not only systemd)");
   const shAReboot = doc2.agents.find((a) => a.name === "doc-shared-a")?.finding || {};
@@ -653,7 +683,9 @@ async function main() {
   ok(down.stdout.indexOf("server unreachable") < down.stdout.indexOf("Agents ("), "'server unreachable' appears before any agent section");
 }
 
+let outsideProc = null;
 main().catch((e) => { failed++; console.error(`  ✗ ${e.stack || e}`); }).finally(async () => {
+  try { if (outsideProc) process.kill(outsideProc.pid, "SIGKILL"); } catch {}
   await killServer();
   try { execFileSync("tmux", ["-S", SOCK, "kill-server"], { stdio: "ignore", env: tenv }); } catch {}
   await sleep(500);

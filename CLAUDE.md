@@ -180,8 +180,22 @@ npm test
 #                            in it lack the tmux field … none was found under this pane's process" — proof the process-tree
 #                            match never crosses panes); a tmux-less record whose version is a token-shaped string reads
 #                            "(version unknown)" and the string reaches neither payload nor CLI (safeVersion); the CLI header
-#                            says "2 records (claude 2.1.212) lack the tmux field" (never "unreadable"); payload sessionRegistry
-#                            carries counts only (rejected by reason + tmuxlessVersions, capped at 5), registryAgrees
+#                            says "2 records (claude 2.1.212) lack the tmux field … ; 1 not under a pane of this tmux server (a
+#                            claude outside tmux never writes the field); 1 stale (process exited or pid reused)" (never
+#                            "unreadable") — a tmux-less record counts as an old claude only when its live claude sits under a
+#                            pane of THIS tmux server (classifyTmuxless, one `list-panes -a`, same depth-2 ancestry walk — a
+#                            deeper claude is "not under a pane", never "fine"); a live claude outside every pane (desktop
+#                            app, plain terminal) never writes the field on any version; a dead or reused pid is stale; neither
+#                            reaches tmuxlessVersions or the per-agent "N records in it lack the tmux field" count; an unreadable
+#                            pane list places nothing (panesKnown=false, warnOnce once per server, header says "N lack the tmux
+#                            field — old claude or outside tmux, the pane list could not be read", and the per-agent row falls
+#                            back to old + not-under-pane with the same caveat — proven on the second boot with
+#                            HADRON_TEST_DOCTOR_PANE_LIST_FAIL; test-resume pins classifyTmuxless directly); with a readable
+#                            list and no old claude under any pane, a no-id row says the records exist "but none is under a
+#                            pane of this tmux server — if this agent's claude was launched through a wrapper, it may be one
+#                            of them" instead of "before the registry existed"; the tracker's warnOnce says "old claude or a claude
+#                            outside tmux; `hadron doctor` sorts them"; payload sessionRegistry carries counts only (rejected by reason
+#                            + tmuxless {oldClaude, notUnderPane, stale, panesKnown} + tmuxlessVersions, capped at 5), registryAgrees
 #                            is a boolean (never an id); a pinned id with a never-seen transcript is yellow, seen-then-gone is red;
 #                            a disk-seeded MANUAL id without a transcript stays on disk but is red
 #                            "checkpoint transcript missing … id is kept"; claude.exe with recognition disabled via

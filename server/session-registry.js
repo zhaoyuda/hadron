@@ -189,6 +189,41 @@ export function findTmuxlessRecordFor({ panePid, registry, identity = processIde
   return null;
 }
 
+// Every tmux-less record sorted by what it IS, for the doctor header: claude
+// ≥ 2.1.284 writes `tmux` whenever it runs in a pane, so a live claude whose
+// record lacks it is an OLD claude only when its process sits under one of this
+// tmux server's panes (`panePids`, from one `list-panes -a`); a live claude
+// outside every pane (desktop app, plain terminal — the Mac fleet had five of
+// six) never writes the field on any version and is not a finding; a record whose
+// pid is gone, is no longer claude, or was started at another time is stale
+// (claude exited without removing its file, or the pid was reused). Same
+// ancestry walk as findTmuxlessRecordFor — so a claude deeper than two levels
+// under its pane shell (a wrapper launcher, a nested tmux) is reported as NOT
+// under a pane, never as "fine". `panePids === null` means the pane list
+// could not be read: nothing can be placed, `panesKnown` is false and every
+// live record lands in notUnderPane for the caller to word honestly.
+// Counts and versions only — no ids.
+export function classifyTmuxless({ registry, panePids, identity = processIdentity, parent = parentPid, depth = 2 }) {
+  const out = { oldClaude: [], notUnderPane: 0, stale: 0, panesKnown: panePids !== null && panePids !== undefined };
+  if (!registry || !registry.tmuxless) return out;
+  const panes = panePids instanceof Set ? panePids : new Set(panePids || []);
+  const underAnyPane = (pid) => {
+    let p = pid;
+    for (let i = 0; i <= depth && p; i++) {
+      if (panes.has(p)) return true;
+      p = parent(p);
+    }
+    return false;
+  };
+  for (const r of registry.tmuxless) {
+    const p = r.pid ? identity(r.pid) : { alive: false };
+    if (!p.alive || !p.claude || sameStart(r.procStart, p.start) === false) { out.stale++; continue; }
+    if (out.panesKnown && underAnyPane(r.pid)) out.oldClaude.push({ pid: r.pid, version: r.version });
+    else out.notUnderPane++;
+  }
+  return out;
+}
+
 // What is process <pid>, right now? { alive, claude, start } — `claude` is true
 // when the executable name or argv[0] is claude (argv[0] is what tmux reports
 // as pane_current_command on Linux, so a fixture that `exec -a claude`s counts

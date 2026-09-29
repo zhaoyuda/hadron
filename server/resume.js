@@ -283,7 +283,7 @@ export class RuntimeTracker {
     }
     // Silent-failure rule: the deterministic path is off for this agent —
     // say so once, and let doctor show the status. Scraping still runs.
-    const why = { none: `has no record for this pane${r && r.tmuxless ? ` (${r.tmuxless} record${r.tmuxless === 1 ? "" : "s"} in it lack the tmux field — an old claude; \`hadron doctor\` names it)` : " (a claude launched before the registry existed, or not claude)"}`, unverified: "names this pane but the platform cannot verify the pid's start time and an id is already known — keeping it", stale: "names this pane only in records of exited processes", ambiguous: "has two live claudes claiming this pane", unavailable: `is unavailable (${r && r.reason || "unknown"})` }[this.registryStatus];
+    const why = { none: `has no record for this pane${r && r.tmuxless ? ` (${r.tmuxless} record${r.tmuxless === 1 ? "" : "s"} in it lack the tmux field — an old claude or a claude outside tmux; \`hadron doctor\` sorts them)` : " (a claude launched before the registry existed, or not claude)"}`, unverified: "names this pane but the platform cannot verify the pid's start time and an id is already known — keeping it", stale: "names this pane only in records of exited processes", ambiguous: "has two live claudes claiming this pane", unavailable: `is unavailable (${r && r.reason || "unknown"})` }[this.registryStatus];
     warnOnce(`registry:${this.session.id}`, `[resume] agent ${this.session.id}: claude's session registry ${why} — falling back to transcript scraping`);
     return false;
   }

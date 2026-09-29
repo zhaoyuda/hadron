@@ -701,13 +701,23 @@ async function main() {
       }
       if (doctor && doctor.sessionRegistry) {
         const r = doctor.sessionRegistry;
-        // Rejected records by reason: a tmux-less one is an old claude (say
-        // which version and the fix), anything else is genuinely malformed.
+        // Rejected records by reason: a tmux-less one whose claude runs under
+        // a pane of this tmux server is an old claude (say which version and
+        // the fix); a live claude under none of its panes is usually a claude
+        // outside tmux (desktop app, plain terminal — never writes the field)
+        // but could sit deeper than the walk sees, so it is named, not
+        // "ignored"; a stale one's process exited or its pid was reused;
+        // anything else is genuinely malformed. When the pane list could not
+        // be read nothing can be placed and the header says so. (An older
+        // server sends only the raw count.)
         const rej = r.rejected || {};
-        const noTmux = rej["no-tmux"] || 0;
+        const split = r.tmuxless || { oldClaude: rej["no-tmux"] || 0, notUnderPane: 0, stale: 0, panesKnown: true };
         const other = Object.entries(rej).filter(([k]) => k !== "no-tmux").reduce((n, [, v]) => n + v, 0);
         const parts = [];
-        if (noTmux) parts.push(`${noTmux} record${noTmux === 1 ? "" : "s"}${r.tmuxlessVersions && r.tmuxlessVersions.length ? ` (claude ${r.tmuxlessVersions.join("/")})` : ""} lack${noTmux === 1 ? "s" : ""} the tmux field — upgrade claude (${r.tmuxSince ? `${r.tmuxSince} verified` : "see server"})`);
+        const n = split.oldClaude;
+        if (n) parts.push(`${n} record${n === 1 ? "" : "s"}${r.tmuxlessVersions && r.tmuxlessVersions.length ? ` (claude ${r.tmuxlessVersions.join("/")})` : ""} lack${n === 1 ? "s" : ""} the tmux field — upgrade claude (${r.tmuxSince ? `${r.tmuxSince} verified` : "see server"})`);
+        if (split.notUnderPane) parts.push(split.panesKnown === false ? `${split.notUnderPane} lack the tmux field — old claude or outside tmux, the pane list could not be read` : `${split.notUnderPane} not under a pane of this tmux server (a claude outside tmux never writes the field)`);
+        if (split.stale) parts.push(`${split.stale} stale (process exited or pid reused)`);
         if (other) parts.push(`${other} malformed`);
         console.log(`registry ${r.available ? `${r.entries} live claude record${r.entries === 1 ? "" : "s"} in ${r.root}${parts.length ? ` (${parts.join("; ")})` : ""}` : `${r.root} ${r.reason || "unavailable"} — claude's session registry is the deterministic pane→session source (claude ≥ 2.1.26x); falling back to transcript scraping`}`);
       }

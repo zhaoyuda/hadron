@@ -11,7 +11,7 @@
  * Run: node test/unit/test-resume.js
  */
 import { decideResume, scrapeSessionId, validateSessionFile, claudeProjectDir, RuntimeTracker, performResume, isClaudeCmd, verifyAdoption, PINNED_CONFIDENCE, REGISTRY_POLL_MS, REGISTRY_POLL_NO_ID_MS } from "../../server/resume.js";
-import { findRegistrySession, findTmuxlessRecordFor, readRegistry, processIdentity, psIdentity, psArgs, PS_ENV, sameStart, normalizeProcStart, parentPid } from "../../server/session-registry.js";
+import { findRegistrySession, findTmuxlessRecordFor, classifyTmuxless, readRegistry, processIdentity, psIdentity, psArgs, PS_ENV, sameStart, normalizeProcStart, parentPid } from "../../server/session-registry.js";
 import { warnOnce, firedWarnings, resetWarnOnce } from "../../server/log.js";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from "fs";
 import { tmpdir } from "os";
@@ -577,6 +577,21 @@ console.log("\n[silent-failure warnings: once per (invariant, agent), not once p
     ok(firedWarnings.has("claudeish:agent-a") && firedWarnings.has("claudeish:agent-b"), "fired keys are recorded for doctor to surface");
     ok(warnOnce("claudeish:agent-a", "again") === false && seen.length === 2, "warnOnce returns false and stays quiet on a repeated key");
   } finally { console.warn = origWarn; resetWarnOnce(); }
+}
+
+// classifyTmuxless (doctor header): the pane check decides old-claude vs
+// not-under-a-pane; an unreadable pane list (null) places nothing and says so.
+{
+  const reg = { tmuxless: [{ pid: 11, procStart: 100, version: "2.1.212" }, { pid: 12, procStart: 200, version: "2.1.281" }, { pid: 13, procStart: 300, version: "2.1.212" }, { pid: 14, procStart: 999, version: "2.1.212" }] };
+  const live = { 11: { alive: true, claude: true, start: 100 }, 12: { alive: true, claude: true, start: 200 }, 13: { alive: false, claude: false, start: null }, 14: { alive: true, claude: true, start: 400 } };
+  const identity = (pid) => live[pid] || { alive: false, claude: false, start: null };
+  const parent = (pid) => ({ 11: 5, 12: 6, 14: 5 })[pid] || null; // 11 and 14 under pane shell 5; 12 under 6 (no pane)
+  const known = classifyTmuxless({ registry: reg, panePids: new Set([5]), identity, parent });
+  ok(known.panesKnown === true && known.oldClaude.length === 1 && known.oldClaude[0].pid === 11 && known.notUnderPane === 1 && known.stale === 2, `classifyTmuxless: under a pane → old claude; live elsewhere → notUnderPane; dead pid and start mismatch (pid reuse) → stale (${JSON.stringify(known)})`);
+  const unknown = classifyTmuxless({ registry: reg, panePids: null, identity, parent });
+  ok(unknown.panesKnown === false && unknown.oldClaude.length === 0 && unknown.notUnderPane === 2 && unknown.stale === 2, `classifyTmuxless: unreadable pane list places nothing — panesKnown=false, both live claudes notUnderPane, never "old claude" (${JSON.stringify(unknown)})`);
+  const none = classifyTmuxless({ registry: reg, panePids: new Set(), identity, parent });
+  ok(none.panesKnown === true && none.oldClaude.length === 0 && none.notUnderPane === 2, "classifyTmuxless: an EMPTY pane list is known (nothing under a pane), distinct from an unreadable one");
 }
 
 console.log(`\n${failed === 0 ? "PASS" : "FAIL"}: ${passed} passed, ${failed} failed`);

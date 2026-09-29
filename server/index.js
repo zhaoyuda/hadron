@@ -17,7 +17,7 @@ import { randomUUID } from "crypto";
 import { loadAgents, loadAgent, saveAgent, saveAgentLocked, archiveAgent, deleteAgent, initWorkspace, getWorkspaceDir, appendAgentField, removeAgentArtifact, isSelfWrite } from "./agent-store.js";
 import { resolve } from "path";
 import { tmux, tmuxSafe, isValidId, shellQuoteArgv, tmuxArgv } from "./tmux.js";
-import { findRegistrySession, findTmuxlessRecordFor, readRegistry, processIdentity, parentPid, REGISTRY_ROOT, REGISTRY_STATUSES, REGISTRY_TMUX_SINCE } from "./session-registry.js";
+import { findRegistrySession, findTmuxlessRecordFor, classifyTmuxless, readRegistry, processIdentity, parentPid, REGISTRY_ROOT, REGISTRY_STATUSES, REGISTRY_TMUX_SINCE } from "./session-registry.js";
 import { syncSkills } from "./skills.js";
 import { collectProvenance } from "./provenance.js";
 import { transcriptPath, readTranscriptSummary, transcriptWire } from "./transcript.js";
@@ -547,7 +547,7 @@ function resolveClaudeInPath(pathStr) {
 
 // The classifier — the row-classification table from the reliability plan. Order
 // matters: earlier rows win. decideResume() is only a cross-check on green rows.
-function classifyAgentHealth(session, { paneExists, paneCmd, cwdShared, now, registry = null, oldClaude = null, tmuxlessCount = 0 }) {
+function classifyAgentHealth(session, { paneExists, paneCmd, cwdShared, now, registry = null, oldClaude = null, tmuxless = null }) {
   const rt = session.runtime || {};
   if (!paneExists) return { level: "red", message: "no pane — tmux session missing" };
   const looksClaude = /^claude/i.test((paneCmd || "").trim());
@@ -570,15 +570,25 @@ function classifyAgentHealth(session, { paneExists, paneCmd, cwdShared, now, reg
       // claude predates the tmux field. Say so, with the version and the fix,
       // instead of "too old?".
       const oldVer = oldClaude && oldClaude.version ? safeVersion(oldClaude.version) : null;
-      // Three "none" stories: the pane's own claude has a tmux-less record
-      // (definite); other tmux-less records exist but none is under this pane
-      // (the header contradicts a bare "no record", so say both); no record at
-      // all. The pane IS claude here (regHit is only computed for claude panes).
+      // Five "none" stories: the pane's own claude has a tmux-less record
+      // (definite); old claudes under OTHER panes of this server exist (the
+      // header contradicts a bare "no record", so say both); the pane list
+      // could not be read, so the tmux-less records could not be placed;
+      // tmux-less records exist but none is under any pane (a claude deeper
+      // than the ancestry walk — a wrapper launcher — lands there, so it may
+      // still be this pane's); no record at all. The pane IS claude here
+      // (regHit is only computed for claude panes).
+      const tl = tmuxless || { oldClaude: 0, notUnderPane: 0, panesKnown: true };
+      const n = (k) => `${k} record${k === 1 ? "" : "s"}`;
       const none = oldClaude
         ? `claude ${oldVer || "(version unknown)"} under this pane writes its session registry record without the tmux field — upgrade claude (${REGISTRY_TMUX_SINCE} verified) and restart the agent, or \`hadron adopt\` now`
-        : tmuxlessCount > 0
-          ? `claude's session registry has no record naming this pane; ${tmuxlessCount} record${tmuxlessCount === 1 ? "" : "s"} in it lack${tmuxlessCount === 1 ? "s" : ""} the tmux field — an old claude (upgrade to ${REGISTRY_TMUX_SINCE}+), though none was found under this pane's process`
-          : "claude's session registry has no record for this pane (a claude launched before the registry existed)";
+        : tl.panesKnown === false && tl.oldClaude + tl.notUnderPane > 0
+          ? `claude's session registry has no record naming this pane; ${n(tl.oldClaude + tl.notUnderPane)} in it lack${tl.oldClaude + tl.notUnderPane === 1 ? "s" : ""} the tmux field — an old claude or a claude outside tmux (the pane list could not be read), none was found under this pane's process`
+          : tl.oldClaude > 0
+            ? `claude's session registry has no record naming this pane; ${n(tl.oldClaude)} in it lack${tl.oldClaude === 1 ? "s" : ""} the tmux field — an old claude (upgrade to ${REGISTRY_TMUX_SINCE}+), though none was found under this pane's process`
+            : tl.notUnderPane > 0
+              ? `claude's session registry has no record naming this pane; ${n(tl.notUnderPane)} in it lack${tl.notUnderPane === 1 ? "s" : ""} the tmux field but none is under a pane of this tmux server — if this agent's claude was launched through a wrapper, it may be one of them`
+              : "claude's session registry has no record for this pane (a claude launched before the registry existed)";
       const reg = { none, stale: "claude's session registry names this pane only for exited processes", ambiguous: "claude's session registry has two live claudes for this pane", unavailable: "claude's session registry is unavailable", unverified: "claude's session registry names this pane but the pid's start time is not checkable here — the tracker takes it at scrape grade on its next poll" }[registry] || "claude's session registry was not consulted";
       return cwdShared
         ? { level: "red", message: `no session id (${reg}; shared cwd cannot be scraped — run \`hadron adopt <agent> --session-id <uuid>\`, or relaunch through Hadron)` }
@@ -626,6 +636,19 @@ app.get("/api/doctor", async (req, res) => {
   const identMemo = new Map(), parentMemo = new Map();
   const identity = (pid) => { if (!identMemo.has(pid)) identMemo.set(pid, processIdentity(pid)); return identMemo.get(pid); };
   const parent = (pid) => { if (!parentMemo.has(pid)) parentMemo.set(pid, parentPid(pid)); return parentMemo.get(pid); };
+  // Tmux-less records sorted once per request: only the ones whose live claude
+  // sits under a pane of THIS tmux server are old claudes to upgrade; a live
+  // claude outside tmux (desktop app, plain terminal) never writes the field
+  // and is not a finding (Mac fleet 2026-09-29: 5 of 6 tmux-less records).
+  // A failed pane list must not turn "upgrade claude" into "not under a
+  // pane" quietly (silent-failure rule): classifyTmuxless gets null, reports
+  // panesKnown=false, and the header says the list was unavailable.
+  // Test-only: HADRON_TEST_DOCTOR_PANE_LIST_FAIL reproduces the unreadable
+  // pane list without breaking the private tmux server the fixture runs on.
+  const paneList = registrySnapshot.tmuxless.length ? (process.env.HADRON_TEST_DOCTOR_PANE_LIST_FAIL ? null : tmuxSafe(["list-panes", "-a", "-F", "#{pane_pid}"])) : "";
+  if (paneList === null) warnOnce("doctor-pane-list", "[doctor] tmux list-panes failed — tmux-less registry records cannot be placed under a pane; the header says so instead of sorting them");
+  const panePids = paneList === null ? null : new Set(paneList.split("\n").map(Number).filter((n) => Number.isInteger(n) && n > 0));
+  const tmuxless = classifyTmuxless({ registry: registrySnapshot, panePids, identity, parent });
   const agents = live.map((session) => {
     const tmuxName = tmuxSessionName(session.id);
     const paneExists = tmuxSafe(["has-session", "-t", tmuxName]) !== null;
@@ -651,7 +674,7 @@ app.get("/api/doctor", async (req, res) => {
     // settles after a restart) — otherwise "matched" next to a stale id reads
     // like agreement. Booleans only; never the ids.
     const registryAgrees = regHit && (regHit.status === "matched" || regHit.status === "unverified") ? regHit.sessionId === rt.sessionId : null;
-    const finding = classifyAgentHealth(session, { paneExists, paneCmd, cwdShared, now, registry, oldClaude, tmuxlessCount: registrySnapshot.tmuxless.length });
+    const finding = classifyAgentHealth(session, { paneExists, paneCmd, cwdShared, now, registry, oldClaude, tmuxless: { oldClaude: tmuxless.oldClaude.length, notUnderPane: tmuxless.notUnderPane, panesKnown: tmuxless.panesKnown } });
     // Cross-check: a green row MUST also satisfy decideResume — it is the code
     // that actually fires on reboot. Doctor asks "if the machine reboots NOW,
     // does this come back?", so it evaluates decideResume against a SIMULATED
@@ -723,10 +746,14 @@ app.get("/api/doctor", async (req, res) => {
     // deterministic id source. Counts only — no ids, no pids.
     sessionRegistry: {
       root: REGISTRY_ROOT, available: registrySnapshot.available, reason: registrySnapshot.reason, entries: registrySnapshot.entries.length, malformed: registrySnapshot.malformed,
-      // rejects by reason, and the claude versions behind the tmux-less ones
-      // (so the header can say "upgrade claude" with a number, not "unreadable")
+      // rejects by reason; the tmux-less ones split into old claudes under a
+      // pane of this tmux server / live claudes not under any of its panes
+      // (outside tmux, or deeper than the walk sees) / stale, plus whether the
+      // pane list was readable at all; the claude versions behind the OLD ones
+      // only (so the header can say "upgrade claude" with a number)
       rejected: registrySnapshot.rejected || {},
-      tmuxlessVersions: [...new Set((registrySnapshot.tmuxless || []).map((r) => safeVersion(r.version)).filter(Boolean))].sort().slice(0, 5),
+      tmuxless: { oldClaude: tmuxless.oldClaude.length, notUnderPane: tmuxless.notUnderPane, stale: tmuxless.stale, panesKnown: tmuxless.panesKnown },
+      tmuxlessVersions: [...new Set(tmuxless.oldClaude.map((r) => safeVersion(r.version)).filter(Boolean))].sort().slice(0, 5),
       tmuxSince: REGISTRY_TMUX_SINCE,
     },
     agents,
