@@ -771,7 +771,7 @@ async function main() {
         let r;
         try { r = installQuotaSink({ hadronBin }); } catch (e) { die(`quota --install: ${e.message}`); }
         if (!r.changed) console.log(`already installed in ${r.path}:\n  ${r.command}`);
-        else console.log(`${r.repaired ? `repointed the sink from another checkout (was: ${r.repaired})\ninstalled` : "installed"} in ${r.path} (backup: ${r.path}.hadron-bak)\n  statusLine.command = ${r.command}\n${r.wrapped ? "your previous statusline runs unchanged after the sink (--tee passes claude's JSON through)" : "no previous statusline — the sink prints a compact \"5h N% · 7d N%\" line"}\nclaude reads settings at start: sessions already running keep the old statusline until restarted.`);
+        else console.log(`${r.repaired ? `repointed the sink from another checkout (was: ${r.repaired})\ninstalled` : "installed"} in ${r.path} (backup: ${r.path}.hadron-bak)\n  statusLine.command = ${r.command}\n${r.wrapped ? "your previous statusline runs unchanged after the sink (--tee passes claude's JSON through)" : "no previous statusline — the sink prints a compact \"5h N% · 7d N%\" line"}\nrunning claude sessions pick the new statusline up on their next turn (settings.json is re-read; verified 2.1.28x) — the first receipt lands within a minute of any turn.`);
         break;
       }
       if (flags.uninstall) {
