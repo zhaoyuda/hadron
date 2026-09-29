@@ -149,7 +149,7 @@ async function run() {
 
   s = await getState();
   assert(s.state === "blocked", `API error pattern detected (got: ${s.state})`);
-  assert(s.blockReason === "API error", `Reason is "API error" (got: ${s.blockReason})`);
+  assert(s.blockReason === "Usage limit", `Reason is "Usage limit" — API Error: 429 (got: ${s.blockReason})`);
 
   // --- Test 7: blocked → working → done (user unblocks and content settles) ---
   console.log("\n[Test 7] blocked → working → done (resolved)");

@@ -96,7 +96,9 @@ PORT=3001 node server/index.js ~/work &    # port 3001
 npm test
 #   = test-state-eval.js   (detectState snapshot fixtures; a background shell at an empty prompt is idle
 #                            with substatus {type:"shell",count} — not working — and a permission dialog
-#                            with a shell in the chrome is blocked)
+#                            with a shell in the chrome is blocked; an API error's blockReason names what to DO —
+#                            "Login needed" / "Usage limit" / "Model unavailable" / transient "API error"
+#                            (apiErrorReason, classification only: it never decides `blocked`))
 #   + test-state-machine.js (nextState reducer — temporal transitions; idle/done refresh a shell substatus
 #                            in place, a turn ending with a shell still running settles to done)
 #   + test-security.js      (auth, cwd policy, injection, concurrency over HTTP)

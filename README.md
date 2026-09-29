@@ -147,7 +147,7 @@ Hadron automatically detects what each agent is doing by polling its tmux pane:
 |---|---|
 | **idle** | Shell prompt (`❯`) visible, no activity |
 | **working** | Claude process running + thinking/streaming indicators, tool execution, background agents |
-| **blocked** | Permission dialog waiting for input, API errors (429, overloaded) |
+| **blocked** | Permission dialog waiting for input (`Needs input`), or an API error named by what you have to do: `Login needed` (credentials — /login, expired token, bad key, 401/403), `Usage limit` (credits, spend caps, rate limit 429), `Model unavailable` (the configured model), plain `API error` (overloaded, 5xx, timeouts). Claude retries the transient ones and 429s on its own; the reason tells you whether waiting can help |
 | **done** | Claude process exited after a working session |
 
 State detection targets each agent's tmux *session name* (never a cached pane id, so a recycled `%N` can't alias another agent; `base-index` doesn't matter), filters autocomplete suggestions, and ignores non-blocking surveys. Process-level signals are used as a fallback when terminal output formats change.

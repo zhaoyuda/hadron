@@ -16,7 +16,7 @@
  *   2. Add an entry to EXPECTED below with the expected state and optional checks
  */
 
-import { detectState } from "../../server/state-detector.js";
+import { detectState, apiErrorReason } from "../../server/state-detector.js";
 import { readFileSync, readdirSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -130,27 +130,28 @@ const EXPECTED = {
   "blocked-do-you-want-to-proceed":    { state: "blocked", blockReason: "Needs input" },
   "blocked-prompt-editor":             { state: "blocked", blockReason: "Needs input" },
 
-  // ── Blocked: API error ──
-  "blocked-rate-limit":                { state: "blocked", blockReason: "API error" },
+  // ── Blocked: API error — blockReason says what to DO (2026-09-29): "Login needed" /
+  // "Usage limit" / "Model unavailable" / transient "API error" (see apiErrorReason) ──
+  "blocked-rate-limit":                { state: "blocked", blockReason: "Usage limit" },
   // assistant-rendered "● API Error: 429 {…rate_limit_error…}" — how Claude Code actually
   // shows a failed call (its own isApiErrorMessage test is text.startsWith("API Error"))
-  "blocked-api-429-message":           { state: "blocked", blockReason: "API error" },
+  "blocked-api-429-message":           { state: "blocked", blockReason: "Usage limit" },
   // macOS renders the message bullet as ⏺ (U+23FA) instead of ● — same anchor
   "blocked-api-error-mac-bullet":      { state: "blocked", blockReason: "API error" },
   // client-composed billing / auth failures (v2.1.269 renders these as the message text)
-  "blocked-credit-balance":            { state: "blocked", blockReason: "API error" },
-  "blocked-invalid-api-key":           { state: "blocked", blockReason: "API error" },
-  "blocked-not-logged-in":             { state: "blocked", blockReason: "API error" },
-  "blocked-gateway-auth":              { state: "blocked", blockReason: "API error" },
+  "blocked-credit-balance":            { state: "blocked", blockReason: "Usage limit" },
+  "blocked-invalid-api-key":           { state: "blocked", blockReason: "Login needed" },
+  "blocked-not-logged-in":             { state: "blocked", blockReason: "Login needed" },
+  "blocked-gateway-auth":              { state: "blocked", blockReason: "Login needed" },
   "blocked-request-timed-out":         { state: "blocked", blockReason: "API error" },
   // (2026-09-15 review of d88d9f5) forms the client emits that d88d9f5 missed
   "blocked-request-timed-out-env":     { state: "blocked", blockReason: "API error" },
-  "blocked-shared-budget":             { state: "blocked", blockReason: "API error" },
-  "blocked-out-of-credits":            { state: "blocked", blockReason: "API error" },
-  "blocked-org-out-of-credits":        { state: "blocked", blockReason: "API error" },
-  "blocked-org-credit-cap":            { state: "blocked", blockReason: "API error" },
-  "blocked-model-unavailable-wrapped-50": { state: "blocked", blockReason: "API error" },
-  "blocked-goal-paused-wrapped-45":    { state: "blocked", blockReason: "API error" },
+  "blocked-shared-budget":             { state: "blocked", blockReason: "Usage limit" },
+  "blocked-out-of-credits":            { state: "blocked", blockReason: "Usage limit" },
+  "blocked-org-out-of-credits":        { state: "blocked", blockReason: "Usage limit" },
+  "blocked-org-credit-cap":            { state: "blocked", blockReason: "Usage limit" },
+  "blocked-model-unavailable-wrapped-50": { state: "blocked", blockReason: "Model unavailable" },
+  "blocked-goal-paused-wrapped-45":    { state: "blocked", blockReason: "Usage limit" },
   // prose that starts with "API Error" but is not the renderer's "API Error: " form
   "idle-api-error-prose-no-colon":     { state: null },
   "idle-api-error-paren-in-prose":     { state: null },
@@ -162,9 +163,9 @@ const EXPECTED = {
   // longer delays are formatted "1m 30s" / "5m", not seconds
   "blocked-retry-banner-minutes":      { state: "blocked", blockReason: "API error" },
   // the server's message text can itself contain "·"
-  "blocked-retry-banner-dot-in-message": { state: "blocked", blockReason: "API error" },
+  "blocked-retry-banner-dot-in-message": { state: "blocked", blockReason: "Usage limit" },
   // narrow pane: the head is truncated to ≥10 chars with "…" before the retry suffix
-  "blocked-retry-banner-truncated-head": { state: "blocked", blockReason: "API error" },
+  "blocked-retry-banner-truncated-head": { state: "blocked", blockReason: "Usage limit" },
   // a mid-stream (SSE) failure has no HTTP status, so the formatted head is the bare
   // message ("Overloaded") — any non-generic head counts, not just "<status> …"
   "blocked-retry-banner-overloaded-stream": { state: "blocked", blockReason: "API error" },
@@ -172,16 +173,16 @@ const EXPECTED = {
   "blocked-retry-banner-hours":        { state: "blocked", blockReason: "API error" },
   "blocked-overloaded":                { state: "blocked", blockReason: "API error" },
   "blocked-api-500":                   { state: "blocked", blockReason: "API error" },
-  "blocked-no-healthy-deployments":    { state: "blocked", blockReason: "API error" },
-  "blocked-model-issue":               { state: "blocked", blockReason: "API error" },
+  "blocked-no-healthy-deployments":    { state: "blocked", blockReason: "Model unavailable" },
+  "blocked-model-issue":               { state: "blocked", blockReason: "Model unavailable" },
   // narrow pane (50 cols): the renderer wraps the message at a space, so the head's
   // delimiter " (" lands on the next line — end-of-line stands in for it
-  "blocked-model-issue-wrapped":       { state: "blocked", blockReason: "API error" },
+  "blocked-model-issue-wrapped":       { state: "blocked", blockReason: "Model unavailable" },
   // 45 cols: the head itself wraps ("… the selected" / "  model (…)"); the bullet line is
   // re-joined with its 2-space continuation lines before the head is tested
-  "blocked-model-issue-wrapped-45":    { state: "blocked", blockReason: "API error" },
+  "blocked-model-issue-wrapped-45":    { state: "blocked", blockReason: "Model unavailable" },
   // /goal notice, prefixed by a goal-spinner frame (∴ ∷ ∵): the API-caused pauses count
-  "blocked-goal-paused-rate-limited":  { state: "blocked", blockReason: "API error" },
+  "blocked-goal-paused-rate-limited":  { state: "blocked", blockReason: "Usage limit" },
 
   // ── Inconclusive (no prompt, no recognized indicators) ──
   "inconclusive-mid-output":           { state: "inconclusive" },
@@ -261,6 +262,78 @@ for (const file of files) {
     for (const e of errors) console.log(`      ${e}`);
     failed++;
   }
+}
+
+// apiErrorReason on heads the fixtures do not carry: the retry banner's status codes
+// and rate-limit metadata heads, and the generic / unknown fallbacks. The classifier
+// never decides `blocked` (detection is API_ERROR_LINE_RE / RETRY_ERROR_LINE_RE); it
+// only names what the operator must do.
+console.log("\n[apiErrorReason]");
+for (const [line, want] of [
+  ["✻ 401 Unauthorized · Retrying in 3s · attempt 3/10", "Login needed"],
+  ["✻ 403 Forbidden · Retrying in 3s · attempt 3/10", "Login needed"],
+  ["● API Error: 401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\"}}", "Login needed"],
+  ["● OAuth token revoked · Please run /login", "Login needed"],
+  ["● AWS credentials expired or invalid · run aws sso login", "Login needed"],
+  ["✻ Session limit reached · Retrying in 3s (5pm) · attempt 3/10", "Usage limit"],
+  ["✻ Weekly limit reached · Retrying in 1h · attempt 3/10", "Usage limit"],
+  ["✻ 429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}} · Retrying in 8s · attempt 3/10", "Usage limit"],
+  ["● You've hit your monthly spend limit.", "Usage limit"],
+  ["∴ Goal paused · usage limit reached · send a message to retry", "Usage limit"],
+  ["  Error: no healthy deployments available for this model", "Model unavailable"],
+  ["✻ 529 Overloaded · Retrying in 8s · attempt 3/10", "API error"],
+  ["✻ 500 Internal Server Error · Retrying in 8s · attempt 3/10", "API error"],
+  ["● API Error: 500 Internal Server Error", "API error"],
+  ["● API Error: Please wait a moment and try again.", "API error"],
+  ["● Request timed out", "API error"],
+  ["● We are experiencing high demand for Opus 5.", "API error"],
+  ["∷ Goal paused after 10 automatic retries · send a message to retry", "API error"],
+  ["∴ Goal paused · the API rejected the last request · send a message to retry", "API error"],
+  ["● Login expired · Please run /login", "Login needed"],
+  ["● Please run /login", "Login needed"],
+  ["● Google Cloud authentication failed · run gcloud auth login", "Login needed"],
+  // the retry head is truncated to the pane width (≥10 chars) + "…" — every width, not
+  // just the one the fixture happens to use (Opus review: "Session li…" read "API error")
+  ["✻ Session li… · Retrying in 5m (5pm) · attempt 3/10", "Usage limit"],
+  ["✻ Usage limit… · Retrying in 3s · attempt 3/10", "Usage limit"],
+  ["✻ Usage credit l… · Retrying in 3s · attempt 3/10", "Usage limit"],
+  ["✻ Weekly limit r… · Retrying in 1h · attempt 3/10", "Usage limit"],
+  ["✻ Opus limit reached · Retrying in 1h · attempt 3/10", "Usage limit"],
+  // an unmapped rate-limit type renders the raw header value + " reached"
+  ["✻ Seven_day_overage reached · Retrying in 1h · attempt 3/10", "Usage limit"],
+  // "<word> reached" outside the retry banner head is not a quota message
+  ["● API Error: 400 {\"message\":\"maximum context length reached\"}", "API error"],
+  ["● Maximum retries reached with no response", "API error"],
+  // a truncated head that is NOT a prefix of a known limit type stays transient
+  ["✻ 529 Overloa… · Retrying in 8s · attempt 3/10", "API error"],
+  ["✻ Internal se… · Retrying in 8s · attempt 3/10", "API error"],
+  // bucket order: a model message that happens to mention a rate limit is still the model
+  ["● There's an issue with the selected model (x). It was rate limited.", "Model unavailable"],
+  ["● The model is currently overloaded. Please try again later.", "API error"],
+  [null, "API error"],
+]) {
+  const got = apiErrorReason(line);
+  if (got === want) { console.log(`  ✓ ${JSON.stringify(line)} → ${got}`); passed++; }
+  else { console.log(`  ✗ FAIL: ${JSON.stringify(line)} → ${got} (want ${want})`); failed++; }
+}
+
+// Classification never creates a block: a line apiErrorReason would label is not
+// `blocked` unless detection accepted it, and the reason shown is the LATEST error in
+// the tail, not the first (an old 500 above a fresh "Login expired" names the login).
+{
+  const prose = ["● Bash(npm test)", "  ⎿  60 passed", "  429 something rate limited in the logs", "", "❯ "];
+  const r = detectState(prose, {});
+  const label = apiErrorReason("  429 something rate limited in the logs");
+  if (r.state === null && label === "Usage limit") { console.log(`  ✓ classifier would label prose "${label}" but detectState does not block on it`); passed++; }
+  else { console.log(`  ✗ FAIL: prose → ${JSON.stringify(r)} / ${label}`); failed++; }
+  const stale = ["● Bash(npm test)", "  ⎿  60 passed", "● API Error: 500 Internal Server Error", "● Let me retry that.", "● Login expired · Please run /login", "", "❯ "];
+  const s = detectState(stale, {});
+  if (s.state === "blocked" && s.blockReason === "Login needed") { console.log("  ✓ latest error wins: 500 above a later 'Login expired' → Login needed"); passed++; }
+  else { console.log(`  ✗ FAIL: stale-error tail → ${JSON.stringify(s)}`); failed++; }
+  const wrapped = ["● API Error: 500 Internal Server Error", "● There's an issue with the selected", "  model (claude-opus-4-6). It may not", "  exist. Run /model to pick a different", "  model.", "", "❯ "];
+  const w = detectState(wrapped, {});
+  if (w.state === "blocked" && w.blockReason === "Model unavailable") { console.log("  ✓ latest error wins for a wrapped block too → Model unavailable"); passed++; }
+  else { console.log(`  ✗ FAIL: wrapped-later tail → ${JSON.stringify(w)}`); failed++; }
 }
 
 console.log(`\n  ${passed} passed, ${failed} failed, ${skipped} skipped\n`);

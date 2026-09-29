@@ -266,7 +266,7 @@ const RETRYING_RE = new RegExp(
 // columns − 10), so where the delimiter follows a space, end-of-line stands in for it:
 // "● There's an issue with the selected model" / "  (claude-…). It may not exist…" on
 // a 50-column pane is still the error. Matched per line (or per re-joined message
-// block, see joinedMessageBlocks), never on the whole tail joined into one string.
+// block, see findApiError), never on the whole tail joined into one string.
 const API_ERROR_LINE_RE = new RegExp(
   "^(?:[●⏺⚠∴∷∵]\uFE0F? ?| {0,2})(?:" +
   [
@@ -321,20 +321,67 @@ const isApiErrorLine = (l) => API_ERROR_LINE_RE.test(l) || RETRY_ERROR_LINE_RE.t
 // (up to a blank line, a tool-result "⎿" or the next bullet) and test the head against
 // the joined block — the anchor stays the bullet, so prose is no more exposed than a
 // single line is.
-function joinedMessageBlocks(lines) {
-  const blocks = [];
-  for (let i = 0; i < lines.length; i++) {
+//
+// findApiError returns the LATEST API-error line (or re-joined wrapped message block) in `lines`,
+// or null. Scanned from the bottom, line and block interleaved by position: the
+// tail can still hold an earlier "API Error: 500" above a later "Login expired",
+// and the reason shown must be the current one (Opus review of the split).
+function findApiError(lines) {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (isApiErrorLine(lines[i])) return lines[i];
     if (!/^[●⏺⚠∴∷∵]/.test(lines[i])) continue;
     let block = lines[i];
-    for (let j = i + 1; j < lines.length && /^ {2}[^\s⎿]/.test(lines[j]); j++) {
-      block += " " + lines[j].slice(2);
-    }
-    blocks.push(block);
+    for (let j = i + 1; j < lines.length && /^ {2}[^\s⎿]/.test(lines[j]); j++) block += " " + lines[j].slice(2);
+    if (block !== lines[i] && API_ERROR_LINE_RE.test(block)) return block;
   }
-  return blocks;
+  return null;
 }
-const hasApiError = (lines) =>
-  lines.some(isApiErrorLine) || joinedMessageBlocks(lines).some((b) => API_ERROR_LINE_RE.test(b));
+const hasApiError = (lines) => findApiError(lines) !== null;
+
+// What the operator has to DO about the error decides the reason shown on the
+// card (Mac fleet suggestion, 2026-09-29: a bare "API error" made a login
+// prompt, a spent budget and a 529 look alike in triage):
+//   "Login needed"      — credentials: /login, expired or revoked token, bad
+//                         API key, gateway/cloud auth, HTTP 401/403
+//   "Usage limit"       — money or quota: credits, spend caps, shared budget,
+//                         rate limit (429, "<Type> limit reached" retry heads,
+//                         /goal paused for a limit)
+//   "Model unavailable" — the configured model: issue with the selected
+//                         model, not on this deployment, no healthy deployments
+//   "API error"         — transient: overloaded, high demand, 5xx, timeouts,
+//                         and anything not recognised above (claude retries)
+// Classification runs only on a line detection already accepted, so these
+// patterns need no anchors of their own — they never decide `blocked`. Order:
+// auth, model, then quota — the quota bucket's last alternative spans the
+// whole message ("rate limit" anywhere before a "·"), so it goes last.
+const API_HEAD = "^(?:[●⏺⚠∴∷∵]\uFE0F? ?| {0,2}|✻\\s+)(?:Error: )?";
+const API_ERROR_KIND_RES = [
+  ["Login needed", new RegExp(API_HEAD + "(?:Please run /login|Not logged in|OAuth token revoked|Login expired|Invalid API key|Authentication error|AWS (?:credentials|authentication)|Google Cloud (?:credentials|authentication)|API Error: 40[13]\\b|40[13]\\b)")],
+  ["Model unavailable", new RegExp(API_HEAD + "(?:There's an issue with the selected model|The model \\S+ is not available|no healthy deployments)")],
+  ["Usage limit", new RegExp(API_HEAD + "(?:Credit balance too low|You've hit your|You're out of usage credits|Your organization(?:'s usage credit cap| is out of usage credits)|Goal paused · (?:usage limit reached|the request was rate limited)|API Error: 429\\b|429\\b|[^·]*\\b(?:limit reached|rate.?limit))")],
+];
+// The retry banner's rate-limit head is "<Type> reached" for the types claude
+// 2.1.284 maps (bundle: session/weekly/Opus/Sonnet/Fable/usage credit/usage
+// limit), TRUNCATED to the pane's width (≥10 chars) with a trailing "…" — at 50
+// columns "Session limit reached" is "Session li…", so the head is matched as a
+// PREFIX of a known type string, not by a literal (the regex floor of 4 chars sits
+// below claude's, so no width is missed; the 4-8-char prefixes of these heads are
+// stems claude cannot emit at that width).
+// An unmapped type renders the raw header value + " reached" as the banner head
+// (only there — "<word> reached" elsewhere in a message is not a quota signal).
+const RAW_LIMIT_HEAD_RE = /^✻\s+[^·]{1,40} reached\s*·\s*Retrying in /;
+const LIMIT_HEADS = ["session limit reached", "weekly limit reached", "opus limit reached", "sonnet limit reached", "fable limit reached", "usage credit limit reached", "usage limit reached"];
+function truncatedLimitHead(line) {
+  const m = /^✻\s+(.{4,}?)…\s*·\s*Retrying in /.exec(line);
+  if (!m) return false;
+  const head = m[1].toLowerCase();
+  return LIMIT_HEADS.some((h) => h.startsWith(head));
+}
+export function apiErrorReason(line) {
+  if (typeof line !== "string") return "API error";
+  for (const [reason, re] of API_ERROR_KIND_RES) if (re.test(line)) return reason;
+  return RAW_LIMIT_HEAD_RE.test(line) || truncatedLimitHead(line) ? "Usage limit" : "API error";
+}
 
 const WAITING_INPUT_RE = /Allow once|Allow always|Allow\s+Deny|Do you want to proceed|manually approve this|❯ Enter to select|Esc to cancel|Would you like to proceed\?|written up a plan|Yes, and bypass permissions|Yes, manually approve edits/;
 
@@ -540,8 +587,9 @@ export function detectState(rawLines, opts = {}) {
 
   // 5d. API error — a line that BEGINS with one of Claude Code's error messages,
   // or a retry banner whose head is a real error rather than the generic "API error"
-  if (hasApiError(tail)) {
-    return { state: "blocked", blockReason: "API error", substatus: null };
+  const apiErr = findApiError(tail);
+  if (apiErr !== null) {
+    return { state: "blocked", blockReason: apiErrorReason(apiErr), substatus: null };
   }
 
   // ── Step 6: Final state ──
