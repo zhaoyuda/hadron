@@ -337,11 +337,15 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                            anonymous GET /api/quota is 401)
 #   + test/e2e/m25-switch-latency.js (agent-switch latency: a shell agent seeded with 35k CJK lines (history-limit
 #                                 raised on the session + window re-created, tmux's default 2000 would trim it; ≥ 20000
-#                                 rows asserted); timed card clicks small↔big ×3 must paint the pane's content within
-#                                 3 s each (prod 2026-09-29: ~5 s to show the homelab pane); every switch's WS URL
-#                                 carries the fitted cols/rows (one connect per switch) and the tmux window size is
-#                                 unchanged across the switches — a resize makes a long claude session re-render for
-#                                 seconds; window = fitted xterm minus the status line rows)
+#                                 rows asserted), viewed in a vsplit beside its artifact while the other agent is
+#                                 full-width (prod 2026-09-29: 134 vs 269 cols); timed card clicks small↔big ×3 must
+#                                 paint the pane's content within 3 s each; every switch's WS URL asks for the TARGET
+#                                 agent's fitted cols/rows up front (switchSession lays out + fits before connectWs —
+#                                 before, the outgoing agent's size went on the URL, the pty was spawned wrong and a
+#                                 resize corrected it: two reflows + two claude re-renders per switch, seconds on a
+#                                 long session), no correcting resize frame follows a connect (framesent captured),
+#                                 one connect per switch, and each tmux window keeps its own size across the
+#                                 switches = fitted xterm minus the status-line rows)
 ```
 
 `npm run test:e2e` runs `test/e2e/run-all.js`, which executes every `m*.js`

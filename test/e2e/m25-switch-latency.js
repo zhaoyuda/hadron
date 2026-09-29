@@ -20,6 +20,7 @@
 import { chromium } from "playwright";
 import { execFileSync } from "child_process";
 import { join } from "path";
+import { writeFileSync } from "fs";
 import { bootWorkspace, authHeaders, reporter, screenshotDir } from "./harness.js";
 
 const SWITCH_BUDGET_MS = 3000;   // per switch, click → content painted
@@ -41,7 +42,8 @@ async function until(fn, ms = 30000, step = 200) {
 let browser;
 try {
   const mk = (body) => fetch(`${env.baseUrl}/api/sessions`, { method: "POST", headers: authHeaders(env.token), body: JSON.stringify(body) });
-  r.ok((await mk({ name: "Big", group: "Workers", launchCommand: "shell" })).status === 201, "shell agent 'big' created");
+  writeFileSync(join(env.ws, "report.md"), "# report\n\nviewed beside the terminal in a vertical split\n");
+  r.ok((await mk({ name: "Big", group: "Workers", launchCommand: "shell", artifacts: [{ type: "file", value: "report.md" }] })).status === 201, "shell agent 'big' created (with an artifact, so it can be viewed in a split)");
   r.ok((await mk({ name: "Small", group: "Workers", launchCommand: "shell" })).status === 201, "shell agent 'small' created");
 
   // ── seed: a 35k-line CJK scrollback in 'big', a one-liner in 'small' ──
@@ -75,8 +77,15 @@ try {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   const pageErrors = [];
   page.on("pageerror", (e) => pageErrors.push(String(e)));
-  const wsUrls = [];   // every /ws the page opens — the no-resize invariant lives in the URL
-  page.on("websocket", (w) => wsUrls.push(w.url()));
+  // Every /ws the page opens, as {url, sizes}: the no-resize invariant lives in
+  // the URL, the resize frames sent on that socket in `sizes`. Keyed per socket
+  // object — the URL repeats byte-for-byte on every connect to the same agent.
+  const sockets = [];
+  page.on("websocket", (w) => {
+    const rec = { url: w.url(), sizes: [] };
+    sockets.push(rec);
+    w.on("framesent", (f) => { try { const m = JSON.parse(f.payload); if (m.type === "resize") rec.sizes.push(`${m.cols}x${m.rows}`); } catch {} });
+  });
   await page.goto(env.baseUrl, { waitUntil: "domcontentloaded" });
 
   const painted = (needle) => page.waitForFunction((n) => {
@@ -95,22 +104,42 @@ try {
   await timedSwitch("small", "SMALL_PANE_READY");
   const firstBig = await timedSwitch("big", "BIG_HISTORY_READY");
   r.ok(firstBig <= 15000, `first attach to big painted in ${firstBig} ms (not timed against the budget: includes the initial fit; ceiling 15 s)`);
+  // `big` is viewed in a vertical split (its artifact beside the terminal),
+  // `small` full-width — the prod shape (2026-09-29 14:20): the two agents'
+  // terminals have different sizes, and every switch between them used to
+  // spawn the pty at the OUTGOING agent's size (tmux reflowed big's whole
+  // scrollback, claude re-rendered), then correct with a resize (both again).
+  await page.locator(".af[data-art-idx]", { hasText: "report.md" }).click();   // sidebar → artifact tab
+  await page.evaluate(() => cycleLayout());   // tabs → vsplit (big only; layout is per agent)
+  await painted("BIG_HISTORY_READY");
+  await sleep(800);   // the split's deferredFit + the 500 ms post-connect fit settle
+  const fittedBig = await page.evaluate(() => ({ cols: (window.term ?? term).cols, rows: (window.term ?? term).rows }));
+  await timedSwitch("small", "SMALL_PANE_READY");
+  await sleep(800);
+  const fittedSmall = await page.evaluate(() => ({ cols: (window.term ?? term).cols, rows: (window.term ?? term).rows }));
+  r.ok(fittedBig.cols < fittedSmall.cols - 20, `big is viewed in a split, narrower than small (${fittedBig.cols}x${fittedBig.rows} vs ${fittedSmall.cols}x${fittedSmall.rows})`);
+  await timedSwitch("big", "BIG_HISTORY_READY");
+  await sleep(800);
   const sizeBig0 = paneSize("big"), sizeSmall0 = paneSize("small");
-  const fitted = await page.evaluate(() => ({ cols: (window.term ?? term).cols, rows: (window.term ?? term).rows }));
+  const fitted = fittedBig;
   // tmux's status line takes rows off the client: `status off` → 0, on → 1, `status N` → N.
   const statusOpt = tmux("show-option", "-v", "-t", tmuxName("big"), "status");
   const statusRows = Number(statusOpt) || (statusOpt === "off" ? 0 : 1);
-  r.ok(sizeBig0 === `${fitted.cols}x${fitted.rows - statusRows}`, `big window sized to the browser's fitted terminal (tmux ${sizeBig0}, xterm ${fitted.cols}x${fitted.rows}, status line ${statusRows})`);
+  r.ok(sizeBig0 === `${fitted.cols}x${fitted.rows - statusRows}` && sizeSmall0 === `${fittedSmall.cols}x${fittedSmall.rows - statusRows}`,
+    `each window sized to its own fitted terminal (big tmux ${sizeBig0} / xterm ${fitted.cols}x${fitted.rows}; small tmux ${sizeSmall0} / xterm ${fittedSmall.cols}x${fittedSmall.rows}; status line ${statusRows})`);
 
   // ── timed rounds: small → big → small … ──
-  const wsBefore = wsUrls.length;   // the very first connect predates the first fit (page load) — not a switch
+  const wsBefore = sockets.length;   // the very first connect predates the first fit (page load) — not a switch
   const times = [];
+  const fitDrift = [];
   const sizesBig = [], sizesSmall = [];
   for (let i = 0; i < ROUNDS; i++) {
     times.push({ to: "small", ms: await timedSwitch("small", "SMALL_PANE_READY") });
     sizesSmall.push(paneSize("small"));
     times.push({ to: "big", ms: await timedSwitch("big", "BIG_HISTORY_READY") });
     sizesBig.push(paneSize("big"));
+    const nowBig = await page.evaluate(() => ({ cols: (window.term ?? term).cols, rows: (window.term ?? term).rows }));
+    if (nowBig.cols !== fittedBig.cols || nowBig.rows !== fittedBig.rows) fitDrift.push(`${nowBig.cols}x${nowBig.rows}`);
     await sleep(700);   // let the post-connect safeFit() (500 ms) run before the next switch
   }
   const toBig = times.filter((t) => t.to === "big").map((t) => t.ms);
@@ -125,13 +154,22 @@ try {
   // the fitted size up front (client/terminal.js wsSizeParam), so the pty was
   // never spawned at 80x24 and corrected afterwards. The tmux sample above is
   // the server-side half (an attach that resizes the window would show there).
-  const primary = wsUrls.slice(wsBefore).filter((u) => /[?&]session=(big|small)(&|$)/.test(u) && !u.includes("shell="));
-  const sized = primary.map((u) => u.match(/[?&]cols=(\d+)&rows=(\d+)/)).map((m) => m && `${m[1]}x${m[2]}`);
-  r.ok(primary.length === 2 * ROUNDS && sized.every((z) => z === `${fitted.cols}x${fitted.rows}`),
-    `all ${primary.length} switch WS connects carried the fitted size ${fitted.cols}x${fitted.rows} on the URL (${[...new Set(sized)].join(",")}) — one connect per switch, no reconnect loop`);
+  r.ok(fitDrift.length === 0, `big's fitted size held across the rounds (${fittedBig.cols}x${fittedBig.rows}${fitDrift.length ? "; drifted to " + fitDrift.join(",") : ""})`);
+  const primary = sockets.slice(wsBefore).filter((k) => /[?&]session=(big|small)(&|$)/.test(k.url) && !k.url.includes("shell="));
+  const want = (u) => (/[?&]session=big(&|$)/.test(u) ? fittedBig : fittedSmall);
+  const urlSize = (u) => { const m = u.match(/[?&]cols=(\d+)&rows=(\d+)/); return m && `${m[1]}x${m[2]}`; };
+  const agentOf = (u) => u.replace(/^.*session=/, "").replace(/&.*$/, "");
+  const wrongUrl = primary.filter((k) => urlSize(k.url) !== `${want(k.url).cols}x${want(k.url).rows}`);
+  r.ok(primary.length === 2 * ROUNDS && wrongUrl.length === 0,
+    `all ${primary.length} switch WS connects asked for the TARGET agent's fitted size up front — one connect per switch, no reconnect loop (${wrongUrl.length ? "wrong: " + wrongUrl.map((k) => k.url.replace(/token=[^&]*/, "token=…").replace(/^.*\/ws\?/, "")).join(" ") : "big " + fittedBig.cols + "x" + fittedBig.rows + ", small " + fittedSmall.cols + "x" + fittedSmall.rows})`);
+  // …and NO resize frame followed on any of them: the pty started at the URL's
+  // size and the client suppresses same-size resizes, so a frame here is either
+  // a correction (the second reflow + re-render of the pane program) or a
+  // pointless SIGWINCH.
+  const withFrames = primary.filter((k) => k.sizes.length);
+  r.ok(withFrames.length === 0, `no switch was followed by any resize frame (${withFrames.length ? withFrames.map((k) => agentOf(k.url) + "→" + k.sizes.join(",")).join("; ") : "none on " + primary.length + " sockets"})`);
   const hist1 = histSize();
   r.ok(hist1 >= 20000, `big pane's scrollback survived the switches — ${hist1} rows after reflow to ${sizeBig0} (the timing above covered the full history)`);
-
   await page.screenshot({ path: join(screenshotDir(), "m25-switch-big.png") });
   r.ok(pageErrors.length === 0, `no page errors (${pageErrors.join("; ") || "none"})`);
 } catch (e) {

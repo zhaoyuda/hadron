@@ -2138,9 +2138,16 @@ function switchSession(sessionId) {
   activeTab = perSessionTab[sessionId] || "terminal";
   layoutMode = perSessionLayout[sessionId] || "tabs";
 
-  connectWs(sessionId);
-
-  render();
+  // Lay the TARGET agent out first and fit the terminal to it, so the size on
+  // the new WS URL is the size this agent is actually shown at. Opening the WS
+  // before render() carried the OUTGOING agent's size: between an agent viewed
+  // full-width and one viewed in a split (prod 2026-09-29: 269 vs 134 cols) the
+  // pty was spawned at the wrong width — tmux reflowed the whole scrollback and
+  // claude re-rendered — then a resize corrected it, and both ran again. That
+  // was the multi-second "blank then jumpy" switch. M25 pins it.
+  // The attach is unconditional: a throw inside render() must not leave the
+  // header naming the new agent while keystrokes still go to the old one.
+  try { render(); fitQuiet(); } finally { connectWs(sessionId); }
   saveUIState();
 }
 

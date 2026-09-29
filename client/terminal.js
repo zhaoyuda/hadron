@@ -205,6 +205,18 @@ function safeFit() {
   sendResize();
 }
 
+// Fit WITHOUT telling the server: used right before a switch opens the new
+// WS, when `ws` still belongs to the outgoing agent — a resize sent there
+// would reshape the agent we are leaving to the layout of the one we are
+// entering. The size lands on the new WS URL instead (wsSizeParam).
+function fitQuiet() {
+  const container = document.getElementById("terminal-container");
+  if (!container || !container.classList.contains("active")) return false;
+  if (container.offsetWidth < 50 || container.offsetHeight < 50) return false;
+  fitAddon.fit();
+  return true;
+}
+
 function deferredFit() {
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
@@ -213,8 +225,15 @@ function deferredFit() {
   });
 }
 
+// Same-size resizes are suppressed: the pty was spawned at the URL's size and
+// every fit after open (deferredFit, the 500 ms safeFit, the ResizeObserver)
+// would otherwise re-send it — each one a TIOCSWINSZ + SIGWINCH to the pane.
+let lastSentSize = "";
 function sendResize() {
   if (ws && ws.readyState === WebSocket.OPEN && term) {
+    const size = `${term.cols}x${term.rows}`;
+    if (size === lastSentSize) return;
+    lastSentSize = size;
     ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
   }
 }
@@ -223,9 +242,11 @@ function sendResize() {
 // "&cols=N&rows=N" so the pty is spawned at the terminal's current size (a
 // never-fitted xterm reports its 80x24 constructor default, which is also the
 // server's fallback). This only removes the resize detour when the size is
-// right at connect time: same-layout agent switches and reconnects. A switch
-// that changes layout (tabs → vsplit) still sends the outgoing layout's size
-// and corrects with one resize, as before.
+// right at connect time. switchSession lays the target agent out and fits the
+// terminal (fitQuiet) BEFORE calling connectWs, so the size here is the
+// target's own even when the two agents' layouts differ (tabs vs vsplit); a
+// terminal that is not on screen at switch time (notes/artifact tab active)
+// still carries the previous size and corrects with one resize.
 function wsSizeParam(t) {
   if (!t || !(t.cols >= 10) || !(t.rows >= 5)) return "";
   return `&cols=${t.cols}&rows=${t.rows}`;
@@ -258,6 +279,7 @@ function connectWs(sessionId) {
   // the program in the pane (Claude Code on a long session: seconds) had to
   // re-render twice before the screen settled after every agent switch.
   ws = new WebSocket(`${protocol}//${location.host}/ws?session=${encodeURIComponent(sessionId)}${wsTokenParam()}${wsSizeParam(term)}`);
+  lastSentSize = wsSizeParam(term) ? `${term.cols}x${term.rows}` : "";   // the pty starts at this size
 
   const statusEl = document.getElementById("status");
 
