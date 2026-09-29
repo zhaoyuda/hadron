@@ -22,6 +22,7 @@ import { syncSkills } from "./skills.js";
 import { collectProvenance } from "./provenance.js";
 import { transcriptPath, readTranscriptSummary, transcriptWire, CONTEXT_WINDOW, readTranscriptFiles, filesWire, FILES_CHUNK_BYTES, FILES_MAX_LINE, FILES_CORE } from "./transcript.js";
 import { warnOnce } from "./log.js";
+import { gitChanges, gitDiffFile } from "./changes.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { readQuota } from "./quota.js";
 import {
@@ -873,6 +874,52 @@ app.get("/api/sessions/:id/files", (req, res) => {
   if (!s || s.archived) return res.status(404).json({ error: "agent not found" });
   if (!s.files) return res.json(null);
   res.json({ files: s.files.files.map((e) => ({ ...e, path: sessionFilePath(s, e.path) })), complete: s.files.complete });
+});
+// The Changes view: git's picture of the agent's cwd (server/changes.js), with
+// `touched` = this session's transcript wrote the file. Token-gated like the
+// transcript (paths are the agent's business). Cached per agent for a few
+// seconds — the client polls while the tab is open, several clients may.
+const CHANGES_CACHE_MS = 3000;
+const changesCache = new Map(); // agent id → { at, cwd, result }
+async function changesFor(s) {
+  // A cwd that fails validation (deleted, moved outside the workspace) shows
+  // nothing — falling back to the workspace root would list another repo's
+  // changes under this agent's name.
+  const cwd = validateCwd(s.cwd).cwd;
+  if (!cwd) return { root: null };
+  const hit = changesCache.get(s.id);
+  if (hit && hit.cwd === cwd && Date.now() - hit.at < CHANGES_CACHE_MS) return hit.result;
+  const result = await gitChanges(cwd);
+  changesCache.set(s.id, { at: Date.now(), cwd, result });
+  return result;
+}
+app.get("/api/sessions/:id/changes", async (req, res) => {
+  if (!tokenPresent(req)) return res.status(401).json({ error: "invalid or missing token" });
+  const s = sessions.get(req.params.id);
+  if (!s || s.archived) return res.status(404).json({ error: "agent not found" });
+  const c = await changesFor(s);
+  if (!c.root) return res.json({ root: null, cwd: s.cwd || null });
+  // Attribution means WROTE: a file this agent only read (while another agent changed it) is not its change.
+  const touched = new Set((s.files?.files || []).filter((e) => e.writes > 0).map((e) => sessionFilePath(s, e.path)));
+  res.json({
+    root: c.root, branch: c.branch, total: c.total, truncated: c.truncated, ...(c.error ? { error: c.error } : {}),
+    files: c.files.map(({ abs, ...f }) => ({ ...f, abs, touched: touched.has(abs) })),
+  });
+});
+app.get("/api/sessions/:id/changes/diff", async (req, res) => {
+  if (!tokenPresent(req)) return res.status(401).json({ error: "invalid or missing token" });
+  const s = sessions.get(req.params.id);
+  if (!s || s.archived) return res.status(404).json({ error: "agent not found" });
+  const path = req.query.path;
+  if (typeof path !== "string" || !path) return res.status(400).json({ error: "path required" });
+  const c = await changesFor(s);
+  if (!c.root) return res.status(404).json({ error: "not a git repository" });
+  // Only a path in the current change set: this is a diff viewer, not a file reader.
+  const f = c.files.find((x) => x.path === path);
+  if (!f) return res.status(404).json({ error: c.truncated ? "not in the listed change set (the list is truncated)" : "not a changed file (the change set may have moved on)" });
+  const d = await gitDiffFile(c.root, f.path, f.status, f.from);
+  if (d.error) return res.status(400).json({ error: d.error });
+  res.json({ path: f.path, status: f.status, diff: d.diff, truncated: d.truncated });
 });
 // A tool_use path is what claude was given — absolute in practice; a relative
 // one is against the agent's cwd, never the workspace.

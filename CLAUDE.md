@@ -49,7 +49,7 @@ scripts/
   setup-workspace.js  # Interactive workspace initializer
 test/
   unit/               # detectState/nextState fixtures + security HTTP suite (npm test)
-  e2e/                # Playwright browser modules M1-M26 (npm run test:e2e)
+  e2e/                # Playwright browser modules M1-M27 (npm run test:e2e)
 ```
 
 ## Conventions
@@ -278,6 +278,16 @@ npm test
 #                            quota` says "installed from ANOTHER checkout" until then; bare-sink uninstall keeps a
 #                            sibling key like padding); GET /api/quota 401 without token, {claude, codex, at} with it;
 #                            doctor local row info (not installed / no receipt yet) or green (receipt age + numbers))
+#   + test-changes.js       (Changes view, server side — server/changes.js + GET /api/sessions/:id/changes
+#                            (token; a non-git cwd → {root:null, cwd}; branch + one row per `git status -z`
+#                            entry with status word (modified/added/untracked/renamed+from/deleted/conflict),
+#                            +/− from `diff --numstat HEAD` (staged and unstaged in one number, untracked
+#                            counted by lines, binary null), `touched` only for a path THIS session's
+#                            transcript wrote, 500-row cap with total/truncated, 3-s per-agent cache) and
+#                            …/changes/diff?path= (one changed file's unified diff — untracked via --no-index
+#                            with a repo-relative header; 400 no path, 404 for anything outside the change
+#                            set incl. ../ escapes and gitignored files — a diff viewer, not a file reader;
+#                            clipped at 512 KB with truncated); nothing on the record, no session id on the wire)
 ```
 
 ### Reliability gate
@@ -382,6 +392,12 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                                 pin` (add = alias); wire: `files` {changed, core, total, complete, truncated?,
 #                                 partial?} and `coreDismissed` on the token-bearing list only, /files 401 without the
 #                                 token, null for a shell agent, no session id anywhere)
+#   + test/e2e/m27-changes-view.js (Changes view: "⎇ Changes" by "+ pin a file" opens a tab with git's picture of the
+#                                 agent's cwd — branch, rows in git status order with status letter + path + "+2 −1",
+#                                 no written-by-this-session dot for a shell agent; a row click paints the unified diff
+#                                 with coloured +/− lines and a hunk header, × closes it; an edit on disk moves the
+#                                 numbers and the open diff within the poll with the selection kept; a non-git agent's
+#                                 view says so; Primary hides the view)
 ```
 
 `npm run test:e2e` runs `test/e2e/run-all.js`, which executes every `m*.js`

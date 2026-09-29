@@ -532,6 +532,9 @@ function renderWorkContent() {
   const wsContent = document.getElementById("ws-content");
   const termContainer = document.getElementById("terminal-container");
   const notesContainer = document.getElementById("notes-container");
+  const changesContainer = document.getElementById("changes-container");
+  changesContainer.classList.remove("active");
+  if (activeTab !== "changes" || layoutMode !== "tabs") stopChangesPoll(changesContainer);
 
   // Stash cached artifacts to pool before cleaning up
   stashArtifacts();
@@ -570,6 +573,9 @@ function renderWorkContent() {
     } else if (activeTab === "notes") {
       notesContainer.classList.add("active");
       loadNotes();
+    } else if (activeTab === "changes") {
+      changesContainer.classList.add("active");
+      renderChangesView(changesContainer, s);
     } else if (activeTab.startsWith("artifact:") || activeTab.startsWith("file:")) {
       showArtifactInContainer(artContainer, s, activeTab);
     } else if (activeTab.startsWith("shell:")) {
@@ -625,7 +631,8 @@ function renderWorkContent() {
         wrap.className = "split-pane-wrap";
         const pane = document.createElement("div");
         pane.className = "split-pane";
-        renderPaneContent(pane, tab.id, s);
+        if (tab.id === "changes") renderChangesView(pane, s);
+        else renderPaneContent(pane, tab.id, s);
         wrap.appendChild(pane);
         const x = document.createElement("div");
         x.className = "split-pane-close";
@@ -742,6 +749,9 @@ function getOpenTabs(session) {
 
   if (open.has("notes") || activeTab === "notes") {
     tabs.push({ id: "notes", label: "Notes" });
+  }
+  if (open.has("changes") || activeTab === "changes") {
+    tabs.push({ id: "changes", label: "Changes" });
   }
 
   artifacts.forEach((a, i) => {
@@ -1304,6 +1314,8 @@ function renderRightPanel() {
     x.addEventListener("click", (e) => { e.stopPropagation(); dismissCoreFile(x.dataset.coreDismiss); });
   });
 
+  const chgBtn = document.getElementById("af-changes-btn");
+  if (chgBtn) chgBtn.addEventListener("click", () => switchTab("changes"));
   const addBtn = document.getElementById("af-add-btn");
   if (addBtn) {
     addBtn.addEventListener("click", (e) => showArtifactPopover(e));
@@ -1454,6 +1466,80 @@ async function dismissCoreFile(path) {
   await fetchSessions();
   render();
 }
+// ── Changes view (tab "changes") ─────────────────────────────────────────
+// Git's picture of the agent's cwd, from /api/sessions/:id/changes: rows with
+// status, +/−, a dot for files this session's transcript wrote; a row opens
+// its unified diff under the list. Polled every few seconds while shown; the
+// selected file and scroll survive the refresh (the list is re-rendered only
+// when its content changed).
+const CHANGES_POLL_MS = 4000;
+const changesSel = {};   // sessionId → selected repo-relative path
+const changesPolls = new WeakMap(); // container → interval id
+function stopChangesPoll(el) { const t = changesPolls.get(el); if (t) { clearInterval(t); changesPolls.delete(el); } }
+function renderChangesView(el, s) {
+  stopChangesPoll(el);
+  if (!s) return;
+  const sessionId = s.id;
+  el.innerHTML = `<div class="chg"><div class="chg-hdr"><span class="chg-title">Changes</span><span class="chg-branch"></span><span class="chg-note"></span></div><div class="chg-list"><div class="chg-empty">Reading git status…</div></div><div class="chg-diff-wrap" hidden><div class="chg-diff-hdr"><span class="chg-diff-path"></span><span class="chg-diff-close" title="Close diff">×</span></div><pre class="chg-diff"></pre></div></div>`;
+  let lastKey = null;
+  const refresh = async () => {
+    if (!el.isConnected) { stopChangesPoll(el); return; }
+    let data;
+    try {
+      const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/changes`);
+      if (!r.ok) { el.querySelector(".chg-list").innerHTML = `<div class="chg-empty">${esc(r.status === 401 ? "Sign in with the token to see changes" : `could not read changes (HTTP ${r.status})`)}</div>`; return; }
+      data = await r.json();
+    } catch { return; }
+    if (!el.isConnected) return;
+    const key = JSON.stringify(data);
+    if (key === lastKey) return;
+    lastKey = key;
+    const branchEl = el.querySelector(".chg-branch"), noteEl = el.querySelector(".chg-note"), list = el.querySelector(".chg-list");
+    if (!data.root) {
+      branchEl.textContent = "";
+      noteEl.textContent = "";
+      list.innerHTML = `<div class="chg-empty">${esc(data.cwd || "this agent's directory")} is not inside a git repository</div>`;
+      return;
+    }
+    branchEl.textContent = data.branch ? `⎇ ${data.branch}` : "";
+    branchEl.title = data.root;
+    noteEl.textContent = data.error ? data.error : data.truncated ? `${data.total} files (showing ${data.files.length})` : `${data.total} file${data.total === 1 ? "" : "s"}`;
+    if (data.error) { list.innerHTML = `<div class="chg-empty chg-error">${esc(data.error)} — the change set is unknown, not empty</div>`; el.querySelector(".chg-diff-wrap").hidden = true; return; }
+    if (!data.files.length) { list.innerHTML = `<div class="chg-empty">Working tree clean — nothing differs from HEAD</div>`; el.querySelector(".chg-diff-wrap").hidden = true; return; }
+    const sel = changesSel[sessionId];
+    let html = "";
+    for (const f of data.files) {
+      const nums = f.add === null && f.del === null ? `<span class="chg-bin">binary</span>` : `${f.add ? `<span class="chg-add">+${f.add}</span>` : ""}${f.del ? `<span class="chg-del">−${f.del}</span>` : ""}`;
+      const name = f.path.split("/").pop(), dir = f.path.includes("/") ? f.path.slice(0, f.path.lastIndexOf("/") + 1) : "";
+      html += `<div class="chg-row${sel === f.path ? " sel" : ""}" data-chg-path="${esc(f.path)}" title="${esc(f.path)}${f.from ? ` (was ${esc(f.from)})` : ""} — ${f.status}${f.touched ? ", written by this session" : ""}"><span class="chg-st chg-st-${f.status}">${esc(f.status[0].toUpperCase())}</span><span class="chg-path"><span class="chg-dir">${esc(dir)}</span>${esc(name)}</span>${f.touched ? `<span class="chg-touched" title="This session wrote it">●</span>` : ""}<span class="chg-nums">${nums}</span></div>`;
+    }
+    list.innerHTML = html;
+    list.querySelectorAll(".chg-row").forEach((row) => row.addEventListener("click", () => { changesSel[sessionId] = row.dataset.chgPath; list.querySelectorAll(".chg-row").forEach((r) => r.classList.toggle("sel", r === row)); showDiff(row.dataset.chgPath); }));
+    if (sel && data.files.some((f) => f.path === sel)) showDiff(sel);
+    else if (sel) { delete changesSel[sessionId]; el.querySelector(".chg-diff-wrap").hidden = true; }
+  };
+  const showDiff = async (path) => {
+    const wrap = el.querySelector(".chg-diff-wrap"), pre = el.querySelector(".chg-diff");
+    wrap.hidden = false;
+    el.querySelector(".chg-diff-path").textContent = path;
+    let d;
+    try {
+      const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/changes/diff?path=${encodeURIComponent(path)}`);
+      d = r.ok ? await r.json() : { error: (await r.json().catch(() => ({}))).error || `HTTP ${r.status}` };
+    } catch (e) { d = { error: e.message }; }
+    if (changesSel[sessionId] !== path || !el.isConnected) return;
+    if (d.error) { pre.innerHTML = `<span class="chg-empty">${esc(d.error)}</span>`; return; }
+    const lines = (d.diff || "").split("\n");
+    pre.innerHTML = lines.map((l) => {
+      const cls = l.startsWith("+++") || l.startsWith("---") ? "chg-l-hdr" : l.startsWith("@@") ? "chg-l-hunk" : l.startsWith("+") ? "chg-l-add" : l.startsWith("-") ? "chg-l-del" : l.startsWith("diff ") || l.startsWith("index ") || l.startsWith("new file") || l.startsWith("deleted file") ? "chg-l-meta" : "";
+      return `<span class="${cls}">${esc(l)}</span>`;
+    }).join("\n") + (d.truncated ? `\n<span class="chg-l-meta">… diff truncated (over 512 KB)</span>` : "") + (!d.diff ? `<span class="chg-empty">no textual diff (binary, or identical to HEAD)</span>` : "");
+  };
+  el.querySelector(".chg-diff-close").addEventListener("click", () => { delete changesSel[sessionId]; el.querySelector(".chg-diff-wrap").hidden = true; el.querySelectorAll(".chg-row.sel").forEach((r) => r.classList.remove("sel")); });
+  refresh();
+  changesPolls.set(el, setInterval(refresh, CHANGES_POLL_MS));
+}
+
 function buildChangedSection(activeSession) {
   const f = activeSession.files;
   if (!f || !Array.isArray(f.changed) || !f.changed.length) return "";
@@ -1590,6 +1676,7 @@ function buildArtifactsSection(activeSession) {
   });
 
   html += `<div class="af-add" id="af-add-btn" tabindex="0">+ pin a file</div>`;
+  html += `<div class="af-add af-changes-btn" id="af-changes-btn" tabindex="0" title="What git sees in this agent's directory: changed files with +/− and a diff per file (read-only)">⎇ Changes</div>`;
 
 
   // Related agents section
