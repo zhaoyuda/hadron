@@ -175,6 +175,161 @@ export function readTranscriptSummary(file, cache) {
   return summary;
 }
 
+// ── Files the agent touched (tool_use blocks over the whole transcript) ──────
+// The file panel's "Changed" section: every Edit/Write/MultiEdit/NotebookEdit
+// call in the transcript (sidechain included — a subagent's edit is the
+// agent's edit) is a write to that path, every Read a read. Attribution is per
+// session, so agents sharing a cwd are told apart — git status in the cwd
+// cannot do that. Only tool calls with a `file_path`/`notebook_path` count;
+// Bash is lossy and ignored.
+//
+// Unlike the summary, this reads the WHOLE file, once, then only what claude
+// appended: `cache.filesOffset` is the byte cursor, a shrunken file (claude
+// rewrote it after /compact? never observed, but cheap to honour) restarts
+// from zero. At most FILES_CHUNK_BYTES per call so a 100 MB transcript at
+// boot costs a few polls, not one long stall — `complete` says whether the
+// cursor has reached the end. Lines without a tool_use are skipped before
+// JSON.parse (the bulk of a transcript). Entries are capped at FILES_MAX:
+// past it the read-only entry with the oldest activity goes first.
+export const FILES_CHUNK_BYTES = 8 * 1024 * 1024;
+// A single record longer than the chunk is read whole up to this (a tool_use
+// is model output, so a few hundred KB at most; the multi-MB lines are
+// tool_result carriers, which count for nothing here). Past it the line is
+// skipped and the result says so (`skipped`) — never silently.
+export const FILES_MAX_LINE = 32 * 1024 * 1024;
+export const FILES_MAX = 500;
+export const FILES_WIRE = 50; // changed files on the session list; the rest via /files
+const WRITE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+const READ_TOOLS = new Set(["Read"]);
+
+// Pure: fold the tool_use blocks of `records` into `files` (Map path → entry
+//   { path, writes, reads, lastAt, lastWriteAt, lastTool }).
+export function collectFileOps(records, files) {
+  for (const rec of records) {
+    if (!rec || rec.type !== "assistant") continue;
+    const c = rec.message?.content;
+    if (!Array.isArray(c)) continue;
+    const at = typeof rec.timestamp === "string" && Number.isFinite(Date.parse(rec.timestamp)) ? rec.timestamp : null;
+    for (const b of c) {
+      if (!b || b.type !== "tool_use" || typeof b.name !== "string") continue;
+      const isWrite = WRITE_TOOLS.has(b.name), isRead = READ_TOOLS.has(b.name);
+      if (!isWrite && !isRead) continue;
+      const path = b.input && (typeof b.input.file_path === "string" ? b.input.file_path : typeof b.input.notebook_path === "string" ? b.input.notebook_path : null);
+      if (!path || !path.trim()) continue;
+      let e = files.get(path);
+      if (!e) {
+        if (files.size >= FILES_MAX) { evictOne(files); files.evicted = true; }
+        e = { path, writes: 0, reads: 0, lastAt: null, lastWriteAt: null, lastTool: null };
+        files.set(path, e);
+      }
+      if (isWrite) { e.writes++; e.lastWriteAt = at || e.lastWriteAt; } else e.reads++;
+      e.lastAt = at || e.lastAt;
+      e.lastTool = b.name;
+    }
+  }
+  return files;
+}
+function evictOne(files) {
+  let victim = null;
+  for (const e of files.values()) {
+    if (!victim || (e.writes === 0) > (victim.writes === 0) || ((e.writes === 0) === (victim.writes === 0) && String(e.lastAt || "") < String(victim.lastAt || ""))) victim = e;
+  }
+  if (victim) files.delete(victim.path);
+}
+
+function readRange(file, start, end) {
+  const len = end - start;
+  const buf = Buffer.alloc(len);
+  const fd = openSync(file, "r");
+  try {
+    let off = 0;
+    while (off < len) {
+      const n = readSync(fd, buf, off, len - off, start + off);
+      if (n <= 0) break;
+      off += n;
+    }
+    return buf.subarray(0, off);
+  } finally { closeSync(fd); }
+}
+
+// Incremental reader. `cache` is the same per-agent object the summary reader
+// uses (distinct keys): { filesOffset, filesIno, filesMap, filesSkipped,
+// filesWideAt, filesResult }. Returns { files: entries (any order), complete,
+// skipped (boolean: at least one record was too long to read), evicted } or
+// null when the file is unreadable. A torn over-long tail (no newline within
+// FILES_MAX_LINE of the cursor, EOF reached) is re-read only once the file
+// grows past the size it was seen at (filesWideAt) — a SIGKILLed claude can
+// leave one forever, and every poll would otherwise re-read up to 32 MB. One stat when nothing
+// changed. A `chunkBytes` below FILES_CHUNK_BYTES (the caller's budget
+// residue) never skips a line: a chunk it cannot end on a newline waits for
+// a full-size one.
+export function readTranscriptFiles(file, cache, { chunkBytes = FILES_CHUNK_BYTES } = {}) {
+  let st;
+  try { st = statSync(file); } catch { cache.filesOffset = 0; cache.filesMap = undefined; cache.filesResult = null; return null; }
+  // Restart from zero on a file that shrank or was replaced (a rename over
+  // the path changes the inode; a rewrite in place at ≥ the old size is the
+  // one shape this cannot see — claude appends, never rewrites, in practice).
+  if (!(cache.filesMap instanceof Map) || st.size < (cache.filesOffset || 0) || (cache.filesIno !== undefined && cache.filesIno !== st.ino)) {
+    cache.filesMap = new Map();
+    cache.filesOffset = 0;
+    cache.filesSkipped = 0;
+    cache.filesWideAt = undefined;
+    cache.filesResult = undefined;
+  }
+  cache.filesIno = st.ino;
+  if (st.size === cache.filesOffset && cache.filesResult) return cache.filesResult;
+  const start = cache.filesOffset;
+  let end = Math.min(st.size, start + chunkBytes);
+  let buf;
+  try { buf = readRange(file, start, end); } catch { cache.filesResult = null; return null; }
+  // Stop at the last newline: a torn tail is claude mid-write, read next time.
+  let cut = buf.lastIndexOf(10);
+  if (cut >= 0) cut += 1;
+  else if (end >= st.size || chunkBytes < FILES_CHUNK_BYTES) cut = 0; // torn tail, or a budget-sized slice: wait
+  else if (cache.filesWideAt !== undefined && st.size <= cache.filesWideAt) cut = 0; // torn over-long tail already seen at this size: wait for growth
+  else {
+    // One record longer than a full chunk: read it whole up to FILES_MAX_LINE
+    // (its newline is the first one past `end`), else skip it and say so.
+    try {
+      const wide = readRange(file, start, Math.min(st.size, start + FILES_MAX_LINE));
+      const nl = wide.indexOf(10, buf.length);
+      if (nl >= 0) { buf = wide; end = start + wide.length; cut = nl + 1; cache.filesWideAt = undefined; }
+      else if (start + wide.length >= st.size) { cut = 0; cache.filesWideAt = st.size; } // still no newline before EOF: torn, wait
+      else { cut = wide.length; cache.filesSkipped = (cache.filesSkipped || 0) + 1; buf = Buffer.alloc(0); }
+    } catch { cache.filesResult = null; return null; }
+  }
+  if (cut > 0 && buf.length) {
+    const text = buf.toString("utf-8", 0, cut);
+    const lines = text.split("\n").filter((l) => l.includes('"tool_use"'));
+    collectFileOps(parseRecords(lines.join("\n")), cache.filesMap);
+  }
+  cache.filesOffset = start + cut;
+  // A torn last line (no trailing newline yet) leaves the cursor before it:
+  // not complete until claude finishes the record.
+  const complete = cache.filesOffset >= st.size;
+  cache.filesResult = { files: [...cache.filesMap.values()], complete, skipped: cache.filesSkipped > 0, evicted: cache.filesMap.evicted === true };
+  return cache.filesResult;
+}
+
+// The session-list form: files written, newest write first, FILES_WIRE of
+// them; `total` is how many written files the session knows; `complete`
+// whether the transcript has been read to its end (a fresh boot on a long
+// session catches up over a few polls); `truncated` when entries were evicted
+// past FILES_MAX (the list was capped), `partial` when a record was too long
+// to read (some writes may be missing) — two different things to tell the
+// operator, so two optional bits.
+export function filesWire(f) {
+  if (!f) return null;
+  const changed = f.files.filter((e) => e.writes > 0).sort((a, b) => String(b.lastWriteAt || "").localeCompare(String(a.lastWriteAt || "")));
+  return {
+    changed: changed.slice(0, FILES_WIRE).map(({ path, writes, reads, lastWriteAt, lastAt }) => ({ path, writes, reads, lastWriteAt, lastAt })),
+    total: changed.length,
+    complete: f.complete,
+    ...(f.evicted ? { truncated: true } : {}),
+    ...(f.skipped ? { partial: true } : {}),
+  };
+}
+
 // The session-list form: first WIRE_TEXT chars of prompt/reply (a card shows
 // one line; the full text is one request away for the agent on screen).
 export function transcriptWire(t) {

@@ -892,6 +892,13 @@ html, body {
 .art-browse-addcur:hover { color: var(--blue); border-color: var(--blue); }
 .art-url-error { font-size: 10px; color: var(--red); min-height: 12px; margin-top: 4px; }
 
+/* ── Changed (files the session wrote, from its transcript) ── */
+.af-changed .af-group-hdr { font-weight: 600; text-transform: uppercase; letter-spacing: .7px; color: var(--text3); background: var(--bg); }
+.af-changed .af-group-hdr:hover { color: var(--text); }
+.af-changed .af-group-body { padding-left: 0; }
+.af-changed .af-group-body .af { padding-left: 14px; }
+.af-sub { margin-left: auto; flex-shrink: 0; font-size: 9px; color: var(--text3); padding-left: 6px; }
+
 /* ── Dir artifacts (live folder groups) ── */
 .af-group-hdr .af-rm { opacity: 0; margin-left: 4px; }
 .af-group-hdr:hover .af-rm { opacity: 1; }

@@ -1375,8 +1375,36 @@ function renderRightPanel() {
   }
 }
 
+// Sentinel key in collapsedArtFolders for the Changed section (never a real dir).
+const CHANGED_GROUP = "//changed";
+
+// "Changed · N": files this agent's claude session wrote (server `files`,
+// from the transcript's Edit/Write tool calls — attributed per session, so
+// two agents in one cwd are told apart). Newest write first, path relative to
+// the agent's cwd, writes count + age on the right; a click opens the file as
+// an ephemeral tab, nothing is pinned. Absent until the session has written
+// something; "…" on the header while a long transcript is still being read.
+function buildChangedSection(activeSession) {
+  const f = activeSession.files;
+  if (!f || !Array.isArray(f.changed) || !f.changed.length) return "";
+  const cwd = activeSession.cwd ? activeSession.cwd.replace(/\/+$/, "") + "/" : null;
+  const collapsed = (collapsedArtFolders[activeSession.id] || new Set()).has(CHANGED_GROUP);
+  let html = `<div class="af-group af-changed${collapsed ? "" : " open"}" data-af-dir="${CHANGED_GROUP}">`;
+  html += `<div class="af-group-hdr"><span class="af-arrow">&#9654;</span> <span class="af-label">Changed</span><span class="af-count" title="${f.total} file${f.total === 1 ? "" : "s"} written this session${f.truncated ? " (at least — the list was capped)" : ""}${f.partial ? " (a record was too large to read — some writes may be missing)" : ""}${f.complete ? "" : " (still reading the transcript)"}">${f.total}${f.truncated || f.partial ? "+" : ""}${f.complete ? "" : "…"}</span></div>`;
+  html += `<div class="af-group-body">`;
+  f.changed.forEach((e) => {
+    const rel = cwd && e.path.startsWith(cwd) ? e.path.slice(cwd.length) : e.path;
+    const name = e.path.split("/").pop();
+    const age = timeAgo(e.lastWriteAt);
+    html += `<div class="af af-file-eph af-changed-row" data-file-path="${esc(e.path)}" title="${esc(e.path)}\n${e.writes} write${e.writes === 1 ? "" : "s"}${e.reads ? `, ${e.reads} read${e.reads === 1 ? "" : "s"}` : ""}"><span class="af-i">${fileIcon(name, 15)}</span><span class="af-label">${esc(rel)}</span><span class="af-sub">${e.writes > 1 ? `${e.writes}× ` : ""}${esc(age)}</span></div>`;
+  });
+  html += `</div></div>`;
+  return html;
+}
+
 function buildArtifactsSection(activeSession) {
-  let html = `<div class="rp-hdr">Artifacts</div>`;
+  let html = buildChangedSection(activeSession);
+  html += `<div class="rp-hdr">Artifacts</div>`;
   const artifacts = activeSession.artifacts || [];
 
   // ── Dir artifacts (type "dir"): live folder groups ──

@@ -20,7 +20,7 @@ import { tmux, tmuxSafe, isValidId, shellQuoteArgv, tmuxArgv } from "./tmux.js";
 import { findRegistrySession, findTmuxlessRecordFor, classifyTmuxless, readRegistry, processIdentity, parentPid, REGISTRY_ROOT, REGISTRY_STATUSES, REGISTRY_TMUX_SINCE } from "./session-registry.js";
 import { syncSkills } from "./skills.js";
 import { collectProvenance } from "./provenance.js";
-import { transcriptPath, readTranscriptSummary, transcriptWire, CONTEXT_WINDOW } from "./transcript.js";
+import { transcriptPath, readTranscriptSummary, transcriptWire, CONTEXT_WINDOW, readTranscriptFiles, filesWire, FILES_CHUNK_BYTES, FILES_MAX_LINE } from "./transcript.js";
 import { warnOnce } from "./log.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { readQuota } from "./quota.js";
@@ -821,6 +821,22 @@ app.get("/api/sessions/:id/transcript", (req, res) => {
   res.json(s.transcript || null);
 });
 
+// Every file the agent's session touched (the list carries FILES_WIRE changed
+// ones): { files: [{ path, writes, reads, lastAt, lastWriteAt, lastTool }],
+// complete } — paths resolved like artifacts. Token-gated like the transcript.
+app.get("/api/sessions/:id/files", (req, res) => {
+  if (!tokenPresent(req)) return res.status(401).json({ error: "invalid or missing token" });
+  const s = sessions.get(req.params.id);
+  if (!s || s.archived) return res.status(404).json({ error: "agent not found" });
+  if (!s.files) return res.json(null);
+  res.json({ files: s.files.files.map((e) => ({ ...e, path: sessionFilePath(s, e.path) })), complete: s.files.complete });
+});
+// A tool_use path is what claude was given — absolute in practice; a relative
+// one is against the agent's cwd, never the workspace.
+function sessionFilePath(s, p) {
+  return p.startsWith("/") ? p : p.startsWith("~") ? resolveFilePath(p) : resolve(s.cwd || WORKSPACE, p);
+}
+
 // The wire form of a session: stored artifact values are canonical (workspace-
 // relative when under the workspace — see canonicalArtifactPath), the client always
 // sees them resolved to absolute. Every endpoint that hands a session (or its
@@ -856,11 +872,18 @@ function contextWire(s) {
   return null;
 }
 function resolvedSession(s, { withTranscript = false } = {}) {
-  const { transcript, contextPct, ...rest } = s;
+  const { transcript, contextPct, files, ...rest } = s;
   const context = contextWire(s);
+  const fw = withTranscript && files ? filesWire(files) : null;
   return {
     ...rest,
     ...(withTranscript && transcript ? { transcript: transcriptWire(transcript) } : {}),
+    // `files` (what the session edited — file paths, not conversation, but
+    // still the agent's private business): token-bearing readers only. A path
+    // is whatever claude was given; an agent that Reads a transcript under
+    // ~/.claude/projects puts that session's id on this reader's wire — the
+    // same reader can fetch the whole transcript, so nothing new is exposed.
+    ...(fw ? { files: { ...fw, changed: fw.changed.map((e) => ({ ...e, path: sessionFilePath(s, e.path) })) } } : {}),
     // The open GET gets the badge (pct + colour), the token-bearing one the arithmetic too.
     ...(context ? { context: withTranscript ? context : { pct: context.pct, source: context.source, level: context.level } } : {}),
     artifacts: (s.artifacts || []).map(a => ({
@@ -2220,14 +2243,29 @@ function stopMonitor(sessionId) {
 // as `transcript` on the wire form, never persisted, no session id inside.
 // One stat per agent per poll; the tail is re-read only when the file changed.
 const TRANSCRIPT_POLL_MS = 3000;
-const transcriptCaches = new Map(); // agent id -> { file, size, mtimeMs, summary }
+const transcriptCaches = new Map(); // agent id -> { file, size, mtimeMs, summary, files* }
+// Catching up on long transcripts (the files reader, ~6 ms/MB) is spread over
+// polls: this many bytes per tick across ALL agents, so a boot with twenty
+// 100 MB sessions costs ~100 ms per tick for a while, never one long stall.
+const FILES_POLL_BUDGET = 16 * 1024 * 1024;
+// A slice under this is not offered to the files reader (it would only wait
+// on it); the walk starts one agent later each tick so catch-up is fair, not
+// positional — with N long transcripts at boot every agent gets a full chunk
+// within N/2 ticks.
+const FILES_MIN_CHUNK = 1024 * 1024;
+let filesPollStart = 0;
 function pollTranscripts() {
-  for (const id of monitors.keys()) {
+  let budget = FILES_POLL_BUDGET;
+  const ids = [...monitors.keys()];
+  const first = ids.length ? filesPollStart++ % ids.length : 0;
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[(first + i) % ids.length];
     const s = sessions.get(id);
     if (!s) { transcriptCaches.delete(id); continue; }
     const sid = s.runtime?.sessionId;
     if (s.archived || !s.cwd || typeof sid !== "string" || !UUID_RE.test(sid)) {
       delete s.transcript;
+      delete s.files;
       transcriptCaches.delete(id);
       continue;
     }
@@ -2235,6 +2273,18 @@ function pollTranscripts() {
     let c = transcriptCaches.get(id);
     if (!c || c.file !== file) { c = { file }; transcriptCaches.set(id, c); }
     const summary = readTranscriptSummary(file, c);
+    // Files the session touched (Changed section of the file panel) — same
+    // file, same cache object, runtime-only like `transcript`, its own reader
+    // (a null summary and a null files list both mean "unreadable").
+    if (budget >= FILES_MIN_CHUNK) {
+      const before = c.filesOffset || 0;
+      const files = readTranscriptFiles(file, c, { chunkBytes: Math.min(FILES_CHUNK_BYTES, budget) });
+      budget -= (c.filesOffset || 0) - before;
+      if (files) s.files = files; else delete s.files;
+      // Silent-failure rule: a record too long to read is skipped, the list
+      // is a floor from then on (`truncated` on the wire) — say so once.
+      if (files && files.skipped) warnOnce(`transcript-files:${id}`, `[${id}] a transcript record longer than ${FILES_MAX_LINE >> 20} MB was skipped — the Changed list is a floor`);
+    } // budget spent: the last picture stands until the next poll
     if (summary) { s.transcript = summary; continue; }
     delete s.transcript;
     // Silent-failure rule: a checkpointed session whose transcript can't be read

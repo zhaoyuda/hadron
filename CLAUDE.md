@@ -49,7 +49,7 @@ scripts/
   setup-workspace.js  # Interactive workspace initializer
 test/
   unit/               # detectState/nextState fixtures + security HTTP suite (npm test)
-  e2e/                # Playwright browser modules M1-M25 (npm run test:e2e)
+  e2e/                # Playwright browser modules M1-M26 (npm run test:e2e)
 ```
 
 ## Conventions
@@ -241,7 +241,15 @@ npm test
 #                            (`transcript` on /api/sessions only for a token-bearing GET and only for an
 #                            adopted/correlated session id, absent for a shell agent; full text at
 #                            /api/sessions/:id/transcript, 401 without token; doctor row transcriptPreview)
-#                            is in test-doctor.js)
+#                            is in test-doctor.js). Files the session touched (collectFileOps: Edit/Write/
+#                            MultiEdit/NotebookEdit `file_path`/`notebook_path` are writes, Read a read, sidechain
+#                            included, Bash/Glob/empty paths nothing; readTranscriptFiles: whole-file cursor in
+#                            chunks that stop at a newline, a torn tail waits, a budget-sized slice that cannot
+#                            end on a newline waits too (never skips), a record longer than a chunk is read whole
+#                            up to FILES_MAX_LINE and past that skipped + reported (`skipped`, warnOnce in the
+#                            server), a shrunken or renamed-over file (inode) restarts, a malformed timestamp is
+#                            null, FILES_MAX evicts the oldest read-only entry first and flags `evicted`; filesWire:
+#                            written files newest first, FILES_WIRE on the list + total + complete + truncated)
 #   + test-quota.js         (quota widget — server/quota.js readers: claude's statusline receipt (allowlisted
 #                            five_hour/seven_day only, never the session id; atomic write, rewritten on change or
 #                            after 5 min), codex's rollouts newest-first by mtime across day dirs (last `rate_limits`
@@ -349,6 +357,14 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                                 long session), no correcting resize frame follows a connect (framesent captured),
 #                                 one connect per switch, and each tmux window keeps its own size across the
 #                                 switches = fitted xterm minus the status-line rows)
+#   + test/e2e/m26-changed-files.js (file panel "Changed": seeded transcripts (CLAUDE_CONFIG_DIR relocated) for two
+#                                 agents in ONE cwd → each panel lists its own session's written files newest first,
+#                                 relative to the cwd, "2× 2m" write count + age, a Read-only file absent, a sidechain
+#                                 write present; a row click opens an ephemeral file: tab and creates no artifact; an
+#                                 Edit appended to the transcript lands on top within poll + refresh; the collapse
+#                                 survives the 3-s refresh; `files` rides /api/sessions for a token-bearing GET only,
+#                                 /api/sessions/:id/files carries reads too and is 401 without the token; a shell agent
+#                                 has none; nothing on disk, no session id on the wire)
 ```
 
 `npm run test:e2e` runs `test/e2e/run-all.js`, which executes every `m*.js`
@@ -399,7 +415,7 @@ staging first:
    changes.
 2. `npm test` + `npm run test:e2e` in the worktree. The runner reports M10 as
    `XFAIL` (known headless-chromium clipboard issue, fails identically on main)
-   and exits 0 when it's the only failure — so a green run means M1–M9, M11–M25
+   and exits 0 when it's the only failure — so a green run means M1–M9, M11–M26
    all passed. Any `FAIL` (non-xfail) gates the branch.
 3. `scripts/predeploy-check.sh` — live-fire proof on staging that a service
    restart does NOT interrupt running agents (claude PIDs survive, a

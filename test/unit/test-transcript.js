@@ -13,8 +13,8 @@
  *
  * Run: node test/unit/test-transcript.js
  */
-import { parseRecords, summarizeRecords, readTranscriptSummary, transcriptPath, transcriptWire, contextWindowFor, MAX_TEXT, TAIL_BYTES, WIRE_TEXT, CONTEXT_WINDOW, CONTEXT_WINDOW_1M } from "../../server/transcript.js";
-import { mkdtempSync, writeFileSync, rmSync, appendFileSync } from "fs";
+import { parseRecords, summarizeRecords, readTranscriptSummary, transcriptPath, transcriptWire, contextWindowFor, collectFileOps, readTranscriptFiles, filesWire, MAX_TEXT, TAIL_BYTES, WIRE_TEXT, CONTEXT_WINDOW, CONTEXT_WINDOW_1M, FILES_MAX, FILES_WIRE, FILES_CHUNK_BYTES, FILES_MAX_LINE } from "../../server/transcript.js";
+import { mkdtempSync, writeFileSync, rmSync, appendFileSync, openSync, writeSync, closeSync, statSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -190,6 +190,144 @@ console.log("\n[transcriptWire — session-list form]");
   const ctx = { tokens: 129063, window: CONTEXT_WINDOW, at: T(2) };
   ok(JSON.stringify(transcriptWire({ ...w, context: ctx }).context) === JSON.stringify(ctx), "context rides the wire form unchanged");
   ok(transcriptWire({ title: null, lastPrompt: null, lastReply: null, lastActivityAt: T(1) }).context === null, "…and is null (present) when the summary has none");
+}
+
+console.log("\n[collectFileOps — files the session touched]");
+{
+  const tool = (name, input, i, extra = {}) => ({ type: "assistant", sessionId: SID, timestamp: T(i), message: { id: `m${i}`, role: "assistant", content: [{ type: "tool_use", id: `t${i}`, name, input }] }, ...extra });
+  const m = collectFileOps([
+    tool("Read", { file_path: "/w/a.js" }, 1),
+    tool("Edit", { file_path: "/w/a.js", old_string: "x", new_string: "y" }, 2),
+    tool("Write", { file_path: "/w/b.md", content: "hi" }, 3),
+    tool("MultiEdit", { file_path: "/w/a.js", edits: [] }, 4, { isSidechain: true }),
+    tool("NotebookEdit", { notebook_path: "/w/n.ipynb", new_source: "" }, 5),
+    tool("Bash", { command: "git checkout -- /w/c.js && touch /w/d" }, 6),
+    tool("Glob", { pattern: "**/*.js" }, 7),
+    tool("Edit", { file_path: "" }, 8),
+    tool("Edit", {}, 9),
+    { type: "user", timestamp: T(10), message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t2", content: "ok" }] } },
+    tool("Read", { file_path: "/w/a.js" }, 11),
+  ], new Map());
+  const a = m.get("/w/a.js");
+  ok(a && a.writes === 2 && a.reads === 2 && a.lastWriteAt === T(4) && a.lastAt === T(11) && a.lastTool === "Read", `Read/Edit/MultiEdit on one path fold into writes 2, reads 2, lastWriteAt of the MultiEdit, lastAt of the last Read (${JSON.stringify(a)})`);
+  ok(m.get("/w/b.md")?.writes === 1 && m.get("/w/b.md").reads === 0, "Write counts as a write");
+  ok(m.get("/w/n.ipynb")?.writes === 1, "NotebookEdit's notebook_path counts as a write");
+  ok(m.size === 3, `Bash, Glob, an empty or missing file_path and tool_result carriers add nothing (${[...m.keys()].join(", ")})`);
+  ok(!JSON.stringify([...m.values()]).includes(SID), "no session id in the entries");
+  // Cap: past FILES_MAX the read-only entry with the oldest activity goes first.
+  const big = new Map();
+  for (let i = 0; i < FILES_MAX; i++) collectFileOps([tool(i % 2 ? "Edit" : "Read", { file_path: `/f/${i}` }, i)], big);
+  collectFileOps([tool("Write", { file_path: "/f/new" }, FILES_MAX + 1)], big);
+  ok(big.size === FILES_MAX && big.has("/f/new") && !big.has("/f/0") && big.has("/f/1"), `FILES_MAX cap evicts the oldest read-only entry (/f/0), keeps the written one beside it (${big.size})`);
+  ok(big.evicted === true && m.evicted === undefined, "…and the map is flagged evicted (the count is a floor from then on); an uncapped map is not");
+  const bad = collectFileOps([tool("Edit", { file_path: "/w/x" }, 1, { timestamp: "not a date" })], new Map());
+  ok(bad.get("/w/x").lastAt === null && bad.get("/w/x").lastWriteAt === null && bad.get("/w/x").writes === 1, "a malformed timestamp is dropped (null), the write still counts");
+}
+
+console.log("\n[readTranscriptFiles — incremental whole-file cursor]");
+{
+  const { mkdirSync } = await import("fs");
+  const dir = mkdtempSync(join(tmpdir(), "hadron-transcript-files-"));
+  const file = join(dir, `${SID}.jsonl`);
+  const tool = (name, path, i) => JSON.stringify({ type: "assistant", sessionId: SID, timestamp: T(i), message: { id: `m${i}`, role: "assistant", content: [{ type: "tool_use", id: `t${i}`, name, input: { file_path: path } }] } });
+  const cache = {};
+  ok(readTranscriptFiles(file, cache) === null, "missing file → null (no throw)");
+  writeFileSync(file, [JSON.stringify(user("go", 0)), tool("Edit", "/w/a.js", 1), tool("Read", "/w/b.js", 2)].join("\n") + "\n");
+  let f = readTranscriptFiles(file, cache);
+  ok(f && f.complete && f.files.length === 2 && f.files.find((e) => e.path === "/w/a.js").writes === 1, "fresh file read whole: complete, two files");
+  const same = readTranscriptFiles(file, cache);
+  ok(same === f, "unchanged file → the cached result object (one stat, no read)");
+  // A torn last line (claude mid-write): not consumed, not complete, then whole once finished.
+  appendFileSync(file, tool("Write", "/w/c.md", 3).slice(0, 40));
+  f = readTranscriptFiles(file, cache);
+  ok(f && !f.complete && f.files.length === 2, "torn tail is left for next time: not complete, nothing counted");
+  appendFileSync(file, tool("Write", "/w/c.md", 3).slice(40) + "\n");
+  f = readTranscriptFiles(file, cache);
+  ok(f && f.complete && f.files.find((e) => e.path === "/w/c.md")?.writes === 1, "…and counted once the newline lands, from the cursor only");
+  // Chunking: a small chunk takes several calls and lands on line boundaries.
+  const many = []; for (let i = 10; i < 60; i++) many.push(tool("Edit", `/w/${i}.js`, i));
+  appendFileSync(file, many.join("\n") + "\n");
+  const fresh = {};
+  let calls = 0, r;
+  do { r = readTranscriptFiles(file, fresh, { chunkBytes: 1500 }); calls++; } while (r && !r.complete && calls < 200);
+  ok(r && r.complete && calls > 3 && r.files.length === 53 && r.files.every((e) => e.writes + e.reads > 0), `1.5 KB chunks: complete after ${calls} calls, every line counted exactly once (${r.files.length} files)`);
+  ok(r.files.find((e) => e.path === "/w/a.js").writes === 1, "…no double counting across chunk boundaries");
+  // Truncation (file rewritten shorter) restarts from zero.
+  writeFileSync(file, tool("Edit", "/w/only.js", 1) + "\n");
+  f = readTranscriptFiles(file, cache);
+  ok(f && f.complete && f.files.length === 1 && f.files[0].path === "/w/only.js", "a shrunken file restarts the scan from zero");
+  // A budget-sized slice (below FILES_CHUNK_BYTES) that cannot end on a
+  // newline waits — it never skips a record that a full chunk would read.
+  writeFileSync(file, tool("Write", "/w/big.txt".padEnd(1500, "x"), 1) + "\n" + tool("Edit", "/w/after.js", 2) + "\n");
+  const slice = {};
+  r = readTranscriptFiles(file, slice, { chunkBytes: 1000 });
+  ok(r && !r.complete && r.files.length === 0 && slice.filesOffset === 0, "a 1 KB slice on a 1.5 KB record: nothing consumed, not complete");
+  r = readTranscriptFiles(file, slice);
+  ok(r && r.complete && r.files.length === 2 && r.skipped === false, "…a full chunk later reads both records");
+  // A record longer than a full chunk is read whole (up to FILES_MAX_LINE)…
+  const long = JSON.stringify({ type: "assistant", timestamp: T(3), message: { role: "assistant", content: [{ type: "tool_use", id: "t", name: "Write", input: { file_path: "/w/huge.bin", content: "y".repeat(FILES_CHUNK_BYTES + 100) } }] } });
+  writeFileSync(file, long + "\n" + tool("Edit", "/w/after.js", 4) + "\n");
+  const huge = {}; calls = 0;
+  do { r = readTranscriptFiles(file, huge); calls++; } while (r && !r.complete && calls < 10);
+  ok(r && r.complete && r.files.map((e) => e.path).sort().join() === "/w/after.js,/w/huge.bin" && r.skipped === false, `a Write longer than FILES_CHUNK_BYTES is read whole and counted (${calls} calls, ${r?.files.length} files)`);
+  // …and past FILES_MAX_LINE it is skipped, with `skipped` saying so.
+  const fd = openSync(file, "w");
+  writeSync(fd, '{"type":"user","message":{"content":"');
+  const filler = Buffer.alloc(1 << 20, 0x7a);
+  for (let i = 0; i < (FILES_MAX_LINE >> 20) + 1; i++) writeSync(fd, filler);
+  writeSync(fd, '"}\n' + tool("Edit", "/w/after.js", 5) + "\n");
+  closeSync(fd);
+  const skip = {}; calls = 0;
+  do { r = readTranscriptFiles(file, skip); calls++; } while (r && !r.complete && calls < 20);
+  ok(r && r.complete && r.skipped === true && r.files.length === 1 && r.files[0].path === "/w/after.js", `a line past FILES_MAX_LINE is skipped, reported (skipped=${r?.skipped}), and the next line still counts (${calls} calls)`);
+  {
+    const w = filesWire(r), clean = filesWire({ files: [], complete: true, skipped: false, evicted: false });
+    ok(w.partial === true && w.truncated === undefined && clean.partial === undefined && clean.truncated === undefined, "…the wire form says partial (not truncated — nothing was capped); a clean read says neither");
+    ok(filesWire({ files: [], complete: true, skipped: false, evicted: true }).truncated === true && filesWire({ files: [], complete: true, skipped: false, evicted: true }).partial === undefined, "eviction is truncated, not partial");
+  }
+  // A torn over-long tail (a full chunk with no newline, EOF within
+  // FILES_MAX_LINE, no newline there either — a SIGKILLed claude) is re-read
+  // only when the file grows, never on every poll.
+  {
+    const fd2 = openSync(file, "w");
+    for (let i = 0; i < (FILES_CHUNK_BYTES >> 20) + 2; i++) writeSync(fd2, filler);
+    closeSync(fd2);
+    const torn = {};
+    r = readTranscriptFiles(file, torn);
+    ok(r && !r.complete && torn.filesOffset === 0 && torn.filesWideAt === statSync(file).size, "a torn over-long tail waits and remembers the size it was seen at");
+    const seenAt = torn.filesWideAt;
+    r = readTranscriptFiles(file, torn);
+    ok(r && !r.complete && torn.filesOffset === 0 && torn.filesWideAt === seenAt, "…an unchanged file is not re-read wide again (gate holds at the same size)");
+    appendFileSync(file, "\n" + tool("Edit", "/w/after.js", 6) + "\n");
+    calls = 0;
+    do { r = readTranscriptFiles(file, torn); calls++; } while (r && !r.complete && calls < 20);
+    ok(r && r.complete && r.files.length === 1 && r.files[0].path === "/w/after.js" && torn.filesWideAt === undefined, `…and the record that completed the tail is consumed (${calls} calls, skipped=${r?.skipped})`);
+  }
+  // A file replaced under the same path (new inode, not smaller) restarts.
+  writeFileSync(file, tool("Edit", "/w/one.js", 1) + "\n" + tool("Edit", "/w/two.js", 2) + "\n");
+  const repl = {};
+  r = readTranscriptFiles(file, repl);
+  ok(r && r.files.length === 2, "baseline: two files");
+  const tmp = file + ".new";
+  writeFileSync(tmp, tool("Edit", "/w/three.js", 3) + "\n" + tool("Edit", "/w/four.js", 4) + "\n" + tool("Read", "/w/five.js", 5) + "\n");
+  (await import("fs")).renameSync(tmp, file);
+  r = readTranscriptFiles(file, repl);
+  ok(r && r.complete && r.files.map((e) => e.path).sort().join() === "/w/five.js,/w/four.js,/w/three.js", `a rename over the path (larger file, new inode) restarts the scan — no stale entries (${r?.files.map((e) => e.path).join()})`);
+  rmSync(dir, { recursive: true, force: true });
+  ok(readTranscriptFiles(file, cache) === null && cache.filesOffset === 0, "deleted file → null, cursor reset");
+}
+
+console.log("\n[filesWire — session-list form]");
+{
+  const e = (path, writes, reads, i) => ({ path, writes, reads, lastAt: T(i), lastWriteAt: writes ? T(i) : null, lastTool: writes ? "Edit" : "Read" });
+  const files = [e("/r", 0, 3, 9), e("/old", 1, 0, 1), e("/new", 2, 1, 5)];
+  const w = filesWire({ files, complete: false });
+  ok(w.changed.map((x) => x.path).join() === "/new,/old" && w.total === 2 && w.complete === false, `written files only, newest write first, total counts them (${JSON.stringify(w)})`);
+  ok(!("lastTool" in w.changed[0]) && w.changed[0].writes === 2 && w.changed[0].reads === 1, "entry carries path/writes/reads/lastWriteAt/lastAt");
+  const lots = []; for (let i = 0; i < FILES_WIRE + 20; i++) lots.push(e(`/f${i}`, 1, 0, i % 60));
+  const w2 = filesWire({ files: lots, complete: true });
+  ok(w2.changed.length === FILES_WIRE && w2.total === FILES_WIRE + 20, `capped at FILES_WIRE on the wire, total says how many (${w2.total})`);
+  ok(filesWire(null) === null, "null-safe");
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
