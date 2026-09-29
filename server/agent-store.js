@@ -103,6 +103,8 @@ export function saveAgent(agent) {
   if (icon) data.icon = icon;
   if (pinned) data.pinned = true;
   if (parked) data.parked = true; // deck fold only — never implies archived
+  // Files hidden from the panel's Core section (paths); absent unless non-empty.
+  if (Array.isArray(agent.coreDismissed) && agent.coreDismissed.length) data.coreDismissed = agent.coreDismissed;
   if (sortOrder !== undefined && sortOrder !== null) data.sortOrder = sortOrder;
   if (archived) data.archived = true;
   if (archived && archivedAt) data.archivedAt = archivedAt;

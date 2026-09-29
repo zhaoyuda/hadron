@@ -13,7 +13,7 @@
  *
  * Run: node test/unit/test-transcript.js
  */
-import { parseRecords, summarizeRecords, readTranscriptSummary, transcriptPath, transcriptWire, contextWindowFor, collectFileOps, readTranscriptFiles, filesWire, MAX_TEXT, TAIL_BYTES, WIRE_TEXT, CONTEXT_WINDOW, CONTEXT_WINDOW_1M, FILES_MAX, FILES_WIRE, FILES_CHUNK_BYTES, FILES_MAX_LINE } from "../../server/transcript.js";
+import { parseRecords, summarizeRecords, readTranscriptSummary, transcriptPath, transcriptWire, contextWindowFor, collectFileOps, readTranscriptFiles, filesWire, coreScore, MAX_TEXT, TAIL_BYTES, WIRE_TEXT, CONTEXT_WINDOW, CONTEXT_WINDOW_1M, FILES_MAX, FILES_WIRE, FILES_CORE_WIRE, FILES_CHUNK_BYTES, FILES_MAX_LINE } from "../../server/transcript.js";
 import { mkdtempSync, writeFileSync, rmSync, appendFileSync, openSync, writeSync, closeSync, statSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -328,6 +328,20 @@ console.log("\n[filesWire — session-list form]");
   const w2 = filesWire({ files: lots, complete: true });
   ok(w2.changed.length === FILES_WIRE && w2.total === FILES_WIRE + 20, `capped at FILES_WIRE on the wire, total says how many (${w2.total})`);
   ok(filesWire(null) === null, "null-safe");
+  // Core: every touched file by heat (a write = three reads), ties by recency.
+  const core = filesWire({ files: [e("/read-only", 0, 3, 9), e("/one-write-old", 1, 0, 1), e("/one-write-new", 1, 0, 5), e("/hot", 2, 4, 2)], complete: true }).core;
+  ok(coreScore({ writes: 2, reads: 4 }) === 10 && coreScore({ writes: 0, reads: 3 }) === 3 && coreScore({}) === 0, "coreScore = 3·writes + reads");
+  ok(core.map((x) => x.path).join() === "/hot,/read-only,/one-write-new,/one-write-old", `core: heat first (3 reads = 1 write), ties by lastAt, a read-only file included (${core.map((x) => x.path).join()})`);
+  ok(core[0].reads === 4 && core[0].writes === 2 && typeof core[0].lastAt === "string" && !("lastTool" in core[0]), "core entry carries path/writes/reads/lastWriteAt/lastAt");
+  {
+    // Hidden files are dropped before the wire cap: hiding the top 40 of 45 leaves 5, not 0.
+    const many = Array.from({ length: 45 }, (_, i) => e(`/f${i}`, 45 - i, 0, 1));
+    const skip = new Set(many.slice(0, 40).map((x) => x.path));
+    const c = filesWire({ files: many, complete: true }, { coreSkip: (p) => skip.has(p) }).core;
+    ok(c.length === 5 && c[0].path === "/f40" && c.every((x) => !skip.has(x.path)), "coreSkip filters before the wire slice");
+  }
+  const w3 = filesWire({ files: lots, complete: true });
+  ok(w3.core.length === FILES_CORE_WIRE, `core capped at FILES_CORE_WIRE on the wire (${w3.core.length})`);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -892,12 +892,16 @@ html, body {
 .art-browse-addcur:hover { color: var(--blue); border-color: var(--blue); }
 .art-url-error { font-size: 10px; color: var(--red); min-height: 12px; margin-top: 4px; }
 
-/* ── Changed (files the session wrote, from its transcript) ── */
-.af-changed .af-group-hdr { font-weight: 600; text-transform: uppercase; letter-spacing: .7px; color: var(--text3); background: var(--bg); }
-.af-changed .af-group-hdr:hover { color: var(--text); }
-.af-changed .af-group-body { padding-left: 0; }
-.af-changed .af-group-body .af { padding-left: 14px; }
+/* ── Changed (files the session wrote) + Core (files it keeps returning to), from its transcript ── */
+.af-changed .af-group-hdr, .af-core .af-group-hdr { font-weight: 600; text-transform: uppercase; letter-spacing: .7px; color: var(--text3); background: var(--bg); }
+.af-changed .af-group-hdr:hover, .af-core .af-group-hdr:hover { color: var(--text); }
+.af-changed .af-group-body, .af-core .af-group-body { padding-left: 0; }
+.af-changed .af-group-body .af, .af-core .af-group-body .af { padding-left: 14px; }
 .af-sub { margin-left: auto; flex-shrink: 0; font-size: 9px; color: var(--text3); padding-left: 6px; }
+.af-also { flex-shrink: 0; font-size: 9px; color: var(--yellow, #d29922); padding-left: 4px; white-space: nowrap; }
+.af-core-pin { font-size: 10px; opacity: 0; cursor: pointer; margin-left: 4px; transition: opacity .1s; }
+.af-core-row:hover .af-core-pin { opacity: .7; }
+.af-core-pin:hover { opacity: 1 !important; }
 
 /* ── Dir artifacts (live folder groups) ── */
 .af-group-hdr .af-rm { opacity: 0; margin-left: 4px; }
@@ -2848,3 +2852,5 @@ mark.ann-mark.ann-mark-flash { background: rgba(210, 153, 34, .8); outline: 1px 
   word-break: break-word;
   line-height: 1.45;
 }
+
+.af-core-err { color: #f85149; font-weight: 700; margin-left: 6px; cursor: help; }

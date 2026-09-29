@@ -5,14 +5,14 @@ description: Attach your key output files to this Hadron agent so the user sees 
 
 # Attach Artifacts
 
-Artifacts are files linked to your agent and rendered in Hadron's right panel (Markdown preview, syntax-highlighted code, CSV tables, notebooks, URLs). Attaching your deliverables is how the user reviews your work without switching to your terminal.
+Artifacts are files pinned to your agent — the **Pinned** section of Hadron's right panel, under the automatic Changed/Core lists — rendered there (Markdown preview, syntax-highlighted code, CSV tables, notebooks, URLs). Attaching your deliverables is how the user reviews your work without switching to your terminal.
 
 ## Auto-discover and bulk-add
 
 The server scores files in your working directory by how likely they are to be a human-readable deliverable (your agent id in the filename, `.md`/`.html`/`.csv`/`.ipynb`, output keywords, `docs/`/`reports/` dirs — source and config files score low). Add everything with a positive score:
 
 ```bash
-hadron artifacts add --auto
+hadron artifacts pin --auto
 ```
 
 Review the printed list. If it grabbed something you didn't mean to share, that's fine — artifacts are cheap; the user can remove them in the UI.
@@ -20,7 +20,7 @@ Review the printed list. If it grabbed something you didn't mean to share, that'
 ## Add specific files
 
 ```bash
-hadron artifacts add report.md analysis/summary.csv
+hadron artifacts pin report.md analysis/summary.csv
 ```
 
 Paths are workspace-relative (or absolute). Duplicates are ignored automatically.

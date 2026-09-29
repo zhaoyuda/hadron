@@ -126,6 +126,24 @@ async function main() {
     ok(!("pinned" in readAgentFile(A)), "rejected PATCHes did not touch the stored agent");
   }
 
+  console.log("\n[PATCH coreDismissed — array of path strings, replaced whole, absent-unless-non-empty]");
+  {
+    const r = await req("PATCH", `/api/sessions/${A}`, { coreDismissed: ["/tmp/a.js", "/tmp/a.js", "~/b.md"] });
+    ok(r.status === 200, "PATCH {coreDismissed:[…]} → 200");
+    ok(JSON.stringify((await (await req("GET", "/api/sessions")).json()).find((s) => s.id === A)?.coreDismissed) === JSON.stringify(["/tmp/a.js", "~/b.md"]), "the token-bearing list carries it, de-duplicated (the single-session response is the reduced form, like files)");
+    ok(!("coreDismissed" in ((await liveList()).find((s) => s.id === A) || {})), "…the open GET does not (paths the transcript named)");
+    ok(JSON.stringify(readAgentFile(A).coreDismissed) === JSON.stringify(["/tmp/a.js", "~/b.md"]), "coreDismissed persisted to disk");
+    const r2 = await req("PATCH", `/api/sessions/${A}`, { coreDismissed: ["/tmp/c.py"] });
+    ok(r2.status === 200 && JSON.stringify(readAgentFile(A).coreDismissed) === JSON.stringify(["/tmp/c.py"]), "a second PATCH replaces the list whole (the client sends the full list)");
+    for (const bad of ["x", 1, null, {}, [1], [""], ["  "], [null], ["a\nb"], ["a\0b"], ["x".repeat(4097)], Array.from({ length: 201 }, (_, i) => `/p${i}`)]) {
+      const rBad = await req("PATCH", `/api/sessions/${A}`, { coreDismissed: bad });
+      ok(rBad.status === 400, `bad coreDismissed (${JSON.stringify(bad).slice(0, 40)}) → 400`);
+    }
+    ok(JSON.stringify(readAgentFile(A).coreDismissed) === JSON.stringify(["/tmp/c.py"]), "rejected PATCHes did not touch the stored list");
+    const rClear = await req("PATCH", `/api/sessions/${A}`, { coreDismissed: [] });
+    ok(rClear.status === 200 && !("coreDismissed" in readAgentFile(A)), "an empty array clears it — absent on disk");
+  }
+
   console.log("\n[PATCH parked — strict boolean, absent-unless-true, tmux untouched]");
   {
     const r = await req("PATCH", `/api/sessions/${A}`, { parked: true });

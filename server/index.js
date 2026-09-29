@@ -20,7 +20,7 @@ import { tmux, tmuxSafe, isValidId, shellQuoteArgv, tmuxArgv } from "./tmux.js";
 import { findRegistrySession, findTmuxlessRecordFor, classifyTmuxless, readRegistry, processIdentity, parentPid, REGISTRY_ROOT, REGISTRY_STATUSES, REGISTRY_TMUX_SINCE } from "./session-registry.js";
 import { syncSkills } from "./skills.js";
 import { collectProvenance } from "./provenance.js";
-import { transcriptPath, readTranscriptSummary, transcriptWire, CONTEXT_WINDOW, readTranscriptFiles, filesWire, FILES_CHUNK_BYTES, FILES_MAX_LINE } from "./transcript.js";
+import { transcriptPath, readTranscriptSummary, transcriptWire, CONTEXT_WINDOW, readTranscriptFiles, filesWire, FILES_CHUNK_BYTES, FILES_MAX_LINE, FILES_CORE } from "./transcript.js";
 import { warnOnce } from "./log.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { readQuota } from "./quota.js";
@@ -871,19 +871,44 @@ function contextWire(s) {
   }
   return null;
 }
+// The panel's Core rows: the hottest files of the session minus the ones the
+// operator dismissed (coreDismissed, persisted) and the ones already pinned as
+// a file artifact (pinning is promotion — the file moves up, it does not show
+// twice). Compared on resolved paths: an artifact may have been pinned as
+// "~/x" or "rel/x" while the transcript names it absolutely.
+// (A relative transcript path is resolved against the agent's cwd, an artifact
+// value against the workspace — they could differ when cwd is a sub-directory,
+// but claude's Edit/Write name files absolutely.) The hiding runs inside
+// filesWire's ranking (coreSkip), before its wire cap, so a session whose top
+// 40 are all pinned or hidden still shows ranks 41+.
+function coreHidden(s) {
+  const hidden = new Set((s.coreDismissed || []).map((p) => resolveFilePath(p)));
+  for (const a of s.artifacts || []) if (a.type === "file" && a.value) hidden.add(resolveFilePath(a.value));
+  return hidden;
+}
+function coreFor(s, core) {
+  return core.slice(0, FILES_CORE).map((e) => ({ ...e, path: sessionFilePath(s, e.path) }));
+}
 function resolvedSession(s, { withTranscript = false } = {}) {
-  const { transcript, contextPct, files, ...rest } = s;
+  const { transcript, contextPct, files, coreDismissed, ...rest } = s;
   const context = contextWire(s);
-  const fw = withTranscript && files ? filesWire(files) : null;
+  let fw = null;
+  if (withTranscript && files) {
+    const hidden = coreHidden(s);
+    fw = filesWire(files, { coreSkip: (p) => hidden.has(sessionFilePath(s, p)) });
+  }
   return {
     ...rest,
+    // coreDismissed is the operator's own list, but its entries are paths the
+    // transcript named — same class as `files`, token-bearing readers only.
+    ...(withTranscript && Array.isArray(coreDismissed) && coreDismissed.length ? { coreDismissed } : {}),
     ...(withTranscript && transcript ? { transcript: transcriptWire(transcript) } : {}),
     // `files` (what the session edited — file paths, not conversation, but
     // still the agent's private business): token-bearing readers only. A path
     // is whatever claude was given; an agent that Reads a transcript under
     // ~/.claude/projects puts that session's id on this reader's wire — the
     // same reader can fetch the whole transcript, so nothing new is exposed.
-    ...(fw ? { files: { ...fw, changed: fw.changed.map((e) => ({ ...e, path: sessionFilePath(s, e.path) })) } } : {}),
+    ...(fw ? { files: { ...fw, changed: fw.changed.map((e) => ({ ...e, path: sessionFilePath(s, e.path) })), core: coreFor(s, fw.core) } } : {}),
     // The open GET gets the badge (pct + colour), the token-bearing one the arithmetic too.
     ...(context ? { context: withTranscript ? context : { pct: context.pct, source: context.source, level: context.level } } : {}),
     artifacts: (s.artifacts || []).map(a => ({
@@ -1111,6 +1136,7 @@ app.post("/api/sessions", (req, res) => {
   res.status(201).json(resolvedSession(session));
 });
 
+const CORE_DISMISSED_MAX = 200; // paths hidden from the panel's Core section, per agent
 app.patch("/api/sessions/:id", async (req, res) => {
   const { id } = req.params;
   if (!sessions.has(id)) {
@@ -1155,6 +1181,16 @@ app.patch("/api/sessions/:id", async (req, res) => {
   if (ackRev !== undefined && (!Number.isInteger(ackRev) || ackRev < 0)) {
     return res.status(400).json({ error: "ackRev must be a non-negative integer" });
   }
+  // coreDismissed: files the operator hid from the panel's Core section — an
+  // array of path strings, replaced whole (the client sends the full list).
+  // Strict shape: strings only, no NUL/newline, bounded length and count; an
+  // empty array clears it (stored form: absent unless non-empty).
+  const { coreDismissed } = req.body;
+  if (coreDismissed !== undefined) {
+    const bad = !Array.isArray(coreDismissed) || coreDismissed.length > CORE_DISMISSED_MAX
+      || coreDismissed.some((p) => typeof p !== "string" || !p.trim() || p.length > 4096 || /[\0\n\r]/.test(p));
+    if (bad) return res.status(400).json({ error: `coreDismissed must be an array of up to ${CORE_DISMISSED_MAX} path strings` });
+  }
   const { state, blockReason, name, task } = req.body;
   if (state !== undefined) {
     const prevState = session.state;
@@ -1190,7 +1226,12 @@ app.patch("/api/sessions/:id", async (req, res) => {
     if (parked) session.parked = true;
     else delete session.parked;
   }
-  const shouldSave = [name, task, notes, artifacts, relatedAgents, group, icon, sortOrder, deletable, pinned, parked].some(v => v !== undefined)
+  if (coreDismissed !== undefined) {
+    const uniq = [...new Set(coreDismissed)];
+    if (uniq.length) session.coreDismissed = uniq;
+    else delete session.coreDismissed;
+  }
+  const shouldSave = [name, task, notes, artifacts, relatedAgents, group, icon, sortOrder, deletable, pinned, parked, coreDismissed].some(v => v !== undefined)
     || acked || (state !== undefined && (state === "done" || state === "blocked"));
   if (shouldSave) await saveAgentLocked(session); // same lock as append/delete — no interleaved read-modify-write
   res.json(resolvedSession(session));

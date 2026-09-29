@@ -1,7 +1,7 @@
 /**
- * Module M26 — the "Changed" section of the file panel.
+ * Module M26 — the file panel's Changed / Core / Pinned model.
  *
- * Above Artifacts, a claude agent's panel lists the files its session wrote:
+ * Above Pinned (the artifacts), a claude agent's panel lists the files its session wrote:
  * every Edit/Write/MultiEdit/NotebookEdit call in claude's own transcript
  * (sidechain included), attributed per SESSION — two agents in one cwd are
  * told apart, which `git status` in that cwd cannot do. What this proves in
@@ -13,6 +13,14 @@
  *     created
  *   - an Edit appended to the transcript moves the row within poll + refresh
  *   - the header collapses and the collapse survives the 3-s refresh
+ *   - CORE: the files the session keeps returning to, by heat (3·writes +
+ *     reads, ties by recency), reads included; hover → 📌 pins it (a file
+ *     artifact appears under Pinned, the row leaves Core) or × hides it
+ *     (`coreDismissed` on the record, survives the refresh); a Pinned file is
+ *     never listed in Core twice
+ *   - two agents that wrote one file: each Changed row says "also <other>"
+ *   - the Artifacts header reads "Pinned", the add button "+ pin a file",
+ *     `hadron artifacts pin` is the CLI verb (add stays an alias)
  *   - the wire form: `files` rides /api/sessions only for a token-bearing
  *     GET (paths are the agent's business); /api/sessions/:id/files carries
  *     every touched file (reads too), 401 without the token; a shell agent
@@ -25,10 +33,14 @@ import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, appendFileSync, rm
 import { join } from "path";
 import { tmpdir } from "os";
 import { randomUUID } from "crypto";
+import { execFileSync } from "child_process";
+import { dirname } from "path";
+import { fileURLToPath } from "url";
 import { bootWorkspace, authHeaders, reporter, screenshotDir } from "./harness.js";
 import { claudeProjectDir } from "../../server/resume.js";
 
-const r = reporter("M26 Changed files");
+const r = reporter("M26 Changed / Core / Pinned");
+const REPO = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const CONFIG = mkdtempSync(join(tmpdir(), "hadron-m26-claude-"));
 process.env.CLAUDE_CONFIG_DIR = CONFIG;
 const SIDS = { alpha: randomUUID(), beta: randomUUID() };
@@ -122,20 +134,53 @@ try {
   r.ok((await group.locator(".af-count").textContent()).trim() === "3", `header count 3 (${(await group.locator(".af-count").textContent()).trim()})`);
   const subs = await page.locator(".af-changed .af-changed-row .af-sub").allTextContents();
   r.ok(subs[0].trim() === "2× 2m" && subs[2].trim() === "30m", `rows carry write count + age: "2× 2m", "30m" (${JSON.stringify(subs)})`);
-  r.ok((await page.locator(".rp-hdr", { hasText: "Artifacts" }).count()) === 1 && (await page.locator(".af-changed").boundingBox()).y < (await page.locator(".rp-hdr", { hasText: "Artifacts" }).first().boundingBox()).y, "the group sits above the Artifacts header");
+  const pinnedHdr = page.locator(".rp-hdr", { hasText: "Pinned" });
+  r.ok((await pinnedHdr.count()) === 1 && (await page.locator(".rp-hdr", { hasText: "Artifacts" }).count()) === 0 && (await page.locator(".af-changed").boundingBox()).y < (await pinnedHdr.first().boundingBox()).y, "the group sits above the Pinned header (no Artifacts header any more)");
+  r.ok((await page.locator("#af-add-btn").textContent()).trim() === "+ pin a file", `the add button says "+ pin a file" (${(await page.locator("#af-add-btn").textContent()).trim()})`);
+
+  // ── Core: heat ranking, pin, dismiss ───────────────────────────────────
+  const coreRows = () => page.locator(".af-core .af-core-row .af-label").allTextContents();
+  r.ok(await until(async () => (await coreRows()).join() === "src/app.js,notes.md,README.md,src/util.js"), `CORE ranks by heat: app.js (2 writes) first, notes before README (tie → newer), the read-only util.js last (${(await coreRows()).join()})`);
+  const coreGroup = page.locator(".af-core");
+  r.ok((await coreGroup.boundingBox()).y > (await group.boundingBox()).y && (await coreGroup.boundingBox()).y < (await pinnedHdr.first().boundingBox()).y, "…between Changed and Pinned");
+  const coreSubs = await page.locator(".af-core .af-core-row .af-sub").allTextContents();
+  r.ok(coreSubs[0].trim() === "2× 2m" && coreSubs[3].trim() === "1× 20m", `rows carry touch count + age (${JSON.stringify(coreSubs)})`);
+  r.ok(alpha.core.length === 4 && alpha.core[0].reads === 0 && alpha.core[3].reads === 1 && alpha.core[3].writes === 0, `wire: files.core carries the ranked entries with reads (${JSON.stringify(alpha.core.map((e) => [rel(e.path), e.writes, e.reads]))})`);
   await page.screenshot({ path: join(screenshotDir(), "m26-changed.png") });
+  // pin app.js → a file artifact under Pinned, the Core row leaves
+  await page.locator(".af-core .af-core-row").first().hover();
+  await page.locator(".af-core .af-core-row").first().locator("[data-core-pin]").click();
+  r.ok(await until(async () => (await page.locator(".af[data-art-idx] .af-label").allTextContents()).includes("app.js")), `📌 on a Core row pins it: app.js is listed under Pinned (${(await page.locator(".af[data-art-idx] .af-label").allTextContents()).join()})`);
+  r.ok(await until(async () => !(await coreRows()).includes("src/app.js")), `…and it left Core (${(await coreRows()).join()})`);
+  const recPin = JSON.parse(readFileSync(join(ws, ".hadron", "agents", "alpha.json"), "utf-8"));
+  r.ok(recPin.artifacts?.length === 1 && recPin.artifacts[0].type === "file" && recPin.artifacts[0].value.endsWith("src/app.js"), `…persisted as a file artifact (${JSON.stringify(recPin.artifacts)})`);
+  r.ok(await until(async () => !((await filesOf("alpha")).core.some((e) => rel(e.path) === "src/app.js"))), "…the server's core list drops the pinned file (pinning is promotion, not duplication)");
+  // dismiss README → gone, persisted, still gone after the refresh
+  const readme = page.locator(".af-core .af-core-row", { hasText: "README.md" });
+  await readme.hover();
+  await readme.locator("[data-core-dismiss]").click();
+  r.ok(await until(async () => (await coreRows()).join() === "notes.md,src/util.js"), `× hides README from Core (${(await coreRows()).join()})`);
+  r.ok(await until(async () => (JSON.parse(readFileSync(join(ws, ".hadron", "agents", "alpha.json"), "utf-8")).coreDismissed || []).some((p) => p.endsWith("README.md"))), "…coreDismissed persisted on the record");
+  await wait(3500);
+  r.ok((await coreRows()).join() === "notes.md,src/util.js", `…still hidden after the 3-s refresh (${(await coreRows()).join()})`);
+  r.ok(await until(async () => (await rows()).join() === "src/app.js,notes.md,README.md"), "Changed still lists README (dismissing from Core is not forgetting the write)");
 
   // click → ephemeral file tab, no artifact
   await page.locator(".af-changed .af-changed-row").first().click();
   r.ok(await until(async () => (await page.locator(".wh-tab.active").textContent()).includes("app.js")), `clicking a row opens app.js as a tab (${await page.locator(".wh-tab.active").textContent()})`);
   const rec = JSON.parse(readFileSync(join(ws, ".hadron", "agents", "alpha.json"), "utf-8"));
-  r.ok((rec.artifacts || []).length === 0, "…ephemeral: no artifact was created");
+  r.ok((rec.artifacts || []).length === 1, "…ephemeral: no artifact was created (only the one pinned above)");
   r.ok(!("files" in rec) && !readFileSync(join(ws, ".hadron", "agents", "alpha.json"), "utf-8").includes("lastWriteAt"), "nothing about changed files reaches the record on disk");
 
-  // live update: a new edit lands on top
+  // live update: a new edit lands on top — and beta wrote util.js too, so the
+  // row says so.
   appendFileSync(join(transcriptDir, `${SIDS.alpha}.jsonl`), tool("Edit", { file_path: join(ws, "src", "util.js"), old_string: "1", new_string: "3" }));
   r.ok(await until(async () => (await rows())[0] === "src/util.js" && (await rows()).length === 4), `an Edit appended to the transcript puts util.js on top within poll + refresh (${(await rows()).join()})`);
   r.ok(await until(async () => (await group.locator(".af-count").textContent()).trim() === "4"), "…count 4");
+  const alsoOf = (label) => page.locator(".af-changed .af-changed-row", { hasText: label }).locator(".af-also").allTextContents();
+  r.ok(await until(async () => (await alsoOf("src/util.js")).join() === "also Beta"), `util.js, written by both agents, says "also Beta" (${(await alsoOf("src/util.js")).join()})`);
+  r.ok((await alsoOf("notes.md")).length === 0, "a file only alpha wrote carries no hint");
+  r.ok(await until(async () => (await coreRows())[0] === "src/util.js"), `Core re-ranks: util.js (1 write + 1 read) now hottest of the unpinned (${(await coreRows()).join()})`);
 
   // collapse survives the refresh
   await group.locator(".af-group-hdr").click();
@@ -148,6 +193,11 @@ try {
   // beta's panel is its own
   await page.locator(`.dk[data-sid="beta"]`).first().click();
   r.ok(await until(async () => (await rows()).join() === "src/util.js"), `switching to beta shows beta's one file (${(await rows()).join()})`);
+  r.ok(await until(async () => (await alsoOf("src/util.js")).join() === "also Alpha"), `…and its row says "also Alpha" (${(await alsoOf("src/util.js")).join()})`);
+  r.ok((await coreRows()).join() === "src/util.js" && (await page.locator(".af-core .af-core-row .af-sub").first().textContent()).trim() === "1× 5m", "beta's Core is its own one file");
+  // CLI: `hadron artifacts pin` is the verb; usage names it
+  const help = execFileSync("node", [join(REPO, "bin", "hadron.js"), "help"], { encoding: "utf-8", env: { ...process.env, HADRON_PORT: env.baseUrl.split(":").pop(), HADRON_TOKEN: env.token } });
+  r.ok(/hadron artifacts pin \[--auto \| <path\.\.\.>\].*alias: add/.test(help), "`hadron help` documents `hadron artifacts pin` with add as the alias");
   await page.locator(`.dk[data-sid="${plain}"]`).first().click();
   r.ok(await until(async () => (await page.locator(".af-changed").count()) === 0), "the shell agent's panel has no Changed group");
 

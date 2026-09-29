@@ -497,7 +497,7 @@ async function main() {
         for (const x of me.artifacts || []) console.log(`${x.label ? x.label + "  " : ""}${x.value}`);
         break;
       }
-      if (sub === "add") {
+      if (sub === "add" || sub === "pin") { // "pin": the panel calls artifacts Pinned
         let paths = positional.slice(1);
         if (flags.auto) {
           // The server derives the scan root from agentId (agent cwd, jailed to the
@@ -510,12 +510,12 @@ async function main() {
             .map((f) => (base && !f.path.startsWith("/")) ? `${base}/${f.path}` : f.path);
           if (!paths.length) die("no high-relevance files found to auto-add");
         }
-        if (!paths.length) die("usage: hadron artifacts add [--auto | <path...>]");
+        if (!paths.length) die("usage: hadron artifacts pin [--auto | <path...>]");
         for (const p of paths) await api("POST", `/api/sessions/${me.id}/artifacts`, { type: "file", value: p });
-        console.log(`added ${paths.length} artifact(s): ${paths.join(", ")}`);
+        console.log(`pinned ${paths.length} file(s): ${paths.join(", ")}`);
         break;
       }
-      die("usage: hadron artifacts <ls|add>");
+      die("usage: hadron artifacts <ls|pin|add>");
       break;
     }
     case "kernels": {
@@ -888,8 +888,8 @@ Commands:
   hadron adopt <name|id> --session-id <uuid> [--force]
                                            hand Hadron a claude session id it could not scrape (hand-attached
                                            agent, shared cwd); verified against ~/.claude/projects unless --force
-  hadron artifacts add [--auto | <path...>]  attach files to the current agent
-  hadron artifacts ls                      list the current agent's artifacts
+  hadron artifacts pin [--auto | <path...>] pin files to the current agent's panel (alias: add)
+  hadron artifacts ls                      list the current agent's pinned files
   hadron notes [show|set "..."|append "..."]
   hadron kernels [show [--json]]           show notebook kernel envs (marimo/jupyter)
   hadron kernels set --marimo PATH         set a kernel env (merges — the other runtime is

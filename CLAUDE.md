@@ -19,7 +19,7 @@ If the user just cloned this repo or pulled it onto a new machine, **invoke the 
 
 ## Agent awareness (when running inside Hadron)
 
-If this Claude Code session is itself a Hadron-managed agent (running inside a `hadron-*` tmux session), run `/hadron-whoami` on session start to load your identity, task, artifacts, and related agents. Use the `hadron` CLI (`bin/hadron.js`) — not raw curl — for agent operations: `hadron whoami`, `hadron spawn`, `hadron artifacts add`, `hadron notes`.
+If this Claude Code session is itself a Hadron-managed agent (running inside a `hadron-*` tmux session), run `/hadron-whoami` on session start to load your identity, task, artifacts, and related agents. Use the `hadron` CLI (`bin/hadron.js`) — not raw curl — for agent operations: `hadron whoami`, `hadron spawn`, `hadron artifacts pin`, `hadron notes`.
 
 ### Multi-workspace setup
 
@@ -126,7 +126,10 @@ npm test
 #                            client cwd, suggest { base, files } contract), artifact validation on EVERY
 #                            write path (append, PATCH, session-create seed) + canonical path contract
 #                            incl. symlink escapes, DELETE 409, store-level lock FIFO barrier)
-#   + test-agent-ops.js     (agent ops: pinned AND parked strict-boolean PATCH + absent-unless-true persistence
+#   + test-agent-ops.js     (agent ops: pinned AND parked strict-boolean PATCH + absent-unless-true persistence;
+#                            coreDismissed PATCH = array of path strings (400 on any other shape, NUL/newline, > 4096
+#                            chars, > 200 entries), de-duplicated, replaced whole, absent on disk when empty, on the
+#                            token-bearing list only
 #                            (parking leaves tmux running and never sets archived; both survive the restart block),
 #                            archive/restore lifecycle over HTTP, CLI pin/unpin/park/unpark/close/restore/ls --archived
 #                            with name→id resolution — ambiguous names exit 1 with candidates; custom
@@ -357,14 +360,20 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                                 long session), no correcting resize frame follows a connect (framesent captured),
 #                                 one connect per switch, and each tmux window keeps its own size across the
 #                                 switches = fitted xterm minus the status-line rows)
-#   + test/e2e/m26-changed-files.js (file panel "Changed": seeded transcripts (CLAUDE_CONFIG_DIR relocated) for two
-#                                 agents in ONE cwd → each panel lists its own session's written files newest first,
-#                                 relative to the cwd, "2× 2m" write count + age, a Read-only file absent, a sidechain
-#                                 write present; a row click opens an ephemeral file: tab and creates no artifact; an
-#                                 Edit appended to the transcript lands on top within poll + refresh; the collapse
-#                                 survives the 3-s refresh; `files` rides /api/sessions for a token-bearing GET only,
-#                                 /api/sessions/:id/files carries reads too and is 401 without the token; a shell agent
-#                                 has none; nothing on disk, no session id on the wire)
+#   + test/e2e/m26-changed-files.js (file panel Changed / Core / Pinned: seeded transcripts (CLAUDE_CONFIG_DIR
+#                                 relocated) → CHANGED rows newest write first, relative to the agent's cwd, "2× 2m",
+#                                 a Read-only file absent, two agents in one cwd list their own; CORE ranks every
+#                                 touched file by 3·writes + reads (ties by recency, reads included), sits between
+#                                 Changed and Pinned; 📌 on a Core row → a file artifact under Pinned + the row leaves
+#                                 Core (the server drops pinned files from core); × → `coreDismissed` on the record,
+#                                 hidden across the 3-s refresh, Changed still lists it; an Edit appended to a
+#                                 transcript re-ranks Core and puts the row on top of Changed, and a file both agents
+#                                 wrote says "also Beta" / "also Alpha" from each side; a row click opens an ephemeral
+#                                 tab (no artifact); the header collapse survives the refresh; the Artifacts header
+#                                 reads "Pinned", the button "+ pin a file", `hadron help` documents `hadron artifacts
+#                                 pin` (add = alias); wire: `files` {changed, core, total, complete, truncated?,
+#                                 partial?} and `coreDismissed` on the token-bearing list only, /files 401 without the
+#                                 token, null for a shell agent, no session id anywhere)
 ```
 
 `npm run test:e2e` runs `test/e2e/run-all.js`, which executes every `m*.js`

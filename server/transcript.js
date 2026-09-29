@@ -199,6 +199,12 @@ export const FILES_CHUNK_BYTES = 8 * 1024 * 1024;
 export const FILES_MAX_LINE = 32 * 1024 * 1024;
 export const FILES_MAX = 500;
 export const FILES_WIRE = 50; // changed files on the session list; the rest via /files
+export const FILES_CORE_WIRE = 40; // hottest files on the session list (the server trims to FILES_CORE after dismissals)
+export const FILES_CORE = 10; // rows in the panel's Core section
+// Heat of a file for the Core ranking: a write is worth three reads. No
+// recency decay — a file claude keeps coming back to is the point; ties go
+// to the most recently touched.
+export const coreScore = (e) => 3 * (e.writes || 0) + (e.reads || 0);
 const WRITE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 const READ_TOOLS = new Set(["Read"]);
 
@@ -311,18 +317,27 @@ export function readTranscriptFiles(file, cache, { chunkBytes = FILES_CHUNK_BYTE
   return cache.filesResult;
 }
 
-// The session-list form: files written, newest write first, FILES_WIRE of
-// them; `total` is how many written files the session knows; `complete`
+// The session-list form: `changed` = files written, newest write first,
+// FILES_WIRE of them; `core` = the FILES_CORE_WIRE hottest files by coreScore
+// (reads count too — the files claude keeps returning to, not only the ones
+// it changed); `total` is how many written files the session knows; `complete`
 // whether the transcript has been read to its end (a fresh boot on a long
 // session catches up over a few polls); `truncated` when entries were evicted
 // past FILES_MAX (the list was capped), `partial` when a record was too long
 // to read (some writes may be missing) — two different things to tell the
 // operator, so two optional bits.
-export function filesWire(f) {
+// `coreSkip(path)`: files the operator hid or pinned (server/index.js coreFor)
+// are dropped BEFORE the wire slice, so hiding 40 files can never empty Core
+// while lower-ranked files remain.
+export function filesWire(f, { coreSkip } = {}) {
   if (!f) return null;
   const changed = f.files.filter((e) => e.writes > 0).sort((a, b) => String(b.lastWriteAt || "").localeCompare(String(a.lastWriteAt || "")));
+  const pick = ({ path, writes, reads, lastWriteAt, lastAt }) => ({ path, writes, reads, lastWriteAt, lastAt });
+  // Core: every touched file (reads included) by heat, then recency.
+  const core = (coreSkip ? f.files.filter((e) => !coreSkip(e.path)) : [...f.files]).sort((a, b) => (coreScore(b) - coreScore(a)) || String(b.lastAt || "").localeCompare(String(a.lastAt || "")));
   return {
-    changed: changed.slice(0, FILES_WIRE).map(({ path, writes, reads, lastWriteAt, lastAt }) => ({ path, writes, reads, lastWriteAt, lastAt })),
+    changed: changed.slice(0, FILES_WIRE).map(pick),
+    core: core.slice(0, FILES_CORE_WIRE).map(pick),
     total: changed.length,
     complete: f.complete,
     ...(f.evicted ? { truncated: true } : {}),

@@ -1260,7 +1260,9 @@ function renderRightPanel() {
     });
   });
 
-  el.querySelectorAll(".af-rm").forEach((x) => {
+  // Scoped to the artifact rows: the Core row's × is an `.af-rm` too (same
+  // look) but a hide, not a delete — it must never reach removeArtifact.
+  el.querySelectorAll(".af-rm[data-art-rm]").forEach((x) => {
     x.addEventListener("click", (e) => {
       e.stopPropagation();
       removeArtifact(parseInt(x.dataset.artRm));
@@ -1293,6 +1295,13 @@ function renderRightPanel() {
   // Ephemeral children of a dir artifact: open as a `file:` tab, never an artifact.
   el.querySelectorAll(".af[data-file-path]").forEach((row) => {
     row.addEventListener("click", () => switchTab(`file:${row.dataset.filePath}`));
+  });
+  // Core rows: pin (becomes a file artifact — the row moves to Pinned) or hide.
+  el.querySelectorAll("[data-core-pin]").forEach((x) => {
+    x.addEventListener("click", (e) => { e.stopPropagation(); addArtifact("file", x.dataset.corePin, undefined, x.dataset.corePin); });
+  });
+  el.querySelectorAll("[data-core-dismiss]").forEach((x) => {
+    x.addEventListener("click", (e) => { e.stopPropagation(); dismissCoreFile(x.dataset.coreDismiss); });
   });
 
   const addBtn = document.getElementById("af-add-btn");
@@ -1384,10 +1393,72 @@ const CHANGED_GROUP = "//changed";
 // the agent's cwd, writes count + age on the right; a click opens the file as
 // an ephemeral tab, nothing is pinned. Absent until the session has written
 // something; "…" on the header while a long transcript is still being read.
+const CORE_GROUP = "//core";
+// Other live agents that wrote the same file this session: Map path → [names].
+// Every session's `changed` list rides the token-bearing session list, so the
+// overlap is computed here — no extra request, no server-side join.
+function otherWriters(activeSession) {
+  const out = new Map();
+  for (const s of sessions) {
+    if (s.id === activeSession.id || s.archived || !s.files || !Array.isArray(s.files.changed)) continue;
+    for (const e of s.files.changed) {
+      if (!out.has(e.path)) out.set(e.path, []);
+      out.get(e.path).push(s.name || s.id);
+    }
+  }
+  return out;
+}
+function buildCoreSection(activeSession) {
+  const f = activeSession.files;
+  if (!f || !Array.isArray(f.core) || !f.core.length) return "";
+  const cwd = activeSession.cwd ? activeSession.cwd.replace(/\/+$/, "") + "/" : null;
+  const collapsed = (collapsedArtFolders[activeSession.id] || new Set()).has(CORE_GROUP);
+  let html = `<div class="af-group af-core${collapsed ? "" : " open"}" data-af-dir="${CORE_GROUP}">`;
+  html += `<div class="af-group-hdr" title="The files this session keeps coming back to, ranked by reads and writes in its transcript. Hover a row to pin it (moves to Pinned) or hide it."><span class="af-arrow">&#9654;</span> <span class="af-label">Core</span><span class="af-count">${f.core.length}${f.truncated || f.partial ? "+" : ""}</span>${coreDismissErr[activeSession.id] ? `<span class="af-core-err" title="${esc(coreDismissErr[activeSession.id])}">!</span>` : ""}</div>`;
+  html += `<div class="af-group-body">`;
+  f.core.forEach((e) => {
+    const rel = cwd && e.path.startsWith(cwd) ? e.path.slice(cwd.length) : e.path;
+    const name = e.path.split("/").pop();
+    const heat = `${e.writes ? `${e.writes} write${e.writes === 1 ? "" : "s"}` : ""}${e.writes && e.reads ? ", " : ""}${e.reads ? `${e.reads} read${e.reads === 1 ? "" : "s"}` : ""}`;
+    html += `<div class="af af-file-eph af-core-row" data-file-path="${esc(e.path)}" title="${esc(e.path)}\n${heat}"><span class="af-i">${fileIcon(name, 15)}</span><span class="af-label">${esc(rel)}</span><span class="af-sub">${e.writes + e.reads}× ${esc(timeAgo(e.lastAt))}</span><span class="af-core-pin" data-core-pin="${esc(e.path)}" title="Pin — keep this file in the panel">📌</span><span class="af-rm" data-core-dismiss="${esc(e.path)}" title="Hide from Core">×</span></div>`;
+  });
+  html += `</div></div>`;
+  return html;
+}
+// The server's cap on coreDismissed (server/index.js CORE_DISMISSED_MAX); the
+// list never expires on its own, so past the cap the oldest hides are let go.
+const CORE_DISMISSED_MAX = 200;
+const coreDismissErr = {}; // sessionId → last rejected hide's message (shown in the Core header)
+async function dismissCoreFile(path) {
+  const sessionId = activeSessionId;
+  const s = sessions.find((x) => x.id === sessionId);
+  if (!s) return;
+  // The PATCH replaces the list whole, so build it from the local state and
+  // update that state BEFORE the round trip: two quick hides must not each
+  // start from the same old list and drop one another. Rolled back on failure.
+  const before = s.coreDismissed || [];
+  const list = [...new Set([...before, path])].slice(-CORE_DISMISSED_MAX);
+  s.coreDismissed = list;
+  if (s.files && Array.isArray(s.files.core)) s.files.core = s.files.core.filter((e) => e.path !== path);
+  delete coreDismissErr[sessionId];
+  render();
+  let res, msg = "";
+  try {
+    res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ coreDismissed: list }) });
+    if (!res.ok) msg = (await res.json().catch(() => ({}))).error || `HTTP ${res.status}`;
+  } catch (e) { msg = e.message || "network error"; }
+  if (!msg) return;
+  // Rejected: put the row back and say why in the Core header.
+  s.coreDismissed = before;
+  coreDismissErr[sessionId] = `could not hide ${path.split("/").pop()}: ${msg}`;
+  await fetchSessions();
+  render();
+}
 function buildChangedSection(activeSession) {
   const f = activeSession.files;
   if (!f || !Array.isArray(f.changed) || !f.changed.length) return "";
   const cwd = activeSession.cwd ? activeSession.cwd.replace(/\/+$/, "") + "/" : null;
+  const others = otherWriters(activeSession);
   const collapsed = (collapsedArtFolders[activeSession.id] || new Set()).has(CHANGED_GROUP);
   let html = `<div class="af-group af-changed${collapsed ? "" : " open"}" data-af-dir="${CHANGED_GROUP}">`;
   html += `<div class="af-group-hdr"><span class="af-arrow">&#9654;</span> <span class="af-label">Changed</span><span class="af-count" title="${f.total} file${f.total === 1 ? "" : "s"} written this session${f.truncated ? " (at least — the list was capped)" : ""}${f.partial ? " (a record was too large to read — some writes may be missing)" : ""}${f.complete ? "" : " (still reading the transcript)"}">${f.total}${f.truncated || f.partial ? "+" : ""}${f.complete ? "" : "…"}</span></div>`;
@@ -1396,15 +1467,21 @@ function buildChangedSection(activeSession) {
     const rel = cwd && e.path.startsWith(cwd) ? e.path.slice(cwd.length) : e.path;
     const name = e.path.split("/").pop();
     const age = timeAgo(e.lastWriteAt);
-    html += `<div class="af af-file-eph af-changed-row" data-file-path="${esc(e.path)}" title="${esc(e.path)}\n${e.writes} write${e.writes === 1 ? "" : "s"}${e.reads ? `, ${e.reads} read${e.reads === 1 ? "" : "s"}` : ""}"><span class="af-i">${fileIcon(name, 15)}</span><span class="af-label">${esc(rel)}</span><span class="af-sub">${e.writes > 1 ? `${e.writes}× ` : ""}${esc(age)}</span></div>`;
+    const also = others.get(e.path);
+    const alsoShort = also && also.length > 2 ? `${also.slice(0, 2).join(", ")} +${also.length - 2}` : also ? also.join(", ") : "";
+    const alsoHtml = also ? `<span class="af-also" title="Also written by ${esc(also.join(", "))} this session — two agents on one file">also ${esc(alsoShort)}</span>` : "";
+    html += `<div class="af af-file-eph af-changed-row" data-file-path="${esc(e.path)}" title="${esc(e.path)}\n${e.writes} write${e.writes === 1 ? "" : "s"}${e.reads ? `, ${e.reads} read${e.reads === 1 ? "" : "s"}` : ""}${also ? `\nalso written by ${esc(also.join(", "))}` : ""}"><span class="af-i">${fileIcon(name, 15)}</span><span class="af-label">${esc(rel)}</span>${alsoHtml}<span class="af-sub">${e.writes > 1 ? `${e.writes}× ` : ""}${esc(age)}</span></div>`;
   });
   html += `</div></div>`;
   return html;
 }
 
 function buildArtifactsSection(activeSession) {
+  // Changed (what the session wrote) → Core (what it keeps returning to) →
+  // Pinned (what the operator or the agent pinned: the artifacts).
   let html = buildChangedSection(activeSession);
-  html += `<div class="rp-hdr">Artifacts</div>`;
+  html += buildCoreSection(activeSession);
+  html += `<div class="rp-hdr" title="Files, folders and URLs pinned to this agent — by you here, or by the agent with \`hadron artifacts pin\`">Pinned</div>`;
   const artifacts = activeSession.artifacts || [];
 
   // ── Dir artifacts (type "dir"): live folder groups ──
@@ -1512,7 +1589,7 @@ function buildArtifactsSection(activeSession) {
     html += `<div class="af" data-art-idx="${idx}"><span class="af-i">${icon}</span><span class="af-label">${label}</span><span class="af-rm" data-art-rm="${idx}" title="Remove">×</span></div>`;
   });
 
-  html += `<div class="af-add" id="af-add-btn" tabindex="0">+ add artifact</div>`;
+  html += `<div class="af-add" id="af-add-btn" tabindex="0">+ pin a file</div>`;
 
 
   // Related agents section
