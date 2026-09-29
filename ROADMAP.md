@@ -94,6 +94,7 @@ Cross-checked Hadron against **FanBox** (`alchaincyf/fanbox` — a polished Elec
 **When to build:** Multi-port works fine for 2-3 projects. Single-server switcher is a later convenience, not a thesis item.
 
 ### Other backlog items (pull when justified)
+- [x] **Quota widget** (2026-09-29) — Claude 5h/7d from the statusline JSON via an explicit `hadron quota --install` (sink in front of the user's statusLine, receipt in `~/.claude/hadron-quota.json`), Codex from the newest rollout's `rate_limits`. No API call, no key. Open: a per-agent spend view (`spend_limit`) once someone needs it.
 - [ ] **Notes Preview mode** — render notes as markdown (Preview⇄Edit like md artifacts) so pasted screenshots display inline. Deferred from the paste-image work (2026-06): paste already inserts the `![](…)` ref into notes; decide after real usage whether notes should stay a lightweight scratchpad or become a rendered doc. A "📸 snapshot terminal pane" button (xterm canvas → PNG → uploads dir) is a natural companion if the paste flow sees use.
 - [ ] **Notebook / data diff** — compare two agents' outputs, or one artifact before/after a rerun (schema drift, distribution shift, changed/errored cells). Strong moat fit but heavy; needs design.
 - [ ] **RELATED → handoff view** + one-click "promote artifact to another agent's context." Human is the bus; no auto agent-to-agent. Confirm real planner→worker handoff frequency before building.

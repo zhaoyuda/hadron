@@ -23,6 +23,7 @@ import { collectProvenance } from "./provenance.js";
 import { transcriptPath, readTranscriptSummary, transcriptWire, CONTEXT_WINDOW } from "./transcript.js";
 import { warnOnce } from "./log.js";
 import { startHeartbeat } from "./heartbeat.js";
+import { readQuota } from "./quota.js";
 import {
   listAnnotations, createAnnotation, updateAnnotation, deleteAnnotation,
   sendAnnotations, resolveAnnotation, reopenAnnotations, retryDispatch,
@@ -622,6 +623,22 @@ function classifyAgentHealth(session, { paneExists, paneCmd, cwdShared, now, reg
   if (rt.desiredRuntime === "claude") return { level: "yellow", message: "claude gone, no clean exit recorded" };
   return { level: "na", message: "not a claude session" };
 }
+
+// GET but AUTHENTICATED (like /api/doctor): subscription usage is account
+// information. Two read-only sources (server/quota.js): claude's statusline
+// receipt and codex's newest rollout. Cached briefly — every open tab polls it.
+const QUOTA_CACHE_MS = 10_000;
+let quotaCache = null;
+app.get("/api/quota", (req, res) => {
+  if (!tokenPresent(req)) return res.status(401).json({ error: "invalid or missing token" });
+  const now = Date.now();
+  if (!quotaCache || now - quotaCache.readAt > QUOTA_CACHE_MS) {
+    let body;
+    try { body = readQuota({ now }); } catch (e) { body = { claude: null, codex: null, at: new Date(now).toISOString(), error: "quota sources unreadable" }; warnOnce("quota-read", `[quota] sources unreadable: ${e.message}`); }
+    quotaCache = { readAt: now, body };
+  }
+  res.json(quotaCache.body);
+});
 
 app.get("/api/doctor", async (req, res) => {
   if (!tokenPresent(req)) return res.status(401).json({ error: "invalid or missing token" });

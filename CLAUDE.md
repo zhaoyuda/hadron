@@ -49,7 +49,7 @@ scripts/
   setup-workspace.js  # Interactive workspace initializer
 test/
   unit/               # detectState/nextState fixtures + security HTTP suite (npm test)
-  e2e/                # Playwright browser modules M1-M23 (npm run test:e2e)
+  e2e/                # Playwright browser modules M1-M24 (npm run test:e2e)
 ```
 
 ## Conventions
@@ -242,6 +242,23 @@ npm test
 #                            adopted/correlated session id, absent for a shell agent; full text at
 #                            /api/sessions/:id/transcript, 401 without token; doctor row transcriptPreview)
 #                            is in test-doctor.js)
+#   + test-quota.js         (quota widget — server/quota.js readers: claude's statusline receipt (allowlisted
+#                            five_hour/seven_day only, never the session id; atomic write, rewritten on change or
+#                            after 5 min), codex's rollouts newest-first by mtime across day dirs (last `rate_limits`
+#                            line in a 256 KB tail, torn first line skipped; a just-launched codex owns the newest
+#                            file with no rate_limits yet → the previous rollout's picture, capped at 3 files, but a
+#                            newest picture of "every window reset" is null, never an older one); a window whose
+#                            resets_at passed is dropped; `hadron quota-sink [--tee]` echoes stdin byte-for-byte —
+#                            a 900 KB payload whole, exit waits for stdout to drain past the 64 KB pipe buffer — and
+#                            exits 0 on garbage, no stdin, over-cap stdin, or an unwritable config dir; `hadron quota
+#                            --install/--uninstall` wraps and unwraps the existing statusLine.command in
+#                            CLAUDE_CONFIG_DIR/settings.json (idempotent, other keys untouched, .hadron-bak written,
+#                            invalid JSON / non-command / string statusLine refused untouched; "ours" is the sink's shape ('…hadron.js' quota-sink) — a user
+#                            command that merely mentions quota-sink is wrapped/unwrapped, never repointed or removed; a sink pointing at
+#                            ANOTHER checkout's hadron.js is repointed with the wrapped command kept and `hadron
+#                            quota` says "installed from ANOTHER checkout" until then; bare-sink uninstall keeps a
+#                            sibling key like padding); GET /api/quota 401 without token, {claude, codex, at} with it;
+#                            doctor local row info (not installed / no receipt yet) or green (receipt age + numbers))
 ```
 
 ### Reliability gate
@@ -313,6 +330,11 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                                 claude's footer (❯ line, then "72% context used") → source "pane", gone again when
 #                                 the foreground is a shell; the same footer in the pane of an agent WITH a
 #                                 transcript wins over it and hands back on exit; nothing persisted)
+#   + test/e2e/m24-quota.js (quota widget in the top bar: seeded receipt + codex rollout (CLAUDE_CONFIG_DIR /
+#                            CODEX_HOME relocated) → "Claude 5h 28% · 7d 4% Codex 5h 61% · 7d 9%", amber from 50 /
+#                            red from 80, tooltip with source + age + reset countdowns; a new receipt moves the
+#                            number on the next poll, a vendor with nothing known drops out, both gone → hidden;
+#                            anonymous GET /api/quota is 401)
 ```
 
 `npm run test:e2e` runs `test/e2e/run-all.js`, which executes every `m*.js`

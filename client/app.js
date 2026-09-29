@@ -2758,6 +2758,51 @@ function dismissOrphans() {
   document.getElementById("orphan-banner")?.remove();
 }
 
+// ═══ QUOTA WIDGET ═══
+// Claude 5h/7d + Codex usage windows from GET /api/quota (token-gated; the
+// server reads claude's statusline receipt and codex's newest rollout — see
+// server/quota.js). Hidden when nothing is known. Polled every 30 s: the
+// numbers move once per turn, not per second.
+const QUOTA_POLL_MS = 30000;
+let quota = null;
+function quotaClass(p) { return p >= 80 ? "q-hot" : p >= 50 ? "q-warn" : ""; }
+function quotaResetsIn(epochS) {
+  const ms = epochS * 1000 - Date.now();
+  if (!(ms > 0)) return "now";
+  const m = Math.ceil(ms / 60000);
+  if (m < 60) return `in ${m}m`;
+  const h = Math.floor(m / 60);
+  return h < 48 ? `in ${h}h ${m % 60}m` : `in ${Math.floor(h / 24)}d ${h % 24}h`;
+}
+function quotaAge(iso) {
+  const ms = Date.now() - Date.parse(iso || "");
+  if (!(ms >= 0)) return "unknown age";
+  const m = Math.floor(ms / 60000);
+  return m < 1 ? "just now" : m < 60 ? `${m}m ago` : m < 2880 ? `${Math.floor(m / 60)}h ago` : `${Math.floor(m / 1440)}d ago`;
+}
+function renderQuota() {
+  const el = document.getElementById("quota");
+  if (!el) return;
+  const vendors = [["Claude", quota && quota.claude], ["Codex", quota && quota.codex]].filter(([, v]) => v && v.windows && v.windows.length);
+  el.hidden = vendors.length === 0;
+  if (el.hidden) { el.innerHTML = ""; el.title = ""; return; }
+  el.innerHTML = vendors.map(([name, v]) =>
+    `<span class="q-vendor" data-vendor="${name.toLowerCase()}"><span class="q-name">${name}</span>${v.windows.map((w) =>
+      `<span class="q-win ${quotaClass(w.usedPct)}" data-win="${esc(w.label)}">${esc(w.label)} ${w.usedPct}%</span>`).join('<span class="q-sep">·</span>')}</span>`).join("");
+  el.title = vendors.map(([name, v]) =>
+    `${name} (${v.source === "statusline" ? "claude's statusline" : "codex rollout"}, ${quotaAge(v.at)}${v.plan ? `, ${v.plan}` : ""}):\n` +
+    v.windows.map((w) => `  ${w.label} window: ${w.usedPct}% used${w.resetsAt ? `, resets ${quotaResetsIn(w.resetsAt)}` : ""}`).join("\n")).join("\n");
+}
+async function pollQuota() {
+  try {
+    const res = await fetch("/api/quota");
+    quota = res.ok ? await res.json() : null;
+  } catch { quota = null; }
+  renderQuota();
+}
+pollQuota();
+setInterval(pollQuota, QUOTA_POLL_MS);
+
 // ═══ POLL FOR SESSION UPDATES ═══
 setInterval(async () => {
   const oldStates = snapshotSessionStates();

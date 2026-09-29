@@ -12,6 +12,7 @@ import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { syncSkills, removeSkills, skillsStatus, userSkillsDir } from "../server/skills.js";
 import { gitInfo, packageVersion, short } from "../server/provenance.js";
+import { pickClaudeRateLimits, writeReceipt, readQuota, readClaudeQuota, quotaInstallStatus, installQuotaSink, uninstallQuotaSink, STDIN_MAX_BYTES } from "../server/quota.js";
 
 const REPO = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -75,6 +76,16 @@ function ago(iso) {
   const h = Math.floor(m / 60);
   if (h < 48) return `${h}h ago`;
   return `${Math.floor(h / 24)}d ago`;
+}
+// "in 2h 13m" from epoch seconds (a passed reset reads "now" — the reader drops those windows).
+function resetsIn(epochS) {
+  const ms = epochS * 1000 - Date.now();
+  if (!(ms > 0)) return "now";
+  const m = Math.ceil(ms / 60000);
+  if (m < 60) return `in ${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `in ${h}h ${m % 60}m`;
+  return `in ${Math.floor(h / 24)}d ${h % 24}h`;
 }
 
 async function api(method, path, body) {
@@ -192,7 +203,7 @@ function printSkillsStatus() {
 // ── flag parsing ──
 // Presence-only flags must be declared here or they swallow the next positional
 // (`hadron message --raw "Beta Two" hi` would resolve "hi" as the target).
-const BOOLEAN_FLAGS = new Set(["json", "archived", "raw", "no-enter", "start", "auto", "force", "restart"]);
+const BOOLEAN_FLAGS = new Set(["json", "archived", "raw", "no-enter", "start", "auto", "force", "restart", "tee", "install", "uninstall"]);
 // Every --flag a command accepts. Anything else is rejected up front with
 // `unknown option: --x` (exit 1) — a typo like `watchdog --restrat` used to be
 // silently ignored and exit 0, which from a timer unit looks like success.
@@ -211,6 +222,8 @@ const COMMAND_FLAGS = {
   annotations: ["json"],
   watchdog: ["restart", "json", "stale-after", "boot-grace"],
   doctor: ["json"],
+  quota: ["json", "install", "uninstall"],
+  "quota-sink": ["tee"],
   version: ["json"], "--version": ["json"], "-v": ["json"],
 };
 // Option grammar: `--flag`, `--flag value`; `--help` anywhere in option
@@ -666,6 +679,16 @@ async function main() {
         else local.push({ level: "green", message: `event loop alive (heartbeat ${Math.round(hbAge / 1000)}s ago${reachable && typeof health.eventLoopLagMs === "number" ? `, lag ${health.eventLoopLagMs}ms` : ""})` });
       }
 
+      // 6. quota widget (informational — never a red/yellow: it is optional)
+      try {
+        const st = quotaInstallStatus({ hadronBin: join(REPO, "bin", "hadron.js") });
+        const rc = st.installed ? readClaudeQuota() : null;
+        if (st.installed && !st.current) local.push({ level: "yellow", message: "quota widget: claude's statusLine sink points at another checkout of hadron.js — if that path is gone, claude's statusline is broken; `hadron quota --install` from here repoints it" });
+        else if (!st.installed) local.push({ level: "info", message: "quota widget: claude statusline sink not installed — `hadron quota --install` adds it (codex usage is read from its rollouts regardless)" });
+        else if (!rc) local.push({ level: "info", message: "quota widget: statusline sink installed, no receipt yet — claude writes one on its next turn (subscription sessions only; API-key sessions carry no rate limits)" });
+        else local.push({ level: "green", message: `quota widget: claude receipt ${ago(rc.at)} (${rc.windows.map((w) => `${w.label} ${w.usedPct}%`).join(" · ")})` });
+      } catch (e) { local.push({ level: "info", message: `quota widget: ${e.message}` }); }
+
       // per-agent findings + caps (authenticated GET — send the token on this GET)
       let doctor = null;
       if (reachable) {
@@ -737,6 +760,63 @@ async function main() {
       const verdict = reds ? "FAIL" : yellows ? "OK (with warnings)" : "OK";
       console.log(`\n${reds} red, ${yellows} yellow  →  ${verdict}`);
       if (reds) process.exit(1);
+      break;
+    }
+    case "quota": {
+      // Local reads (server/quota.js) so it works with the server down; the
+      // dashboard's widget reads the same files through GET /api/quota.
+      const hadronBin = join(REPO, "bin", "hadron.js");
+      if (flags.install && flags.uninstall) die("choose one of --install / --uninstall");
+      if (flags.install) {
+        let r;
+        try { r = installQuotaSink({ hadronBin }); } catch (e) { die(`quota --install: ${e.message}`); }
+        if (!r.changed) console.log(`already installed in ${r.path}:\n  ${r.command}`);
+        else console.log(`${r.repaired ? `repointed the sink from another checkout (was: ${r.repaired})\ninstalled` : "installed"} in ${r.path} (backup: ${r.path}.hadron-bak)\n  statusLine.command = ${r.command}\n${r.wrapped ? "your previous statusline runs unchanged after the sink (--tee passes claude's JSON through)" : "no previous statusline — the sink prints a compact \"5h N% · 7d N%\" line"}\nclaude reads settings at start: sessions already running keep the old statusline until restarted.`);
+        break;
+      }
+      if (flags.uninstall) {
+        let r;
+        try { r = uninstallQuotaSink(); } catch (e) { die(`quota --uninstall: ${e.message}`); }
+        console.log(r.changed ? `removed from ${r.path}${r.restored ? `\n  statusLine.command = ${r.restored}` : " (statusLine entry removed — there was none before)"}` : `not installed in ${r.path} — nothing to do`);
+        break;
+      }
+      const q = readQuota();
+      let st = null;
+      try { st = quotaInstallStatus({ hadronBin }); } catch (e) { st = { installed: false, error: e.message }; }
+      if (flags.json) { console.log(JSON.stringify({ ...q, sink: st }, null, 2)); break; }
+      const line = (name, v) => console.log(`${name.padEnd(7)}${v ? v.windows.map((w) => `${w.label} ${w.usedPct}%${w.resetsAt ? ` (resets ${resetsIn(w.resetsAt)})` : ""}`).join("  ·  ") + `   as of ${ago(v.at)}` : "unknown"}`);
+      line("claude", q.claude);
+      line("codex", q.codex);
+      console.log(st.installed ? (st.current ? "sink    installed in claude's statusLine" : `sink    installed from ANOTHER checkout — \`hadron quota --install\` from here repoints it (${st.command})`) : st.error ? `sink    ${st.error}` : "sink    not installed — `hadron quota --install` (claude usage stays unknown without it)");
+      break;
+    }
+    case "quota-sink": {
+      // Statusline filter: claude pipes its status JSON in on every turn. Keep
+      // the rate-limit windows in a receipt (server/quota.js — allowlisted, no
+      // session id/cwd), then either echo the JSON to the wrapped statusline
+      // (--tee) or print a compact line. Exit 0 whatever happens: a statusline
+      // that fails is a statusline claude stops showing.
+      let buf = Buffer.alloc(0);
+      let truncated = false;
+      try {
+        if (!process.stdin.isTTY) {
+          const chunks = [];
+          let n = 0;
+          for await (const c of process.stdin) { if (n < STDIN_MAX_BYTES) chunks.push(c); else truncated = true; n += c.length; }
+          buf = Buffer.concat(chunks);
+        }
+      } catch {}
+      let payload = null;
+      if (!truncated) { try { payload = JSON.parse(buf.toString("utf-8")); } catch {} }
+      const rl = pickClaudeRateLimits(payload);
+      // Queue the output first, then the disk write, and exit only once stdout
+      // has drained: a piped stdout is asynchronous, and process.exit() right
+      // after write() hands the wrapped statusline the first 64 KB only.
+      const done = () => process.exit(0);
+      if (flags.tee) process.stdout.write(buf, done);
+      else if (rl) process.stdout.write(["five_hour", "seven_day"].filter((k) => rl[k]).map((k) => `${k === "five_hour" ? "5h" : "7d"} ${rl[k].used_percentage}%`).join(" · ") + "\n", done);
+      try { writeReceipt(rl); } catch {}
+      if (!flags.tee && !rl) done();
       break;
     }
     case "version":
@@ -819,6 +899,11 @@ Commands:
   hadron doctor [--json]                   "if this machine reboots now, what comes back?" —
                                            server provenance/managedBy + per-agent resume health;
                                            exit 1 on any red row or red summary item
+  hadron quota [--json]                    Claude 5h/7d + Codex usage windows, read locally (no server
+                                           needed); \`hadron quota --install\` puts \`hadron quota-sink\`
+                                           in front of claude's statusLine in ~/.claude/settings.json
+                                           (explicit, idempotent, backed up; --uninstall reverts) so
+                                           claude's own rate-limit numbers reach the dashboard widget
   hadron version [--json]                  CLI vs server provenance (commit/dirty/managedBy);
                                            exit 1 when the server is stale, a tree is dirty, or
                                            the server could not be verified (down/timeout/older)

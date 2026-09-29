@@ -2748,6 +2748,23 @@ mark.ann-mark.ann-mark-flash { background: rgba(210, 153, 34, .8); outline: 1px 
 #needs-me .nm-dot { width: 7px; height: 7px; border-radius: 50%; background: #3fb950; box-shadow: 0 0 6px rgba(63,185,80,.6); }
 #needs-me .nm-count { font-weight: 700; }
 
+/* Quota widget: Claude 5h/7d + Codex usage windows (server/quota.js). Plain
+   under 50%, amber under 80%, red from 80% — the user's own statusline thresholds. */
+#quota {
+  display: flex; align-items: center; gap: 10px;
+  margin-left: 10px; padding: 1px 8px;
+  font-size: 11px; color: var(--text2);
+  border: 1px solid var(--border); border-radius: 5px;
+  user-select: none; background: var(--bg); cursor: default; white-space: nowrap;
+}
+#quota[hidden] { display: none; }
+#quota .q-vendor { display: flex; align-items: center; gap: 4px; }
+#quota .q-name { color: var(--text3); }
+#quota .q-win { color: var(--text2); }
+#quota .q-win.q-warn { color: #d29922; }
+#quota .q-win.q-hot { color: #f85149; font-weight: 600; }
+#quota .q-sep { color: var(--text3); }
+
 #palette-overlay {
   display: none; position: fixed; inset: 0; z-index: 600;
   background: rgba(1,4,9,.55); backdrop-filter: blur(2px);
