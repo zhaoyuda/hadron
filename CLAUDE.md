@@ -331,10 +331,13 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                                 the foreground is a shell; the same footer in the pane of an agent WITH a
 #                                 transcript wins over it and hands back on exit; nothing persisted)
 #   + test/e2e/m24-quota.js (quota widget in the top bar: seeded receipt + codex rollout (CLAUDE_CONFIG_DIR /
-#                            CODEX_HOME relocated) → "Claude 5h 28% · 7d 4% Codex 5h 61% · 7d 9%", amber from 50 /
-#                            red from 80, tooltip with source + age + reset countdowns; a new receipt moves the
-#                            number on the next poll, a vendor with nothing known drops out, both gone → hidden;
-#                            anonymous GET /api/quota is 401)
+#                            CODEX_HOME relocated) → each vendor is its logo (inline SVG, aria-labelled), and a
+#                            window's number is drawn only once View → Show Quota (default 30%) of it is used — 28/4/9
+#                            stay in the tooltip, "5h 61%" is the bar and Claude keeps a dimmed logo (q-quiet); all
+#                            windows under the threshold → logos only, tooltip intact, never hidden like "nothing
+#                            known"; "Always" shows all four, persists across a reload, an unknown value falls back to 30; amber from 50 / red from 80, tooltip with
+#                            source + age + reset countdowns; a new receipt moves the number on the next poll, a
+#                            vendor with nothing known drops out, both gone → hidden; anonymous GET /api/quota is 401)
 #   + test/e2e/m25-switch-latency.js (agent-switch latency: a shell agent seeded with 35k CJK lines (history-limit
 #                                 raised on the session + window re-created, tmux's default 2000 would trim it; ≥ 20000
 #                                 rows asserted), viewed in a vsplit beside its artifact while the other agent is

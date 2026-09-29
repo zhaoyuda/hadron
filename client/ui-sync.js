@@ -51,6 +51,7 @@ function saveUIState() {
     deckFilter,
     deckStaleAfter,
     deckStaleOpen,
+    quotaShowFrom,
     currentTheme,
     notifyLevel,
   };
@@ -119,6 +120,7 @@ function restoreUIState() {
     if (state.deckFilter === "needs" || state.deckFilter === "all") deckFilter = state.deckFilter;
     if (typeof STALE_AFTER_MS === "object" && typeof state.deckStaleAfter === "string" && Object.hasOwn(STALE_AFTER_MS, state.deckStaleAfter)) deckStaleAfter = state.deckStaleAfter;
     if (typeof state.deckStaleOpen === "boolean") deckStaleOpen = state.deckStaleOpen;
+    if (Array.isArray(QUOTA_SHOW_FROM) && QUOTA_SHOW_FROM.includes(state.quotaShowFrom)) quotaShowFrom = state.quotaShowFrom;
     if (state.currentTheme) currentTheme = state.currentTheme;
     if (state.notifyLevel) notifyLevel = state.notifyLevel;
     activeTab = perSessionTab[activeSessionId] || "terminal";
