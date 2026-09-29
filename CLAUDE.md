@@ -49,7 +49,7 @@ scripts/
   setup-workspace.js  # Interactive workspace initializer
 test/
   unit/               # detectState/nextState fixtures + security HTTP suite (npm test)
-  e2e/                # Playwright browser modules M1-M24 (npm run test:e2e)
+  e2e/                # Playwright browser modules M1-M25 (npm run test:e2e)
 ```
 
 ## Conventions
@@ -335,6 +335,13 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                            red from 80, tooltip with source + age + reset countdowns; a new receipt moves the
 #                            number on the next poll, a vendor with nothing known drops out, both gone → hidden;
 #                            anonymous GET /api/quota is 401)
+#   + test/e2e/m25-switch-latency.js (agent-switch latency: a shell agent seeded with 35k CJK lines (history-limit
+#                                 raised on the session + window re-created, tmux's default 2000 would trim it; ≥ 20000
+#                                 rows asserted); timed card clicks small↔big ×3 must paint the pane's content within
+#                                 3 s each (prod 2026-09-29: ~5 s to show the homelab pane); every switch's WS URL
+#                                 carries the fitted cols/rows (one connect per switch) and the tmux window size is
+#                                 unchanged across the switches — a resize makes a long claude session re-render for
+#                                 seconds; window = fitted xterm minus the status line rows)
 ```
 
 `npm run test:e2e` runs `test/e2e/run-all.js`, which executes every `m*.js`
@@ -385,7 +392,7 @@ staging first:
    changes.
 2. `npm test` + `npm run test:e2e` in the worktree. The runner reports M10 as
    `XFAIL` (known headless-chromium clipboard issue, fails identically on main)
-   and exits 0 when it's the only failure — so a green run means M1–M9, M11–M23
+   and exits 0 when it's the only failure — so a green run means M1–M9, M11–M25
    all passed. Any `FAIL` (non-xfail) gates the branch.
 3. `scripts/predeploy-check.sh` — live-fire proof on staging that a service
    restart does NOT interrupt running agents (claude PIDs survive, a
