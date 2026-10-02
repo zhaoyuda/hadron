@@ -14,7 +14,7 @@
  * Requires: tmux on PATH.
  */
 import { spawn, execFileSync } from "child_process";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync, symlinkSync, mkdirSync, readdirSync } from "fs";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync, symlinkSync, mkdirSync, readdirSync, statSync, truncateSync, chmodSync } from "fs";
 import { tmpdir } from "os";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -629,6 +629,165 @@ async function main() {
     const nj = readAgentFile("nobody");
     ok(nj.name === "nobody" && nj.group === "Workers", "an id with no record still gets a fresh blank one (name = id, Workers)");
     ok((await (await fetch(`${BASE}/api/orphans`)).json()).length === 0, "no orphans pending afterwards");
+  }
+
+  console.log("\n[atomic record writes; an unreadable record is recovered, never dropped; orphans in the CLI; server.log]");
+  {
+    // prod 2026-10-01 (Mac, 0.7.0): t289-sol.json ended up 0 bytes while the
+    // server ran; the next boot's loadAgents skipped it with an empty catch
+    // and the agent — tmux alive, claude at a permission prompt — was invisible
+    // to the dashboard, `hadron ls` and `hadron message` for 15 hours.
+    const tmuxName = (n) => `hadron-${WS_NAME}-${n}`;
+    const tmuxHas = (n) => { try { return execFileSync("tmux", ["ls", "-F", "#{session_name}"], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }).split("\n").includes(n); } catch { return false; } };
+    const tmuxNew = (n) => execFileSync("tmux", ["new-session", "-d", "-s", n, "sleep 600"], { stdio: "ignore" });
+    const tmuxKill = (n) => { try { execFileSync("tmux", ["kill-session", "-t", n], { stdio: "ignore" }); } catch {} };
+    const agentsDir = join(WS, ".hadron", "agents");
+    const logPathOf = (ws) => join(ws, ".hadron", "server.log");
+    const restart = async () => {
+      server.kill("SIGKILL");
+      server = spawn("node", [join(REPO, "server", "index.js"), WS], { env: { ...process.env, PORT: String(PORT), HADRON_HOST: "127.0.0.1" }, stdio: ["ignore", "pipe", "pipe"] });
+      await waitForServer();
+    };
+
+    // 1. Atomic writes: a burst of saves leaves exactly the records, no temp
+    //    file, every one parseable (the write goes to <id>.json.<pid>.tmp and
+    //    is renamed over the record — a plain writeFileSync truncated first).
+    const R = await createAgent("Repro A");
+    for (let i = 0; i < 20; i++) await req("PATCH", `/api/sessions/${R}`, { task: `x${i}` });
+    await req("PATCH", `/api/sessions/${R}`, { task: "x", group: "Reviewers", notes: "keep" });
+    const entries = readdirSync(agentsDir);
+    ok(!entries.some((n) => n.endsWith(".tmp")), `no temp file left behind after 21 saves (${entries.filter((n) => !n.endsWith(".json")).join(",") || "only .json"})`);
+    ok(entries.filter((n) => n.endsWith(".json")).every((n) => { try { JSON.parse(readFileSync(join(agentsDir, n), "utf-8")); return true; } catch { return false; } }), "every record parses");
+    ok(readAgentFile(R).task === "x" && readAgentFile(R).notes === "keep", "the last save won");
+
+    // 2. The incident: truncate the record to 0 bytes, keep the tmux session,
+    //    restart. Plus an orphan with no record at all for the CLI.
+    truncateSync(agentFile(R), 0);
+    ok(statSync(agentFile(R)).size === 0 && tmuxAlive(R), "fixture: 0-byte record, tmux session alive");
+    tmuxNew(tmuxName("ghost"));
+    await restart();
+    const live = await liveList();
+    const rec = live.find((s) => s.id === R);
+    ok(!!rec, `the agent is still listed after the restart (${live.map((s) => s.id).join(",")})`);
+    ok(rec && rec.name === R && rec.group === "Workers" && !rec.task, "…as a placeholder: name = id, Workers, no task");
+    ok(rec && rec.recoveredFrom && /^repro-a\.json\.corrupt-\d{8}T\d{6}Z$/.test(rec.recoveredFrom.file) && rec.recoveredFrom.bytes === 0,
+      `…carrying recoveredFrom {file: ${rec && rec.recoveredFrom && rec.recoveredFrom.file}, bytes: ${rec && rec.recoveredFrom && rec.recoveredFrom.bytes}}`);
+    const aside = rec && rec.recoveredFrom ? join(agentsDir, rec.recoveredFrom.file) : null;
+    ok(aside && existsSync(aside) && statSync(aside).size === 0, "the unreadable file is kept aside, untouched (0 bytes)");
+    ok(readAgentFile(R).recoveredFrom && readAgentFile(R).recoveredFrom.file === rec.recoveredFrom.file, "a valid placeholder record is on disk (a second restart keeps the agent too)");
+    ok(tmuxAlive(R) && rec.tmuxSession === tmuxName(R), "its tmux session is the agent's own again — not an orphan, not killed");
+    const orphans1 = await (await fetch(`${BASE}/api/orphans`)).json();
+    ok(!orphans1.some((o) => o.tmuxSession === tmuxName(R)) && orphans1.some((o) => o.tmuxSession === tmuxName("ghost")),
+      `orphans after boot: ghost only (${orphans1.map((o) => o.agentId).join(",")})`);
+    await restart();
+    ok((await liveList()).some((s) => s.id === R) && readdirSync(agentsDir).filter((n) => n.startsWith("repro-a.json.corrupt-")).length === 1,
+      "a second restart loads the placeholder normally — no second quarantine file");
+
+    // 3. The CLI sees both: the recovered row and the orphan row.
+    const ls = hadron(["ls"]);
+    ok(ls.includes(`${R} (${R})`) && ls.includes("⚠ record was unreadable at boot") && ls.includes(rec.recoveredFrom.file), "hadron ls shows the placeholder with the recovery note and the quarantined file name");
+    ok(ls.includes(`⚠ orphan tmux session ${tmuxName("ghost")}`) && ls.includes("hadron orphans adopt"), "hadron ls lists the orphan tmux session with the adopt/kill hint");
+    const doc = await (await req("GET", "/api/doctor")).json();
+    const drow = (doc.agents || []).find((a) => a.id === R);
+    ok(drow && drow.finding.level === "yellow" && /record was unreadable at boot \(0 bytes\)/.test(drow.finding.message) && drow.recovered && drow.recovered.file === rec.recoveredFrom.file,
+      `doctor row is yellow and names the file (${drow && drow.finding.level}: ${drow && drow.finding.message})`);
+    const oc = hadron(["orphans"]);
+    ok(oc.includes(tmuxName("ghost")) && oc.includes("agent id ghost"), "hadron orphans lists it");
+    const oj = JSON.parse(hadron(["orphans", "--json"]));
+    ok(Array.isArray(oj) && oj.length === 1 && oj[0].agentId === "ghost", "hadron orphans --json is the raw list");
+    ok(hadron(["orphans", "adopt", "ghost"]).includes("adopted hadron-") && (await liveList()).some((s) => s.id === "ghost"), "hadron orphans adopt <agentId> brings it back as an agent");
+    ok(hadron(["orphans"]).trim() === "no orphan tmux sessions", "…and the list is empty afterwards");
+    const bad = hadronFails(["orphans", "adopt", "nope"]);
+    ok(bad && bad.status === 1 && /no pending orphan matches/.test(bad.stderr), "adopting an unknown name exits 1 with a message");
+    ok(hadronFails(["orphans", "frobnicate"])?.status === 1, "an unknown subcommand exits 1");
+
+    // 4. Re-validation (3b): the boot-time list must not outlive the world it
+    //    described. (a) the orphan's id is spawned again → dropped, kill → 409,
+    //    kill-all leaves the live agent alone; (b) the session vanished → dropped.
+    tmuxNew(tmuxName("phoenix"));
+    tmuxNew(tmuxName("vanish"));
+    await restart();
+    const o2 = (await (await fetch(`${BASE}/api/orphans`)).json()).map((o) => o.agentId);
+    ok(o2.includes("phoenix") && o2.includes("vanish"), `fixture: both listed as orphans (${o2.join(",")})`);
+    tmuxKill(tmuxName("phoenix"));            // what the operator did: killed it by hand…
+    const PX = await createAgent("Phoenix");   // …and re-spawned the same name → same tmux session name
+    ok(PX === "phoenix" && tmuxAlive("phoenix"), "fixture: a live agent now owns hadron-<ws>-phoenix");
+    tmuxKill(tmuxName("vanish"));
+    const o3 = (await (await fetch(`${BASE}/api/orphans`)).json()).map((o) => o.agentId);
+    ok(!o3.includes("phoenix") && !o3.includes("vanish"), `GET /api/orphans drops the re-spawned id and the vanished session (${o3.join(",") || "empty"})`);
+    const k1 = await req("POST", `/api/orphans/${tmuxName("phoenix")}/kill`);
+    ok(k1.status === 409 && (await k1.json()).agentId === "phoenix", "kill on a session a live agent now owns → 409 naming the agent");
+    ok(tmuxAlive("phoenix"), "…and the live agent's tmux session was not killed");
+    const k2 = await req("POST", `/api/orphans/${tmuxName("vanish")}/kill`);
+    ok(k2.status === 404, "kill on a session that is gone → 404");
+    const ka = await req("POST", "/api/orphans/kill-all");
+    const kaj = await ka.json();
+    ok(ka.status === 200 && Array.isArray(kaj.killed) && !kaj.killed.includes(tmuxName("phoenix")) && tmuxAlive("phoenix"),
+      `kill-all after a re-spawn kills nothing of the live agent (killed: ${kaj.killed && kaj.killed.join(",") || "none"})`);
+    const a9 = await req("POST", `/api/orphans/${tmuxName("phoenix")}/adopt`);
+    ok(a9.status === 409, "adopt on a session a live agent owns → 409 too");
+
+    // 4b. Recovery must never touch a GOOD record. (a) a read ERROR is not a
+    //     parse error: a record the server cannot open (EACCES here; EMFILE on
+    //     an fd-exhausted box is the same path) stays exactly where it is and
+    //     is loaded again once readable. (b) a stem that is not an agent id is
+    //     never minted into a placeholder. (c) recovery runs at BOOT only — the
+    //     archived GET re-reads the directory at runtime while agents may be
+    //     mid-write on their own files, and a torn read there is skipped.
+    const G = await createAgent("Guarded");
+    await req("PATCH", `/api/sessions/${G}`, { task: "precious", notes: "keep me" });
+    writeFileSync(join(agentsDir, "Bad_Name.json"), "");
+    const canDropPerms = typeof process.getuid === "function" && process.getuid() !== 0;
+    if (canDropPerms) chmodSync(agentFile(G), 0o000);
+    await restart();
+    if (canDropPerms) {
+      const afterLs = await liveList();
+      ok(!afterLs.some((s) => s.id === G), "fixture: the unreadable (0000) record is not loaded this boot");
+      ok(existsSync(agentFile(G)) && !readdirSync(agentsDir).some((n) => n.startsWith(`${G}.json.corrupt-`)), "…and it was NOT quarantined — a read error is not a parse error");
+      const log2 = readFileSync(logPathOf(WS), "utf-8");
+      ok(new RegExp(` warn \\[agents\\] ${G}\\.json could not be read \\(EACCES\\)`).test(log2), "server.log names the read error and the file");
+      chmodSync(agentFile(G), 0o600);
+      await restart();
+      const back = (await liveList()).find((s) => s.id === G);
+      ok(back && back.task === "precious" && back.notes === "keep me" && !back.recoveredFrom, "readable again → the record loads with every field intact");
+    } else {
+      ok(true, "skip: running as root, EACCES cannot be provoked");
+    }
+    ok(existsSync(join(agentsDir, "Bad_Name.json")) && statSync(join(agentsDir, "Bad_Name.json")).size === 0 && !readdirSync(agentsDir).some((n) => n.startsWith("Bad_Name.json.corrupt-")) && !(await liveList()).some((s) => s.id === "Bad_Name"),
+      "a 0-byte file whose stem is not an agent id is left in place — no placeholder, no quarantine");
+    rmSync(join(agentsDir, "Bad_Name.json"));
+    const T = await createAgent("Torn");
+    await req("PATCH", `/api/sessions/${T}`, { task: "mid-write" });
+    truncateSync(agentFile(T), 0); // what an agent's own `>` write looks like for an instant
+    const arch = await req("GET", "/api/sessions/archived");
+    ok(arch.status === 200 && statSync(agentFile(T)).size === 0 && !readdirSync(agentsDir).some((n) => n.startsWith(`${T}.json.corrupt-`)), "GET /api/sessions/archived over a torn record quarantines nothing (recovery is boot-only)");
+    ok((await liveList()).find((s) => s.id === T)?.task === "mid-write", "…and the live session is untouched");
+    await req("PATCH", `/api/sessions/${T}`, { task: "written back" });
+    ok(readAgentFile(T).task === "written back", "the next save repairs the file");
+
+    // 4c. recoveredFrom is server-minted but lives on disk: a hand-edited value
+    //     is sanitised on the OPEN list like the checkpoint fields are.
+    const rj = readAgentFile(R);
+    rj.recoveredFrom = { file: "../evil<b>/x.json", at: "sk-not-a-timestamp", bytes: -5 };
+    writeFileSync(agentFile(R), JSON.stringify(rj));
+    await restart();
+    const rf = (await liveList()).find((s) => s.id === R)?.recoveredFrom;
+    ok(rf && rf.file === "..evilbx.json" && rf.at === null && rf.bytes === null, `a junk recoveredFrom on disk reaches the wire sanitised (${JSON.stringify(rf)})`);
+
+    // 5. server.log: the console is mirrored into the workspace, 0600.
+    const logPath = logPathOf(WS);
+    ok(existsSync(logPath) && (statSync(logPath).mode & 0o777) === 0o600, "…/.hadron/server.log exists, mode 0600");
+    const log = existsSync(logPath) ? readFileSync(logPath, "utf-8") : "";
+    ok(/ warn \[agents\] repro-a\.json was unreadable \(0 bytes/.test(log) && log.includes("moved to repro-a.json.corrupt-"), "the recovery warning is in server.log with the file names");
+    ok(/ info Found \d+ orphaned tmux session/.test(log), "the orphan notice is in server.log");
+    const doc2 = await (await req("GET", "/api/doctor")).json();
+    ok(doc2.serverLog && doc2.serverLog.ok === true && doc2.serverLog.error === null, "GET /api/doctor reports serverLog {ok:true}");
+    const docOut = (() => { try { return hadron(["doctor"], { stdio: ["ignore", "pipe", "pipe"] }); } catch (e) { return String(e.stdout || ""); } })(); // exit 1 on the hand-started server's red row is expected
+    ok(docOut.includes("server.log: console mirrored"), "hadron doctor shows the server.log row");
+    const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
+    // the boot generation line carries the machine's boot_id — a uuid, not a secret
+    const leak = log.split("\n").find((l) => l.includes(TOKEN) || (UUID.test(l) && !l.includes("boot generation boot-")));
+    ok(!leak, `server.log carries no token and no session id${leak ? ` (${leak.replace(TOKEN, "<token>").replace(UUID, "<uuid>")})` : ""}`);
   }
 
   console.log(`\n${failed === 0 ? "PASS" : "FAIL"}: ${passed} passed, ${failed} failed`);

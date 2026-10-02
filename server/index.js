@@ -21,7 +21,7 @@ import { findRegistrySession, findTmuxlessRecordFor, classifyTmuxless, readRegis
 import { syncSkills } from "./skills.js";
 import { collectProvenance } from "./provenance.js";
 import { transcriptPath, readTranscriptSummary, transcriptWire, CONTEXT_WINDOW, readTranscriptFiles, filesWire, FILES_CHUNK_BYTES, FILES_MAX_LINE, FILES_CORE } from "./transcript.js";
-import { warnOnce } from "./log.js";
+import { warnOnce, initServerLog, serverLogStatus } from "./log.js";
 import { gitChanges, gitDiffFile } from "./changes.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { readQuota } from "./quota.js";
@@ -816,8 +816,18 @@ app.get("/api/doctor", async (req, res) => {
         finding.message += " · transcript file unreadable (no last-reply preview)";
       }
     }
+    // A placeholder written over an unreadable record (agent-store loadAgents):
+    // the agent is back but its name/task/artifacts/notes are gone. Never a
+    // silent green — at least yellow, with the quarantined file named.
+    const recovered = safeRecoveredFrom(session.recoveredFrom, now);
+    if (recovered) {
+      const note = `record was unreadable at boot (${recovered.bytes === null ? "?" : recovered.bytes} bytes) — placeholder written, name/task/artifacts/notes lost; original kept as .hadron/agents/${recovered.file}`;
+      finding.message += ` · ${note}`;
+      if (finding.level !== "red") finding.level = "yellow";
+    }
     return {
       id: session.id,
+      recovered,
       name: session.name,
       group: session.group || null,
       cwd: session.cwd || null,
@@ -852,6 +862,10 @@ app.get("/api/doctor", async (req, res) => {
     // key named "sessionId" anywhere (a grep-for-leaks invariant the test holds).
     claudeCaps: { probed: caps.probed, resume: caps.resume, supportsSessionId: caps.sessionId },
     checkpointPersistThresholdMs: CHECKPOINT_PERSIST_THRESHOLD_MS,
+    // .hadron/server.log — a dead mirror is a silent failure (the file exists
+    // for post-hoc forensics); the CLI shows it as a local row. No path leaks
+    // beyond the workspace the token holder already knows.
+    serverLog: (() => { const l = serverLogStatus(); return { ok: l.ok, error: l.error }; })(),
     // Claude's own pane → session registry (~/.claude/sessions): the
     // deterministic id source. Counts only — no ids, no pids.
     sessionRegistry: {
@@ -1031,8 +1045,15 @@ function coreFor(s, core) {
 // `authenticated`: the request carried the token. It gates everything that is
 // the agent's own business (transcript text, files, coreDismissed, context
 // arithmetic); the single-session POST/PATCH responses are the reduced form.
+// recoveredFrom is server-minted, but it lives on disk where a hand edit can
+// put anything — sanitise it on every wire form like the checkpoint fields.
+function safeRecoveredFrom(rf, now = Date.now()) {
+  if (!rf || typeof rf !== "object") return null;
+  return { file: String(rf.file || "").replace(/[^\w.@-]/g, "").slice(0, 200), at: safeTimestamp(rf.at, now), bytes: Number.isInteger(rf.bytes) && rf.bytes >= 0 ? rf.bytes : null };
+}
 function resolvedSession(s, { authenticated = false } = {}) {
-  const { transcript, contextPct, files, coreDismissed, checkpoint, ...rest } = s;
+  const { transcript, contextPct, files, coreDismissed, checkpoint, recoveredFrom, ...rest } = s;
+  if (recoveredFrom) rest.recoveredFrom = safeRecoveredFrom(recoveredFrom);
   const context = contextWire(s);
   const cp = safeCheckpoint(checkpoint);
   let fw = null;
@@ -1220,7 +1241,46 @@ app.delete("/api/sessions/:id/permanent", (req, res) => {
   res.json({ ok: true });
 });
 
+// pendingOrphans is computed at boot; the world moves on. An entry whose id
+// has since become a live agent (re-spawned under the same name — prod
+// 2026-10-01: Kill All on the stale banner would have killed the live agent)
+// or whose tmux session is gone is dropped before every read and every
+// action, and kill refuses a session a known agent now owns.
+function orphanOwner(o) {
+  const id = agentIdFromSuffix(o.agentId);
+  const s = sessions.get(id);
+  return s && !s.archived ? id : null;
+}
+// GET /api/orphans is open, so the `tmux ls` behind a prune is rate-limited
+// to one per second — an anonymous poller cannot make the server fork per hit.
+let orphansPrunedAt = 0;
+function pruneOrphans({ force = false } = {}) {
+  if (!pendingOrphans.length) return;
+  if (!force && Date.now() - orphansPrunedAt < 1000) return;
+  orphansPrunedAt = Date.now();
+  const out = tmuxSafe(["ls", "-F", "#{session_name}"]);
+  const alive = out === null ? null : new Set(out.trim().split("\n").filter(Boolean));
+  for (let i = pendingOrphans.length - 1; i >= 0; i--) {
+    const o = pendingOrphans[i];
+    if (orphanOwner(o) || (alive && !alive.has(o.tmuxSession))) pendingOrphans.splice(i, 1);
+  }
+}
+// 404 for an unknown name; 409 when the name is a live agent's own session
+// (or one of its shell/vim tabs) — the client must never kill that.
+function orphanIndexOr(res, tmuxSession) {
+  pruneOrphans({ force: true });
+  const idx = pendingOrphans.findIndex(o => o.tmuxSession === tmuxSession);
+  if (idx !== -1) return idx;
+  if (tmuxSession.startsWith(`${TMUX_PREFIX}-`)) {
+    const owner = orphanOwner({ agentId: tmuxSession.slice(TMUX_PREFIX.length + 1) });
+    if (owner) { res.status(409).json({ error: `tmux session now belongs to agent ${owner} — not an orphan`, agentId: owner }); return -1; }
+  }
+  res.status(404).json({ error: "orphan not found" });
+  return -1;
+}
+
 app.get("/api/orphans", (req, res) => {
+  pruneOrphans();
   res.json(pendingOrphans);
 });
 
@@ -1244,8 +1304,8 @@ function adoptOrphanId(id) {
 
 app.post("/api/orphans/:tmuxSession/adopt", (req, res) => {
   const { tmuxSession } = req.params;
-  const idx = pendingOrphans.findIndex(o => o.tmuxSession === tmuxSession);
-  if (idx === -1) return res.status(404).json({ error: "orphan not found" });
+  const idx = orphanIndexOr(res, tmuxSession);
+  if (idx === -1) return;
   const orphan = pendingOrphans[idx];
   const id = agentIdFromSuffix(orphan.agentId);
   if (!isValidId(id)) return res.status(400).json({ error: "invalid agent id" });
@@ -1256,8 +1316,8 @@ app.post("/api/orphans/:tmuxSession/adopt", (req, res) => {
 
 app.post("/api/orphans/:tmuxSession/kill", (req, res) => {
   const { tmuxSession } = req.params;
-  const idx = pendingOrphans.findIndex(o => o.tmuxSession === tmuxSession);
-  if (idx === -1) return res.status(404).json({ error: "orphan not found" });
+  const idx = orphanIndexOr(res, tmuxSession);
+  if (idx === -1) return;
   tmuxSafe(["kill-session", "-t", tmuxSession]);
   pendingOrphans.splice(idx, 1);
   res.json({ ok: true });
@@ -1265,22 +1325,28 @@ app.post("/api/orphans/:tmuxSession/kill", (req, res) => {
 
 app.post("/api/orphans/adopt-all", (req, res) => {
   const adopted = [];
-  for (const orphan of [...pendingOrphans]) {
-    const id = agentIdFromSuffix(orphan.agentId);
-    if (!isValidId(id)) continue;
+  pruneOrphans({ force: true });
+  for (let i = pendingOrphans.length - 1; i >= 0; i--) {
+    const id = agentIdFromSuffix(pendingOrphans[i].agentId);
+    if (!isValidId(id)) continue; // not adoptable — stays listed, not silently dropped
     adoptOrphanId(id);
     adopted.push(id);
+    pendingOrphans.splice(i, 1);
   }
-  pendingOrphans.length = 0;
   res.json({ ok: true, adopted });
 });
 
 app.post("/api/orphans/kill-all", (req, res) => {
-  for (const orphan of [...pendingOrphans]) {
+  pruneOrphans({ force: true });
+  const killed = [];
+  for (let i = pendingOrphans.length - 1; i >= 0; i--) {
+    const orphan = pendingOrphans[i];
+    if (orphanOwner(orphan)) continue; // belt and braces — prune already dropped it; an owned one is never killed, never cleared
     tmuxSafe(["kill-session", "-t", orphan.tmuxSession]);
+    killed.push(orphan.tmuxSession);
+    pendingOrphans.splice(i, 1);
   }
-  pendingOrphans.length = 0;
-  res.json({ ok: true });
+  res.json({ ok: true, killed });
 });
 
 app.post("/api/sessions", (req, res) => {
@@ -2905,6 +2971,9 @@ function resolveAgentCwd(session) {
 
 server.listen(PORT, HADRON_HOST, () => {
   const config = initWorkspace(WORKSPACE);
+  // Mirror the console into <workspace>/.hadron/server.log (0600, 2 MB, one
+  // rotation) so a restart reason or an orphan notice is recoverable later.
+  initServerLog(join(WORKSPACE, ".hadron", "server.log"));
   AUTH_TOKEN = loadOrCreateToken();
   writeRuntimeFile();
   writeServerRecord();
@@ -2926,7 +2995,7 @@ server.listen(PORT, HADRON_HOST, () => {
     console.log(`⚠ Binding ${HADRON_HOST} — API is reachable beyond localhost. Token + Origin guard active.`);
   }
 
-  const loaded = loadAgents();
+  const loaded = loadAgents({ recover: true });
   let activeCount = 0;
   let archivedCount = 0;
   for (const [id, agent] of loaded) {

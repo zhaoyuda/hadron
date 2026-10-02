@@ -125,6 +125,7 @@ async function fetchSessions() {
     sessions = await res.json();
     sessionsStale = false;
     applyPendingAcks(sessions);
+    recheckOrphansIfShown();
   } catch (e) {
     sessionsStale = true;
     console.error("Failed to fetch sessions:", e);
@@ -1097,7 +1098,11 @@ function mkDeckCard(s, idx, allowDrag = true) {
   if (cpLine && (state === "idle" || state === "done")) sub = `<span class="dk-cp">${esc(cpLine)}</span>${age ? ` · ${age}` : ""}`;
 
   const draggable = allowDrag ? ` draggable="true"` : "";
-  const pin = (s.pinned ? `<span class="dk-pin" title="Pinned">📌</span>` : "") + (s.parked ? `<span class="dk-pin dk-parked" title="Parked — folded away until you unpark it (still running)">⏸</span>` : "");
+  const pin = (s.pinned ? `<span class="dk-pin" title="Pinned">📌</span>` : "") + (s.parked ? `<span class="dk-pin dk-parked" title="Parked — folded away until you unpark it (still running)">⏸</span>` : "")
+    // The record file was unreadable at boot and this is the placeholder the
+    // server wrote in its place — the agent is back (tmux kept), its
+    // name/task/artifacts/notes are not. Shown until the agent is closed.
+    + (s.recoveredFrom ? `<span class="dk-pin dk-recovered" title="${esc(`Record was unreadable at boot — placeholder written, name/task/artifacts/notes lost. Original kept as .hadron/agents/${s.recoveredFrom.file || "?"}`)}">⚠</span>` : "");
   const tip = cardTooltip(s);
   const titleAttr = tip ? ` title="${esc(tip)}"` : "";
   return `<div class="dk${stateClass}${activeClass}" data-sid="${s.id}"${draggable}${titleAttr} oncontextmenu="showCtxMenu(event,'${s.id}')">${avatar}<div class="dk-info"><div class="dk-name">${esc(name)}${pin}${contextBadge(s)}</div><div class="dk-sub ${subClass}">${sub}</div></div></div>`;
@@ -3141,6 +3146,17 @@ async function orphanAction(action) {
   document.getElementById("orphan-banner")?.remove();
   await fetchSessions();
   renderDeck();
+}
+// The banner is a boot-time snapshot the server now re-validates on every
+// read; while it is showing, re-read it with the deck so a re-spawned agent
+// drops off the list before anyone can click Kill All.
+let orphanRecheckAt = 0;
+function recheckOrphansIfShown() {
+  if (!document.getElementById("orphan-banner")) return;
+  const now = Date.now();
+  if (now - orphanRecheckAt < 10000) return;
+  orphanRecheckAt = now;
+  checkOrphans();
 }
 
 function dismissOrphans() {

@@ -88,7 +88,16 @@ The server takes a workspace directory as its argument (defaults to `process.cwd
   config.json       # Workspace name, group order, group attributes, kernel config
   agents/
     agent-name.json  # Per-agent config: group, artifacts, state, notes
+  server.log        # the server's console, mirrored (0600, 2 MB, one rotation to server.log.1)
 ```
+
+Records are written atomically (temp file + rename), so a crash mid-write never
+leaves a half-written or empty file. If a record is unreadable at boot anyway,
+the server moves it aside as `agents/<id>.json.corrupt-<stamp>`, writes a
+placeholder (name = id, nothing else known) and keeps the agent — and its tmux
+session — listed, marked ⚠ on the card, in `hadron ls` and in `hadron doctor`.
+The name/task/artifacts/notes are lost; copy them back from the quarantined
+file and delete it when you are done.
 
 Each agent gets a tmux session named `hadron-<workspace>-<agent-id>`. Shell tabs are sub-sessions named `hadron-<workspace>-<agent-id>-sh<N>`.
 
@@ -131,6 +140,11 @@ hadron quota [--json|--install|--uninstall]
                                          # Claude 5h/7d + Codex usage windows; --install wires
                                          #   `hadron quota-sink` into claude's statusLine so the
                                          #   dashboard widget gets claude's numbers (reversible)
+hadron orphans [ls --json]               # tmux sessions named like this workspace's agents that no
+                                         #   record claims (found at boot; also appended to `hadron ls`)
+hadron orphans adopt|kill <tmux|id>      # bring one back as an agent / kill it; --all for every one.
+                                         #   The list is re-checked first: a session a live agent now
+                                         #   owns is refused (409), a vanished one drops out
 hadron adopt <name|id> --session-id <uuid> [--force]
                                          # hand Hadron a claude session id it could not learn itself
                                          #   (hand-attached agent, shared cwd where scraping is refused);

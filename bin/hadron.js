@@ -218,6 +218,7 @@ const COMMAND_FLAGS = {
   message: ["no-enter", "raw", "force"],
   pin: [], unpin: [], park: [], unpark: [], close: [], restore: [],
   adopt: ["session-id", "force"],
+  orphans: ["json", "all"],
   artifacts: ["auto"],
   kernels: ["json", "marimo", "jupyter"],
   notes: [],
@@ -262,6 +263,16 @@ function printAgent(a) {
   if (a.relatedAgents && a.relatedAgents.length) console.log(`  related: ${a.relatedAgents.join(", ")}`);
   if (a.notes) console.log(`  notes: ${a.notes.split("\n")[0]}${a.notes.includes("\n") ? " …" : ""}`);
   if (a.checkpoint) for (const l of checkpointLines(a.checkpoint)) console.log(`  ${l}`);
+  if (a.recoveredFrom) console.log(`  ⚠ record was unreadable at boot — placeholder (name/task/artifacts lost); original kept as .hadron/agents/${a.recoveredFrom.file || "?"}`);
+}
+// Boot-time orphans: tmux sessions named like this workspace's agents that
+// no record claims. Before, only the dashboard banner and GET /api/orphans
+// knew; from the CLI the agent simply did not exist.
+async function fetchOrphans() {
+  try { const r = await fetch(`${BASE}/api/orphans`); return r.ok ? await r.json() : []; } catch { return []; }
+}
+function printOrphan(o) {
+  console.log(`⚠ orphan tmux session ${o.tmuxSession}  (agent id ${o.agentId}${o.hasRunningProcesses ? ", processes running" : ", idle"})  — no record claims it: hadron orphans adopt ${o.tmuxSession} | hadron orphans kill ${o.tmuxSession}`);
 }
 function checkpointLines(c) {
   const one = (t) => String(t).split("\n")[0] + (String(t).includes("\n") ? " …" : "");
@@ -408,6 +419,35 @@ async function main() {
       const list = await api("GET", "/api/sessions");
       if (flags.json) { console.log(JSON.stringify(list, null, 2)); break; }
       for (const a of list) printAgent(a);
+      for (const o of await fetchOrphans()) printOrphan(o);
+      break;
+    }
+    case "orphans": {
+      // hadron orphans [ls] [--json] | adopt <tmuxSession|agentId> | adopt --all | kill <tmuxSession|agentId> | kill --all
+      const sub = positional[0] || "ls";
+      if (sub === "ls") {
+        const list = await fetchOrphans();
+        if (flags.json) { console.log(JSON.stringify(list, null, 2)); break; }
+        if (!list.length) { console.log("no orphan tmux sessions"); break; }
+        for (const o of list) printOrphan(o);
+        break;
+      }
+      if (sub !== "adopt" && sub !== "kill") die("usage: hadron orphans [ls [--json] | adopt <tmuxSession|agentId> | adopt --all | kill <tmuxSession|agentId> | kill --all]");
+      if (flags.all) {
+        const out = await api("POST", `/api/orphans/${sub}-all`);
+        if (flags.json) { console.log(JSON.stringify(out, null, 2)); break; }
+        console.log(sub === "adopt" ? `adopted ${(out.adopted || []).length}: ${(out.adopted || []).join(", ") || "(none)"}` : `killed ${(out.killed || []).length}: ${(out.killed || []).join(", ") || "(none)"}`);
+        break;
+      }
+      const target = positional[1];
+      if (!target) die(`usage: hadron orphans ${sub} <tmuxSession|agentId> | --all`);
+      const list = await fetchOrphans();
+      const hit = list.filter((o) => o.tmuxSession === target || o.agentId === target);
+      if (!hit.length) die(`no pending orphan matches "${target}" (hadron orphans ls)`);
+      if (hit.length > 1) die(`"${target}" matches ${hit.length} orphans: ${hit.map((o) => o.tmuxSession).join(", ")} — use the tmux session name`);
+      const out = await api("POST", `/api/orphans/${encodeURIComponent(hit[0].tmuxSession)}/${sub}`);
+      if (flags.json) { console.log(JSON.stringify(out, null, 2)); break; }
+      console.log(sub === "adopt" ? `adopted ${hit[0].tmuxSession} as agent ${out.agentId}` : `killed ${hit[0].tmuxSession}`);
       break;
     }
     case "whoami": {
@@ -836,6 +876,10 @@ async function main() {
         } catch (e) { local.push({ level: "red", message: `GET /api/doctor errored — ${e.message}` }); }
       }
 
+      if (doctor && doctor.serverLog) {
+        if (doctor.serverLog.ok) local.push({ level: "green", message: "server.log: console mirrored to .hadron/server.log" });
+        else local.push({ level: "yellow", message: `server.log: not written (${doctor.serverLog.error || "?"}) — the console is not mirrored; check that .hadron/server.log is writable` });
+      }
       const agents = (doctor && doctor.agents) || [];
       const reds = local.filter((f) => f.level === "red").length + agents.filter((a) => a.finding.level === "red").length;
       const yellows = local.filter((f) => f.level === "yellow").length + agents.filter((a) => a.finding.level === "yellow").length;
@@ -1024,6 +1068,11 @@ Commands:
   hadron adopt <name|id> --session-id <uuid> [--force]
                                            hand Hadron a claude session id it could not scrape (hand-attached
                                            agent, shared cwd); verified against ~/.claude/projects unless --force
+  hadron orphans [ls] [--json]             tmux sessions of this workspace that no agent record claims (found at
+                                           boot; "hadron ls" lists them too)
+  hadron orphans adopt <tmux|id> | --all   bring one (or every) orphan back as an agent (restores its record if
+                                           one is on disk, else a blank one named by its id)
+  hadron orphans kill <tmux|id> | --all    kill the orphan tmux session(s)
   hadron artifacts pin [--auto | <path...>] pin files to the current agent's panel (alias: add)
   hadron artifacts ls                      list the current agent's pinned files
   hadron notes [show|set "..."|append "..."]

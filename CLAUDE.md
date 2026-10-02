@@ -49,7 +49,7 @@ scripts/
   setup-workspace.js  # Interactive workspace initializer
 test/
   unit/               # detectState/nextState fixtures + security HTTP suite (npm test)
-  e2e/                # Playwright browser modules M1-M30 (npm run test:e2e)
+  e2e/                # Playwright browser modules M1-M31 (npm run test:e2e)
 ```
 
 ## Conventions
@@ -155,7 +155,24 @@ npm test
 #                            context meter's sticky rule at the tmux boundary (agent-process pane with the footer → contextPct,
 #                            a shell foreground keeps the reading while working and drops it otherwise, read before _applySnap); it
 #                            covers the boot rule: a first post-boot verdict equal to the persisted attentionState is a
-#                            re-recognition, not an entry — a read agent stays read across a restart)
+#                            re-recognition, not an entry — a read agent stays read across a restart;
+#                            record durability (prod 2026-10-01: a 0-byte <id>.json made the agent vanish from the dashboard
+#                            while its tmux session ran on for 15 h): writeAgentFile goes through <id>.json.<pid>.tmp + rename
+#                            (21 saves → no temp file, every record parses); an unreadable record at boot is moved aside to
+#                            <id>.json.corrupt-<stamp>, a placeholder (name = id, Workers, recoveredFrom {file, bytes, at})
+#                            is written and the agent stays listed with its tmux session as its own — never an orphan, never
+#                            killed, a second restart loads the placeholder without a second quarantine; recovery never
+#                            touches a GOOD record: a read ERROR (EACCES/EMFILE — e.code) is skipped in place and loads
+#                            intact once readable, a stem that is not an agent id is never minted, and recovery runs at
+#                            boot only — GET /api/sessions/archived over a torn record quarantines nothing; a hand-edited
+#                            recoveredFrom reaches the open list sanitised; `hadron ls` and
+#                            `hadron doctor` (yellow) name the quarantined file; `hadron orphans [ls --json|adopt|kill] <tmux|id>`
+#                            and `--all` reach the boot-time orphan list from the CLI, `hadron ls` appends its rows; the
+#                            list is re-validated on every read and before every adopt/kill — an id spawned again drops
+#                            out, kill/adopt on a session a live agent now owns is 409 and kill-all skips it, a vanished
+#                            session is 404; .hadron/server.log (0600) mirrors the console with the recovery and orphan
+#                            lines, carrying no token and no session id, and `hadron doctor` has a row for it — a log
+#                            that cannot be opened or written warns once and shows yellow (silent-failure rule))
 #   + test-terminal-ws.js   (terminal pty lifecycle — the macOS ptmx-exhaustion class: normal close
 #                            releases the master fd (kill+destroy), ws heartbeat reaps half-open
 #                            connections' ptys, /api/health livePtys count, no fd accumulation.
@@ -449,6 +466,10 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                            API breaks nothing and an absent one leaves the topbar counter alone; an OSC 52 write the
 #                            browser refuses (Safari: no user gesture) becomes a one-click Copy offer that writes from the
 #                            click (ages out after 60 s; one at a time). No service worker on purpose. The M28 notification body carries the workspace name.)
+#   + test/e2e/m31-corrupt-record.js (an unreadable record is recovered, never dropped: a 0-byte <id>.json seeded before
+#                            boot paints a card named by its id with a ⚠ badge whose tooltip names the quarantined
+#                            <id>.json.corrupt-<stamp>; the healthy sibling has no badge; on disk a valid placeholder with
+#                            recoveredFrom beside the untouched original)
 ```
 
 `npm run test:e2e` runs `test/e2e/run-all.js`, which executes every `m*.js`
@@ -503,7 +524,7 @@ staging first:
    changes.
 2. `npm test` + `npm run test:e2e` in the worktree. The runner reports M10 as
    `XFAIL` (known headless-chromium clipboard issue, fails identically on main)
-   and exits 0 when it's the only failure — so a green run means M1–M9, M11–M30
+   and exits 0 when it's the only failure — so a green run means M1–M9, M11–M31
    all passed. Any `FAIL` (non-xfail) gates the branch.
 3. `scripts/predeploy-check.sh` — live-fire proof on staging that a service
    restart does NOT interrupt running agents (claude PIDs survive, a
