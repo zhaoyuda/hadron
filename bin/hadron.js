@@ -15,6 +15,7 @@ import { syncSkills, removeSkills, skillsStatus, userSkillsDir } from "../server
 import { gitInfo, packageVersion, short } from "../server/provenance.js";
 import { hookInstallStatus, installSessionHook, uninstallSessionHook } from "../server/checkpoint.js";
 import { pickClaudeRateLimits, writeReceipt, readQuota, readClaudeQuota, quotaInstallStatus, installQuotaSink, uninstallQuotaSink, STDIN_MAX_BYTES } from "../server/quota.js";
+import { summarizePerf, parseSince } from "../server/perf-log.js";
 
 const REPO = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -226,6 +227,7 @@ const COMMAND_FLAGS = {
   annotations: ["json"],
   watchdog: ["restart", "json", "stale-after", "boot-grace"],
   doctor: ["json"],
+  perf: ["json", "since"],
   quota: ["json", "install", "uninstall"],
   "quota-sink": ["tee"],
   version: ["json"], "--version": ["json"], "-v": ["json"],
@@ -880,6 +882,9 @@ async function main() {
         if (doctor.serverLog.ok) local.push({ level: "green", message: "server.log: console mirrored to .hadron/server.log" });
         else local.push({ level: "yellow", message: `server.log: not written (${doctor.serverLog.error || "?"}) — the console is not mirrored; check that .hadron/server.log is writable` });
       }
+      if (doctor && doctor.perfLog && !doctor.perfLog.ok) {
+        local.push({ level: "yellow", message: `perf log: not written (${doctor.perfLog.error || "?"}) — \`hadron perf\` has nothing new; check that .hadron/logs/ is writable` });
+      }
       // Errors the process guard absorbed: the server is up, but something
       // threw where nothing caught it — a bug to read about in server.log.
       if (doctor && doctor.guard && (doctor.guard.uncaught || doctor.guard.unhandledRejections)) {
@@ -891,9 +896,24 @@ async function main() {
       // over the timeout was SIGKILLed and the agent op it served was refused.
       if (doctor && doctor.tmux && typeof doctor.tmux.calls === "number") {
         const t = doctor.tmux;
+        // The health probe's verdict (server/tmux-health.js): latency from the
+        // state detector's own per-second batch, RSS/swap from /proc (Linux —
+        // "memory unknown" on macOS). Never a kill: the row says what to look at.
+        if (t.level === "warn" || t.level === "down") {
+          const gb = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`);
+          const mem = typeof t.rssMb === "number" ? `RSS ${gb(t.rssMb)} + ${gb(t.swapMb || 0)} swap` : `memory unknown (${t.memError || "no /proc"})`;
+          const alerts = t.ntfy ? (t.ntfy.enabled ? (t.ntfy.topicReadable ? "ntfy alerts on" : "ntfy alerts on but ~/.ntfy_topic_log is unreadable") : "ntfy alerts off (View → tmux Alerts via ntfy)") : "";
+          const memBad = (typeof t.rssMb === "number" && t.warnRssMb > 0 && t.rssMb >= t.warnRssMb) || (typeof t.swapMb === "number" && t.warnSwapMb > 0 && t.swapMb >= t.warnSwapMb);
+          const refused = (t.reasons || []).some((r) => /refused/.test(r));
+          const advice = memBad ? "a tmux this size is paging: close finished agents' sessions or restart the tmux server by hand when no agent is working"
+            : refused ? "the probes are refused at once — is the tmux server still alive (`tmux list-sessions`)?"
+            : t.level === "down" ? "it is not answering at all — if it is alive it is probably paging or wedged: check its RSS/swap (/proc/<pid>/status) and `tmux list-sessions`"
+            : "it is answering slowly — under load, or starting to page: check its RSS/swap (/proc/<pid>/status)";
+          local.push({ level: "yellow", message: `tmux ${t.level === "down" ? "is not answering" : "is degraded"} since ${t.since || "?"}: ${(t.reasons || []).join("; ") || "?"} (pid ${t.pid || "?"}, ${mem}, p95 ${t.latencyP95Ms ?? "n/a"} ms over the last minute${alerts ? `; ${alerts}` : ""}) — Hadron never kills it; ${advice}` });
+        }
         if (t.timeouts || t.busyRefusals) local.push({ level: "yellow", message: `tmux: ${t.timeouts} call${t.timeouts === 1 ? "" : "s"} timed out (> ${t.timeoutMs} ms) and ${t.busyRefusals} terminal connect${t.busyRefusals === 1 ? "" : "s"} refused as busy since boot (last timeout ${t.lastTimeoutAt || "?"}, ${t.lastTimeoutCmd || "?"}) — the tmux server is overloaded or paging; check its RSS/swap (\`tmux display -p '#{pid}'\`, /proc/<pid>/status)` });
         else if (t.slowCalls) local.push({ level: "yellow", message: `tmux: ${t.slowCalls} of ${t.calls} calls slower than ${t.slowMs} ms since boot (slowest ${t.maxMs} ms, last ${t.lastSlowAt || "?"}: ${t.lastSlowCmd || "?"}) — the tmux server is under load` });
-        else local.push({ level: "green", message: `tmux: ${t.calls} calls since boot, none slower than ${t.slowMs} ms (max ${t.maxMs} ms)` });
+        else if (t.level !== "warn" && t.level !== "down") local.push({ level: "green", message: `tmux: ${t.calls} calls since boot, none slower than ${t.slowMs} ms (max ${t.maxMs} ms)${typeof t.rssMb === "number" ? `; server pid ${t.pid} RSS ${t.rssMb} MB + ${t.swapMb} MB swap` : ""}${typeof t.latencyP95Ms === "number" ? `, probe p95 ${t.latencyP95Ms} ms` : ""}` });
       }
       const agents = (doctor && doctor.agents) || [];
       const reds = local.filter((f) => f.level === "red").length + agents.filter((a) => a.finding.level === "red").length;
@@ -954,6 +974,42 @@ async function main() {
       const verdict = reds ? "FAIL" : yellows ? "OK (with warnings)" : "OK";
       console.log(`\n${reds} red, ${yellows} yellow  →  ${verdict}`);
       if (reds) process.exit(1);
+      break;
+    }
+    case "perf": {
+      // Local read of .hadron/logs/perf*.jsonl (server/perf-log.js) — works
+      // with the server down, which is when the question gets asked.
+      if (!HADRON_DIR) die("no .hadron/ found walking up from here — run inside a workspace");
+      const sinceMs = parseSince(flags.since);
+      if (sinceMs === null) die(`--since: use <n>s|m|h|d (e.g. 30m, 1h, 2d) or all, not ${JSON.stringify(flags.since)}`);
+      const sum = summarizePerf({ dir: join(HADRON_DIR, "logs"), sinceMs });
+      if (flags.json) { console.log(JSON.stringify(sum, null, 2)); break; }
+      const span = sinceMs === Infinity ? "everything on disk" : `last ${typeof flags.since === "string" && flags.since ? flags.since : "1h"}`;
+      if (!sum.samples) {
+        console.log(`hadron perf — ${span}: no samples${sum.files ? "" : " (no .hadron/logs/perf.jsonl yet — a running server writes it; is this build the one that does?)"}`);
+        break;
+      }
+      const fmt = (v) => (v === null || v === undefined ? "-" : Math.round(v));
+      const fmtT = (iso) => iso.replace("T", " ").slice(0, 19);
+      console.log(`hadron perf — ${span}: ${sum.samples} samples, ${fmtT(sum.from)} → ${fmtT(sum.to)} UTC${sum.malformed ? `, ${sum.malformed} malformed lines skipped` : ""}\n`);
+      const table = (title, cols, rows) => {
+        if (!rows.length) { console.log(`${title}: none\n`); return; }
+        const widths = cols.map((c, i) => Math.max(c.label.length, ...rows.map((r) => String(c.get(r)).length)));
+        console.log(`${title}`);
+        console.log("  " + cols.map((c, i) => (i === 0 ? c.label.padEnd(widths[i]) : c.label.padStart(widths[i]))).join("  "));
+        for (const r of rows) console.log("  " + cols.map((c, i) => (i === 0 ? String(c.get(r)).padEnd(widths[i]) : String(c.get(r)).padStart(widths[i]))).join("  "));
+        console.log("");
+      };
+      const ms = (k) => (r) => fmt(r[k]);
+      table("API latency (ms)", [
+        { label: "route", get: (r) => `${r.method} ${r.route}` }, { label: "n", get: (r) => r.n }, { label: "p50", get: ms("p50") }, { label: "p95", get: ms("p95") }, { label: "max", get: ms("max") }, { label: "5xx", get: (r) => r.errors },
+      ], sum.http.slice(0, 25));
+      table("tmux calls slower than 500 ms", [
+        { label: "command", get: (r) => r.cmd }, { label: "n", get: (r) => r.n }, { label: "p50", get: ms("p50") }, { label: "p95", get: ms("p95") }, { label: "max", get: ms("max") }, { label: "timed out", get: (r) => r.timeouts },
+      ], sum.tmux);
+      table("terminal connect → first byte (ms)", [
+        { label: "", get: () => "all terminals" }, { label: "n", get: (r) => r.n }, { label: "p50", get: ms("p50") }, { label: "p95", get: ms("p95") }, { label: "max", get: ms("max") },
+      ], sum.ws.n ? [sum.ws] : []);
       break;
     }
     case "quota": {
@@ -1119,6 +1175,10 @@ Commands:
   hadron version [--json]                  CLI vs server provenance (commit/dirty/managedBy);
                                            exit 1 when the server is stale, a tree is dirty, or
                                            the server could not be verified (down/timeout/older)
+  hadron perf [--since 1h|30m|2d|all] [--json]
+                                           p50/p95/max from .hadron/logs/perf.jsonl: API latency per
+                                           route, tmux calls over 500 ms, terminal connect → first
+                                           byte (daily files, 7 kept) — "was it slow before it died?"
   hadron watchdog [--restart] [--json]     is the server's event loop alive? reads runtime.json +
        [--stale-after <s>] [--boot-grace <s>]  the .hadron/heartbeat mtime (no HTTP needed); exit 0
                                            alive, 1 not running, 2 wedged, 3 cannot judge

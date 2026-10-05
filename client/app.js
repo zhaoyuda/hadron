@@ -94,7 +94,23 @@ async function fetchWorkspace() {
     document.title = `${wsName} — Hadron`;
     if (config.groups) workspaceGroups = config.groups;
     if (config.groupConfig) groupConfig = config.groupConfig;
+    tmuxAlertsNtfy = !!(config.tmuxAlerts && config.tmuxAlerts.ntfy);
   } catch {}
+}
+
+// tmux Alerts via ntfy — a workspace setting (every browser sees the same
+// checkbox), stored by the server in .hadron/config.json, default off.
+let tmuxAlertsNtfy = false;
+async function setTmuxAlertsNtfy(on) {
+  try {
+    const res = await fetch("/api/workspace", {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tmuxAlerts: { ntfy: !!on } }),
+    });
+    if (!res.ok) throw new Error(`PATCH /api/workspace ${res.status}`);
+    const config = await res.json();
+    tmuxAlertsNtfy = !!(config.tmuxAlerts && config.tmuxAlerts.ntfy);
+  } catch (e) { console.error("Failed to save tmux alert setting:", e); }
 }
 
 async function saveWorkspaceGroups(groups) {
@@ -2961,6 +2977,7 @@ async function showMenu(menuId, anchorEl) {
       menuItem("Banner Only", "set-notify", { checked: notifyLevel === "banner", data: 'data-level="banner"' }),
       menuItem("Off", "set-notify", { checked: notifyLevel === "off", data: 'data-level="off"' }),
       menuItem("System Notifications", "toggle-sysnotify", { checked: sysNotify }),
+      menuItem("tmux Alerts via ntfy", "toggle-tmux-ntfy", { checked: tmuxAlertsNtfy }),
     ].join("");
     const editorSub = [
       menuItem("Text (built-in)", "set-editor", { checked: editorPref() === "text", data: 'data-editor="text"' }),
@@ -3066,6 +3083,8 @@ async function handleMenuAction(action, item) {
     saveUIState();
   } else if (action === "toggle-sysnotify") {
     toggleSystemNotifications();
+  } else if (action === "toggle-tmux-ntfy") {
+    setTmuxAlertsNtfy(!tmuxAlertsNtfy);
   } else if (action === "set-editor") {
     setEditorPref(item.dataset.editor === "vim" ? "vim" : "text");
   } else if (action === "toggle-preview") {
@@ -3221,6 +3240,38 @@ async function pollQuota() {
 }
 pollQuota();
 setInterval(pollQuota, QUOTA_POLL_MS);
+
+// ═══ TMUX HEALTH PILL ═══
+// /api/health.tmux is the probe's verdict (server/tmux-health.js). The pill
+// exists only while tmux is warn/down — a healthy tmux has no UI at all.
+const TMUX_HEALTH_POLL_MS = 30000;
+function renderTmuxHealth(t) {
+  const el = document.getElementById("tmux-health");
+  if (!el) return;
+  const bad = t && (t.level === "warn" || t.level === "down");
+  el.hidden = !bad;
+  if (!bad) { el.textContent = ""; el.title = ""; el.classList.remove("th-down"); return; }
+  el.classList.toggle("th-down", t.level === "down");
+  const gb = typeof t.rssMb === "number" ? `${(t.rssMb / 1024).toFixed(1)} GB` : null;
+  const swap = typeof t.swapMb === "number" && t.swapMb > 0 ? ` + ${(t.swapMb / 1024).toFixed(1)} GB swap` : "";
+  const memBad = (t.reasons || []).some((r) => /RSS|swap/i.test(r));
+  el.textContent = t.level === "down" ? "⚠ tmux not answering"
+    : memBad && gb ? `⚠ tmux ${gb}${swap}`
+    : `⚠ tmux slow ${t.latencyP95Ms ?? t.latencyMs ?? "?"} ms`;
+  el.title = `tmux server pid ${t.pid || "?"} ${t.level} since ${t.since || "?"}\n` +
+    (t.reasons || []).map((r) => `  ${r}`).join("\n") +
+    (gb ? `\nRSS ${gb}${swap}` : "") + (typeof t.latencyP95Ms === "number" ? `\nprobe p95 ${t.latencyP95Ms} ms` : "") +
+    "\nHadron never kills tmux — see hadron doctor";
+}
+async function pollTmuxHealth() {
+  try {
+    const res = await fetch("/api/health");
+    const h = res.ok ? await res.json() : null;
+    if (h) renderTmuxHealth(h.tmux);
+  } catch {}
+}
+pollTmuxHealth();
+setInterval(pollTmuxHealth, TMUX_HEALTH_POLL_MS);
 
 // ═══ POLL FOR SESSION UPDATES ═══
 setInterval(async () => {

@@ -7,7 +7,7 @@
  * States: idle, working, done, blocked
  */
 
-import { tmuxAsync } from "./tmux.js";
+import { tmuxAsync, isTmuxTimeout } from "./tmux.js";
 import { warnOnce } from "./log.js";
 
 // Processes that indicate an agent (Claude) is running
@@ -110,11 +110,26 @@ export function parsePaneList(cmdOut, pathOut) {
 let probeInflight = null;
 let lastBatchSize = 0;     // active panes seen by the previous successful batch
 let emptyStreak = 0;
+// The batch's wall time is the tmux latency probe (server/tmux-health.js):
+// one observer, set by the server, gets (ms, failed, timedOut) per batch — no
+// extra spawn. A refused call (no tmux server) and a killed one (tmux not
+// answering) are different diagnoses, so the kind travels with the failure.
+let probeObserver = null;
+export function setProbeObserver(fn) { probeObserver = typeof fn === "function" ? fn : null; }
 export function probePanes() {
   if (probeInflight) return probeInflight;
   probeInflight = (async () => {
+    const t0 = Date.now();
+    let cmdOut;
     try {
-      const cmdOut = await tmuxAsync(["list-panes", "-a", "-F", BATCH_CMD_FORMAT], { timeout: 2000 });
+      cmdOut = await tmuxAsync(["list-panes", "-a", "-F", BATCH_CMD_FORMAT], { timeout: 2000 });
+    } catch (e) {
+      try { probeObserver?.(Date.now() - t0, true, isTmuxTimeout(e)); } catch {}
+      probeInflight = null;
+      throw e;
+    }
+    try { probeObserver?.(Date.now() - t0, false, false); } catch {}
+    try {
       const pathOut = await tmuxAsync(["list-panes", "-a", "-F", BATCH_PATH_FORMAT], { timeout: 2000 }).catch(() => "");
       const panes = parsePaneList(cmdOut, pathOut);
       // Seen once on prod (2026-09-25 12:23:59): a batch with no active pane at

@@ -350,6 +350,38 @@ npm test
 #                            another checkout repointed, non-object hooks refused untouched); the real flow is proven with
 #                            the fixture claude running the hook from the agent's pane → confidence `hook`, doctor green
 #                            "resumes as hook"; logs name the agent, never the id or the token)
+#   + test-tmux-health.js   (tmux server health probe — server/tmux-health.js, prod 2026-10-05 (5.6 GB tmux paging):
+#                            latency is the wall time of the state detector's own per-second `list-panes -a` batch
+#                            (setProbeObserver in state-detector.js — no extra spawn), RSS/VmSwap from /proc/<pid>/status
+#                            every 30 s (pid from `display-message -p #{pid}`, asked again every 5 s while unknown, null +
+#                            memError on macOS); judge: down = the last 3 probes failed in a row — the reason says "timed out" (not answering) vs "refused at once (no tmux server?)" (state-detector passes isTmuxTimeout through the observer), a threshold of 0 disables that memory check, a reused pid (/proc Name not tmux) is dropped and re-resolved (the first
+#                            answered probe clears it), warn = ≥ 3 probes over 500 ms in the 60-s window or RSS ≥
+#                            HADRON_TMUX_WARN_RSS_MB (2048) / swap ≥ HADRON_TMUX_WARN_SWAP_MB (512); never kills anything.
+#                            Live on a private tmux server: /api/health.tmux {level, reasons, since, pid, latencyMs,
+#                            latencyP95Ms, rssMb, swapMb, memError, ntfy:{enabled, topicReadable}} next to the call stats;
+#                            SIGSTOP → down (server stays up), SIGCONT → ok on the next probe; PATCH /api/workspace
+#                            tmuxAlerts = { ntfy: boolean } only (400 otherwise, persisted in .hadron/config.json, View →
+#                            Notifications → "tmux Alerts via ntfy", DEFAULT OFF); with it on, one POST to
+#                            HADRON_NTFY_URL/<topic> per level change (Title/Priority/Tags headers, body names `hadron
+#                            doctor` and says nothing was killed, ≤ 1 per level per 30 min, a recovery push only after a
+#                            sent push), none while off; the topic (~/.ntfy_topic_log, HADRON_NTFY_TOPIC_FILE in tests) is
+#                            read at send time and is on no payload and in no log line; `hadron doctor` yellow "tmux is
+#                            not answering / degraded since …" row with reasons, pid, RSS/swap, p95 and the alert setting,
+#                            green row carries pid/RSS/p95 when healthy; the topbar pill (#tmux-health, polls /api/health
+#                            every 30 s) exists only while warn/down)
+#   + test-perf-log.js      (perf log — server/perf-log.js + `hadron perf`: <ws>/.hadron/logs/perf.jsonl, one compact
+#                            JSON line per sample {t, kind, …}: http = every /api request as {method, route, status, ms}
+#                            with the ROUTE TEMPLATE (`/api/sessions/:id/changes`), "(unmatched)" for 404/401 — never a
+#                            query string, token or agent id; tmux = calls over 500 ms {cmd, ms, timedOut} (subcommand,
+#                            never argv — setSlowCallObserver in tmux.js); ws = terminal connect → first pty byte {agent,
+#                            shell, ms}. Buffered, appended once a second, flushed on SIGTERM and on an aborted response too; rotated by LOCAL day (or at 32 MiB within a day, -HHMMSS suffix) to
+#                            perf-YYYY-MM-DD.jsonl, 7 days kept, pruned; an unwritable file holds lines in memory (cap
+#                            5000, drops counted), warns once, recovers; /api/doctor.perfLog {ok, error, lines, dropped}
+#                            → yellow doctor row only when not written. `hadron perf [--since 1h|30m|2d|all] [--json]`
+#                            reads live + rotated files locally (server may be down): API latency per route n/p50/p95/
+#                            max/5xx sorted by count, slow tmux calls per command with the timeout count, terminal
+#                            connect → first byte; garbage --since exits 1 with the grammar; malformed lines are counted
+#                            and skipped)
 ```
 
 ### Reliability gate

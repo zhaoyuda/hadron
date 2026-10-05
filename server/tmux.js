@@ -70,6 +70,10 @@ export const TMUX_SLOW_MS = 500;
 const SLOW_LOG_EVERY_MS = 10000;
 const stats = { calls: 0, slowCalls: 0, timeouts: 0, maxMs: 0, lastMs: 0, lastSlowAt: null, lastSlowMs: 0, lastSlowCmd: null, lastTimeoutAt: null, lastTimeoutCmd: null };
 let lastSlowLogAt = 0;
+// One observer for slow calls (the perf log, server/perf-log.js): gets
+// { cmd, ms, timedOut } — the subcommand only, never the argv.
+let slowObserver = null;
+export function setSlowCallObserver(fn) { slowObserver = typeof fn === "function" ? fn : null; }
 function record(args, startedAt, err) {
   const ms = Date.now() - startedAt;
   stats.calls++;
@@ -86,6 +90,7 @@ function record(args, startedAt, err) {
     stats.lastSlowAt = new Date(startedAt + ms).toISOString();
     stats.lastSlowMs = ms;
     stats.lastSlowCmd = cmd;
+    try { slowObserver?.({ cmd, ms, timedOut: isTmuxTimeout(err) }); } catch {}
     const now = Date.now();
     if (now - lastSlowLogAt >= SLOW_LOG_EVERY_MS) {
       lastSlowLogAt = now;

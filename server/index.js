@@ -11,17 +11,19 @@ import { connect as netConnect } from "net";
 import { networkInterfaces, hostname, tmpdir, homedir } from "os";
 import { URL } from "url";
 import { randomBytes, createHash } from "crypto";
-import { StateDetector, isShellCmd, POLL_INTERVAL_MS, raiseAttention } from "./state-detector.js";
+import { StateDetector, isShellCmd, POLL_INTERVAL_MS, raiseAttention, setProbeObserver } from "./state-detector.js";
 import { probeClaudeCaps, RuntimeTracker, performResume, BOOT, isClaudeCmd, decideResume, verifyAdoption, UUID_RE, PINNED_CONFIDENCE, sessionFileExists, claudeProjectDir } from "./resume.js";
 import { randomUUID } from "crypto";
 import { loadAgents, loadAgent, saveAgent, saveAgentLocked, archiveAgent, deleteAgent, initWorkspace, getWorkspaceDir, appendAgentField, removeAgentArtifact, isSelfWrite } from "./agent-store.js";
 import { resolve } from "path";
-import { tmux, tmuxSafe, tmuxAsync, tmuxSafeAsync, isTmuxTimeout, tmuxStats, TMUX_TIMEOUT_MS, isValidId, shellQuoteArgv, tmuxArgv } from "./tmux.js";
+import { tmux, tmuxSafe, tmuxAsync, tmuxSafeAsync, isTmuxTimeout, tmuxStats, TMUX_TIMEOUT_MS, isValidId, shellQuoteArgv, tmuxArgv, setSlowCallObserver } from "./tmux.js";
 import { findRegistrySession, findTmuxlessRecordFor, classifyTmuxless, readRegistry, processIdentity, parentPid, REGISTRY_ROOT, REGISTRY_STATUSES, REGISTRY_TMUX_SINCE } from "./session-registry.js";
 import { syncSkills } from "./skills.js";
 import { collectProvenance } from "./provenance.js";
 import { transcriptPath, readTranscriptSummary, transcriptWire, CONTEXT_WINDOW, readTranscriptFiles, filesWire, FILES_CHUNK_BYTES, FILES_MAX_LINE, FILES_CORE } from "./transcript.js";
 import { warnOnce, initServerLog, serverLogStatus } from "./log.js";
+import { createTmuxHealth, sendNtfy, readNtfyTopic } from "./tmux-health.js";
+import { createPerfLog } from "./perf-log.js";
 import { gitChanges, gitDiffFile } from "./changes.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { readQuota } from "./quota.js";
@@ -317,6 +319,29 @@ function requireAuth(req, res, next) {
   if (!AUTH_TOKEN || token !== AUTH_TOKEN) return res.status(401).json({ error: "invalid or missing token" });
   next();
 }
+// Perf log (server/perf-log.js): API latency for every /api request, slow
+// tmux calls, terminal connect → first byte. The route TEMPLATE is logged
+// (`/api/sessions/:id`), an unmatched or refused request as "(unmatched)" —
+// never a query string, never a token.
+const perfLog = createPerfLog({ dir: () => join(getWorkspaceDir(), ".hadron", "logs") });
+setSlowCallObserver((e) => perfLog.record("tmux", e));
+app.use("/api", (req, res, next) => {
+  const t0 = process.hrtime.bigint();
+  let logged = false;
+  const done = () => {
+    if (logged) return;
+    logged = true;
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    // Routes are registered on the app with their full path (`/api/...`);
+    // a router mounted below /api would carry its prefix in baseUrl.
+    const rp = req.route && typeof req.route.path === "string" ? req.route.path : null;
+    const route = rp === null ? "(unmatched)" : rp.startsWith("/api") ? rp : `${req.baseUrl || "/api"}${rp}`;
+    perfLog.record("http", { method: req.method, route, status: res.statusCode, ms: Math.round(ms * 10) / 10 });
+  };
+  res.on("finish", done);
+  res.on("close", done);   // a client that gave up mid-response is exactly a slow request worth seeing
+  next();
+});
 app.use("/api", requireAuth);
 
 // ═══ SESSION MANAGEMENT ═══
@@ -584,7 +609,7 @@ function ensureDefaults() {
 // `hadron doctor` compare it against the working tree.
 let PROVENANCE = null;
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true, pid: process.pid, livePtys: livePtys.size, liveSessions: sessions.size, wsClients: wss.clients.size, ...(heartbeat ? heartbeat.status() : {}), ...(PROVENANCE || {}), tmux: { ...tmuxStats(), busyRefusals: tmuxBusyRefusals }, guard: { uncaught: crashGuard.uncaught, unhandledRejections: crashGuard.unhandledRejections, lastAt: crashGuard.lastAt } });
+  res.json({ ok: true, pid: process.pid, livePtys: livePtys.size, liveSessions: sessions.size, wsClients: wss.clients.size, ...(heartbeat ? heartbeat.status() : {}), ...(PROVENANCE || {}), tmux: tmuxReport(), guard: { uncaught: crashGuard.uncaught, unhandledRejections: crashGuard.unhandledRejections, lastAt: crashGuard.lastAt } });
 });
 
 // GET but AUTHENTICATED: requireAuth waves GET through, and this returns per-agent
@@ -894,10 +919,11 @@ app.get("/api/doctor", async (req, res) => {
     // for post-hoc forensics); the CLI shows it as a local row. No path leaks
     // beyond the workspace the token holder already knows.
     serverLog: (() => { const l = serverLogStatus(); return { ok: l.ok, error: l.error }; })(),
+    perfLog: (() => { const p = perfLog.status(); return { ok: p.ok, error: p.error, lines: p.lines, dropped: p.dropped }; })(),
     // Errors the process guard absorbed (a bug the operator should read about
     // in server.log) and the server's own view of tmux's responsiveness.
     guard: { ...crashGuard },
-    tmux: { ...tmuxStats(), busyRefusals: tmuxBusyRefusals },
+    tmux: tmuxReport(),
     // Claude's own pane → session registry (~/.claude/sessions): the
     // deterministic id source. Counts only — no ids, no pids.
     sessionRegistry: {
@@ -931,9 +957,18 @@ app.patch("/api/workspace", (req, res) => {
   const configPath = join(getWorkspaceDir(), ".hadron", "config.json");
   let config;
   try { config = JSON.parse(readFileSync(configPath, "utf-8")); } catch { config = { name: "workspace" }; }
-  const { groups, groupConfig: gc } = req.body;
+  const { groups, groupConfig: gc, tmuxAlerts } = req.body;
   if (groups !== undefined) config.groups = groups;
   if (gc !== undefined) config.groupConfig = gc;
+  // { ntfy: boolean } — the only alert channel so far. Default off: a push
+  // to the operator's phone is opt-in per workspace, never a surprise.
+  if (tmuxAlerts !== undefined) {
+    if (!tmuxAlerts || typeof tmuxAlerts !== "object" || Array.isArray(tmuxAlerts) || typeof tmuxAlerts.ntfy !== "boolean") {
+      return res.status(400).json({ error: "tmuxAlerts must be { ntfy: boolean }" });
+    }
+    config.tmuxAlerts = { ntfy: tmuxAlerts.ntfy };
+    ntfyStatusCache = { at: 0, value: null };   // /api/health must show the change at once
+  }
   writeFileSync(configPath, JSON.stringify(config, null, 2));
   res.json(config);
 });
@@ -2809,7 +2844,33 @@ const WS_CLOSE_AGENT_GONE = 4404;
 // WS close code for "tmux did not answer": the client keeps its backoff
 // reconnect (the tmux server is usually back within seconds) and shows why.
 const WS_CLOSE_TMUX_BUSY = 4503;
-let tmuxBusyRefusals = 0; // /api/health
+let tmuxBusyRefusals = 0;
+
+// tmux server health (server/tmux-health.js): latency from the state
+// detector's own per-second batch, RSS/swap from /proc every 30 s. Started in
+// boot stage 2. The ntfy push is opt-in per workspace (config.tmuxAlerts.ntfy,
+// View menu); the topic comes from ~/.ntfy_topic_log at send time and is never
+// on any payload or log line.
+function tmuxAlertsEnabled() {
+  try { return JSON.parse(readFileSync(join(getWorkspaceDir(), ".hadron", "config.json"), "utf-8")).tmuxAlerts?.ntfy === true; } catch { return false; }
+}
+const tmuxHealth = createTmuxHealth({
+  isNotifyEnabled: tmuxAlertsEnabled,
+  notify: ({ level, summary }) => sendNtfy({
+    title: `Hadron ${WS_NAME}: tmux ${level === "ok" ? "recovered" : level === "down" ? "not answering" : "degraded"}`,
+    body: `${summary}. Nothing was killed or restarted — run \`hadron doctor\`.`,
+    priority: level === "down" ? "high" : level === "warn" ? "default" : "low",
+    tags: [level === "ok" ? "white_check_mark" : "warning", "hadron"],
+  }).then(() => console.log(`[tmux-health] ntfy push sent (${level})`)),
+});
+setProbeObserver((ms, failed, timedOut) => tmuxHealth.noteProbe(ms, failed, timedOut));
+// The two file reads (config.json, the topic file) are cached for a few
+// seconds: every open tab polls /api/health for the pill.
+let ntfyStatusCache = { at: 0, value: null };
+function tmuxReport() {
+  if (Date.now() - ntfyStatusCache.at > 5000) ntfyStatusCache = { at: Date.now(), value: { enabled: tmuxAlertsEnabled(), topicReadable: readNtfyTopic() !== null } };
+  return { ...tmuxStats(), busyRefusals: tmuxBusyRefusals, ...tmuxHealth.snapshot(), ntfy: { ...ntfyStatusCache.value } };
+} // /api/health
 function ptySizeFromQuery(params) {
   // Clamp rather than reject an out-of-range value: a 25%-zoomed browser on a
   // wide monitor asks for >1000 cols, and falling back to 80x24 there would
@@ -2832,6 +2893,7 @@ wss.on("connection", (ws) => {
   });
 });
 async function handleTerminalConnection(ws) {
+  const connectedAt = Date.now();
   ws.isAlive = true;
   ws.on("pong", () => { ws.isAlive = true; });
   const sessionId = ws.sessionId || "planner";
@@ -2937,7 +2999,12 @@ async function handleTerminalConnection(ws) {
     console.warn(`[pty] ${livePtys.size} live ptys — approaching the OS pty cap (macOS ptmx_max=511); check for leaked/half-open terminal connections`);
   }
 
+  let firstByteAt = null;
   pty.onData((data) => {
+    if (firstByteAt === null) {
+      firstByteAt = Date.now();
+      perfLog.record("ws", { agent: sessionId, shell: shellName, ms: firstByteAt - connectedAt });
+    }
     if (ws.readyState === ws.OPEN) {
       ws.send(JSON.stringify({ type: "output", data }));
     }
@@ -3187,6 +3254,7 @@ function bootStage2() {
     intervalMs: Number(process.env.HADRON_HEARTBEAT_INTERVAL_MS) > 0 ? Number(process.env.HADRON_HEARTBEAT_INTERVAL_MS) : undefined, // test hook
   });
   installCrashGuard();
+  tmuxHealth.start();
   console.log(`Hadron server running on http://localhost:${PORT}`);
 }
 
@@ -3216,6 +3284,7 @@ function installCrashGuard() {
 }
 
 function cleanupSubprocesses() {
+  perfLog.stop(); // flush the buffered samples — the last minute before a restart is the one that matters
   for (const pty of [...livePtys]) reapPty(pty); // release every master fd on shutdown
   for (const [, entry] of marimoProcesses) {
     try { entry.process.kill(); } catch {}
