@@ -50,16 +50,94 @@ export function tmuxArgv(args) {
 // A timeout throws like any failed tmux call, so tmuxSafe callers see null.
 export const TMUX_TIMEOUT_MS = 5000;
 
+// Was this tmux failure the bounded-call timeout (the client was SIGKILLed
+// because the server did not answer), as opposed to tmux answering "no"?
+// Callers that would CREATE on a miss (has-session → new-session) must tell
+// the two apart: a server that did not answer has-session will not answer
+// new-session either, and chaining the two is 10 s of stall for nothing —
+// exactly the shape of the 2026-10-05 prod crash (tmux server paging at 5.6 GB
+// RSS + 1.2 GB swap, has-session ETIMEDOUT → new-session ETIMEDOUT, uncaught).
+export function isTmuxTimeout(err) {
+  return !!err && (err.code === "ETIMEDOUT" || err.signal === "SIGKILL" || err.killed === true);
+}
+
+// Per-call timing. Every tmux() / tmuxAsync() call is clocked; a call over
+// TMUX_SLOW_MS is counted and logged (rate-limited — a paging tmux server is
+// slow on EVERY call, one line per SLOW_LOG_EVERY_MS says it without a flood).
+// Exposed on /api/health as `tmux` so the health probe and `hadron doctor` can
+// say "tmux is slow" from the server's own calls, no extra probing.
+export const TMUX_SLOW_MS = 500;
+const SLOW_LOG_EVERY_MS = 10000;
+const stats = { calls: 0, slowCalls: 0, timeouts: 0, maxMs: 0, lastMs: 0, lastSlowAt: null, lastSlowMs: 0, lastSlowCmd: null, lastTimeoutAt: null, lastTimeoutCmd: null };
+let lastSlowLogAt = 0;
+function record(args, startedAt, err) {
+  const ms = Date.now() - startedAt;
+  stats.calls++;
+  stats.lastMs = ms;
+  if (ms > stats.maxMs) stats.maxMs = ms;
+  const cmd = args.find((a) => !a.startsWith("-")) || "?";
+  if (isTmuxTimeout(err)) {
+    stats.timeouts++;
+    stats.lastTimeoutAt = new Date(startedAt + ms).toISOString();
+    stats.lastTimeoutCmd = cmd;
+  }
+  if (ms > TMUX_SLOW_MS) {
+    stats.slowCalls++;
+    stats.lastSlowAt = new Date(startedAt + ms).toISOString();
+    stats.lastSlowMs = ms;
+    stats.lastSlowCmd = cmd;
+    const now = Date.now();
+    if (now - lastSlowLogAt >= SLOW_LOG_EVERY_MS) {
+      lastSlowLogAt = now;
+      console.warn(`[tmux] slow call: ${cmd} took ${ms} ms${isTmuxTimeout(err) ? " (timed out, client killed)" : ""} — ${stats.slowCalls} slow / ${stats.timeouts} timed out of ${stats.calls} calls since boot`);
+    }
+  }
+}
+export function tmuxStats() {
+  return { ...stats, slowMs: TMUX_SLOW_MS, timeoutMs: TMUX_TIMEOUT_MS };
+}
+
+// child_process's error message is "Command failed: tmux <full argv>" — the
+// argv of `set-environment … HADRON_TOKEN <token>` included. These messages
+// reach server.log, the terminal client (the 4503 refusal line) and doctor
+// rows, so every thrown/rejected tmux error is rewritten here to name the
+// command, how it ended and the first line of stderr — never the arguments.
+function sanitize(err, args) {
+  if (!err || typeof err !== "object") return err;
+  const cmd = args.find((a) => !a.startsWith("-")) || "?";
+  let how;
+  if (isTmuxTimeout(err)) how = `timed out after ${TMUX_TIMEOUT_MS} ms`;
+  else if (err.signal) how = `killed by ${err.signal}`;
+  else if (typeof err.status === "number") how = `exited ${err.status}`;
+  else if (err.code) how = `failed (${err.code})`;
+  else how = "failed";
+  const stderr = typeof err.stderr === "string" ? err.stderr.split("\n").find((l) => l.trim()) : null;
+  try { err.message = `tmux ${cmd} ${how}${stderr ? `: ${stderr.trim().slice(0, 120)}` : ""}`; } catch {}
+  // execFile also sets err.cmd = the full command line; drop it so the error is
+  // safe to log by ANY means (console.error(e), JSON.stringify), not only .message.
+  try { delete err.cmd; } catch {}
+  return err;
+}
+
 export function tmux(args, opts = {}) {
   // Hadron only ever needs targeted kill-session. kill-server would take every
   // agent on the socket with it (and, from inside a pane, the caller's own shell).
-  return execFileSync("tmux", tmuxArgv(args), {
-    encoding: "utf-8",
-    stdio: ["ignore", "pipe", "ignore"],
-    timeout: TMUX_TIMEOUT_MS,
-    killSignal: "SIGKILL",
-    ...opts,
-  });
+  const argv = tmuxArgv(args);
+  const t0 = Date.now();
+  try {
+    const out = execFileSync("tmux", argv, {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: TMUX_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+      ...opts,
+    });
+    record(args, t0, null);
+    return out;
+  } catch (e) {
+    record(args, t0, e);
+    throw sanitize(e, args);
+  }
 }
 
 // Async twin for the paths that run on a timer (the state-detector poll): the
@@ -70,13 +148,20 @@ export function tmuxAsync(args, opts = {}) {
   return new Promise((resolve, reject) => {
     // tmuxArgv throws on kill-server; inside the executor that becomes a
     // rejection, so every failure of tmuxAsync is a rejection (never a sync throw).
-    execFile("tmux", tmuxArgv(args), {
+    const argv = tmuxArgv(args);
+    const t0 = Date.now();
+    execFile("tmux", argv, {
       encoding: "utf-8",
       timeout: TMUX_TIMEOUT_MS,
       killSignal: "SIGKILL",
       ...opts,
-    }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
+    }, (err, stdout) => { record(args, t0, err); err ? reject(sanitize(err, args)) : resolve(stdout); });
   });
+}
+
+// Async twin of tmuxSafe: null on any failure, trimmed stdout otherwise.
+export function tmuxSafeAsync(args, opts = {}) {
+  return tmuxAsync(args, opts).then((out) => out.trim(), () => null);
 }
 
 // Convenience: run tmux, swallow errors, return trimmed stdout or null.

@@ -880,6 +880,21 @@ async function main() {
         if (doctor.serverLog.ok) local.push({ level: "green", message: "server.log: console mirrored to .hadron/server.log" });
         else local.push({ level: "yellow", message: `server.log: not written (${doctor.serverLog.error || "?"}) — the console is not mirrored; check that .hadron/server.log is writable` });
       }
+      // Errors the process guard absorbed: the server is up, but something
+      // threw where nothing caught it — a bug to read about in server.log.
+      if (doctor && doctor.guard && (doctor.guard.uncaught || doctor.guard.unhandledRejections)) {
+        const g = doctor.guard;
+        local.push({ level: "yellow", message: `server survived ${g.uncaught} uncaught exception${g.uncaught === 1 ? "" : "s"} + ${g.unhandledRejections} unhandled rejection${g.unhandledRejections === 1 ? "" : "s"} since boot (last ${g.lastAt || "?"}: ${g.lastError || "?"}) — see .hadron/server.log (the row stays until the next restart)` });
+      }
+      // tmux responsiveness as the server's own calls saw it. A paging tmux
+      // server (RSS in the GB, swap in use) answers every call slowly; a call
+      // over the timeout was SIGKILLed and the agent op it served was refused.
+      if (doctor && doctor.tmux && typeof doctor.tmux.calls === "number") {
+        const t = doctor.tmux;
+        if (t.timeouts || t.busyRefusals) local.push({ level: "yellow", message: `tmux: ${t.timeouts} call${t.timeouts === 1 ? "" : "s"} timed out (> ${t.timeoutMs} ms) and ${t.busyRefusals} terminal connect${t.busyRefusals === 1 ? "" : "s"} refused as busy since boot (last timeout ${t.lastTimeoutAt || "?"}, ${t.lastTimeoutCmd || "?"}) — the tmux server is overloaded or paging; check its RSS/swap (\`tmux display -p '#{pid}'\`, /proc/<pid>/status)` });
+        else if (t.slowCalls) local.push({ level: "yellow", message: `tmux: ${t.slowCalls} of ${t.calls} calls slower than ${t.slowMs} ms since boot (slowest ${t.maxMs} ms, last ${t.lastSlowAt || "?"}: ${t.lastSlowCmd || "?"}) — the tmux server is under load` });
+        else local.push({ level: "green", message: `tmux: ${t.calls} calls since boot, none slower than ${t.slowMs} ms (max ${t.maxMs} ms)` });
+      }
       const agents = (doctor && doctor.agents) || [];
       const reds = local.filter((f) => f.level === "red").length + agents.filter((a) => a.finding.level === "red").length;
       const yellows = local.filter((f) => f.level === "yellow").length + agents.filter((a) => a.finding.level === "yellow").length;

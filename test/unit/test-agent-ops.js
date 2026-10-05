@@ -713,6 +713,9 @@ async function main() {
     const PX = await createAgent("Phoenix");   // …and re-spawned the same name → same tmux session name
     ok(PX === "phoenix" && tmuxAlive("phoenix"), "fixture: a live agent now owns hadron-<ws>-phoenix");
     tmuxKill(tmuxName("vanish"));
+    // GET /api/orphans re-validates against tmux at most once per second; the
+    // async create answers in well under that now, so wait the window out.
+    await sleep(1100);
     const o3 = (await (await fetch(`${BASE}/api/orphans`)).json()).map((o) => o.agentId);
     ok(!o3.includes("phoenix") && !o3.includes("vanish"), `GET /api/orphans drops the re-spawned id and the vanished session (${o3.join(",") || "empty"})`);
     const k1 = await req("POST", `/api/orphans/${tmuxName("phoenix")}/kill`);

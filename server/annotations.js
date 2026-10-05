@@ -415,7 +415,7 @@ export function deleteAnnotation(agentId, cid) {
  * THEN dispatch the trigger. Dispatch failure does not un-send the batch: it's
  * recorded as manifest.dispatchError and retried via retryDispatch.
  */
-export function sendAnnotations(agentId, dispatch) {
+export async function sendAnnotations(agentId, dispatch) {
   const manifest = loadManifest(agentId);
   const { sidecars } = loadSidecars(agentId);
   const drafts = [];
@@ -446,9 +446,11 @@ export function sendAnnotations(agentId, dispatch) {
   saveManifest(agentId, manifest);
 
   // Batch is committed on disk — dispatch is best-effort and retryable.
+  // (dispatch may be async — tmux send-keys off the event loop; awaited here
+  // so a thrown or rejected dispatch is recorded the same way.)
   let dispatchError = null;
   try {
-    dispatch();
+    await dispatch();
     manifest.dispatchedAt = ts;
   } catch (e) {
     dispatchError = e.message || String(e);
@@ -515,11 +517,11 @@ export function reopenAnnotations(agentId) {
 }
 
 // Re-fire the trigger line only; batch data is untouched either way.
-export function retryDispatch(agentId, dispatch) {
+export async function retryDispatch(agentId, dispatch) {
   const manifest = loadManifest(agentId);
   if (!manifest.currentBatchId) return { error: "no batch in flight", status: 409 };
   try {
-    dispatch();
+    await dispatch();
     manifest.dispatchError = null;
     manifest.dispatchedAt = now();
     saveManifest(agentId, manifest);

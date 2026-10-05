@@ -314,7 +314,7 @@ function connectWs(sessionId) {
       if (statusEl) statusEl.textContent = ev.reason === "archived" ? "agent archived" : "agent not found";
       return;
     }
-    if (statusEl) statusEl.textContent = "disconnected - reconnecting...";
+    if (statusEl) statusEl.textContent = ev && ev.code === WS_CLOSE_TMUX_BUSY ? "tmux busy - retrying..." : "disconnected - reconnecting...";
     scheduleReconnect(sessionId, openedAt);
   };
 
@@ -330,6 +330,7 @@ function connectWs(sessionId) {
 // second. Returning to the tab / coming back online drops the delay back to 1 s.
 const RECONNECT_MIN_MS = 1000, RECONNECT_MAX_MS = 4000, RECONNECT_STABLE_MS = 5000;
 const WS_CLOSE_AGENT_GONE = 4404;   // server/index.js: no such live agent (archived or unknown)
+const WS_CLOSE_TMUX_BUSY = 4503;    // server/index.js: tmux did not answer — the server is fine, retry with the usual backoff
 let reconnectDelay = RECONNECT_MIN_MS;
 const wasStable = (openedAt) => openedAt && Date.now() - openedAt >= RECONNECT_STABLE_MS;
 function scheduleReconnect(sessionId, openedAt) {

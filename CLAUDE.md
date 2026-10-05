@@ -187,7 +187,27 @@ npm test
 #                            shapes) or the upgrade is refused with 400 — no pty, no tmux session;
 #                            {type:"input"} on the agent's OWN WS acks its attention (persisted, ackAt stamped), on a
 #                            shell-tab WS it does not, and neither do xterm's terminal-query replies (DA / CPR /
-#                            focus / OSC) on the agent's WS — attaching is not typing)
+#                            focus / OSC) on the agent's WS — attaching is not typing;
+#                            a tmux server that does not answer (SIGSTOP on the private one) refuses the
+#                            connect with 4503 "tmux busy" after ONE timeout (a has-session timeout is
+#                            never followed by new-session — isTmuxTimeout), health keeps answering, the
+#                            same tab attaches once tmux answers again, /api/health.tmux counts
+#                            timeouts/slow calls/busy refusals (every tmux()/tmuxAsync() call is clocked,
+#                            > 500 ms logged once per 10 s); the process guard (uncaughtException /
+#                            unhandledRejection, installed after listen) logs with the stack, counts on
+#                            /api/health.guard (counts + lastAt only on the open GET; the error text is on
+#                            the token-gated doctor payload) + a yellow doctor row, and keeps serving —
+#                            proven with HADRON_TEST_THROW_UNCAUGHT; the agent's OWN terminal is refused the
+#                            same way, and POST /api/sessions during the stall answers 201 with the record
+#                            saved, no monitor, no tmux session, autostart skipped with a log line — the first
+#                            connect after tmux answers creates the session and starts the monitor. tmux error
+#                            messages name the command + exit/signal + first stderr line, never argv (a failed
+#                            set-environment would otherwise put HADRON_TOKEN in server.log and the 4503 line).
+#                            Note the `created` semantics: the terminal connect's async ensure is passed to
+#                            startMonitor as `ensured`, so auto-resume can fire from a connect that had to
+#                            create the agent's session (before, a second sync ensure always saw it existing).
+#                            Prod 2026-10-05: a paging tmux (5.6 GB RSS) made the shell-tab connect's sync
+#                            has-session → new-session throw uncaught, twice)
 #   + test-resume-live.js   (auto-resume at the REAL boundary: private tmux server (HADRON_TMUX_SOCKET) +
 #                            a process actually named claude/claude.exe; checkpoint on disk, shared-cwd
 #                            refusal warned once per agent, tombstone, reboot via HADRON_BOOT_ID (same id →

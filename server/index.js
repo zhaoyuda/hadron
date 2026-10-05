@@ -16,7 +16,7 @@ import { probeClaudeCaps, RuntimeTracker, performResume, BOOT, isClaudeCmd, deci
 import { randomUUID } from "crypto";
 import { loadAgents, loadAgent, saveAgent, saveAgentLocked, archiveAgent, deleteAgent, initWorkspace, getWorkspaceDir, appendAgentField, removeAgentArtifact, isSelfWrite } from "./agent-store.js";
 import { resolve } from "path";
-import { tmux, tmuxSafe, isValidId, shellQuoteArgv, tmuxArgv } from "./tmux.js";
+import { tmux, tmuxSafe, tmuxAsync, tmuxSafeAsync, isTmuxTimeout, tmuxStats, TMUX_TIMEOUT_MS, isValidId, shellQuoteArgv, tmuxArgv } from "./tmux.js";
 import { findRegistrySession, findTmuxlessRecordFor, classifyTmuxless, readRegistry, processIdentity, parentPid, REGISTRY_ROOT, REGISTRY_STATUSES, REGISTRY_TMUX_SINCE } from "./session-registry.js";
 import { syncSkills } from "./skills.js";
 import { collectProvenance } from "./provenance.js";
@@ -391,13 +391,13 @@ function autostartAgent(id, launchCommand, task) {
         cmdLine += ` --session-id ${sid}`;
         runtimeTrackers.get(id)?.recordSpawnedSession(sid);
       }
-      tmux(["send-keys", "-t", tmuxName, "--", cmdLine, "Enter"]);
+      await tmuxAsync(["send-keys", "-t", tmuxName, "--", cmdLine, "Enter"]);
       const clean = task ? sanitizeForKeystrokes(task) : "";
       if (clean) {
         await new Promise((r) => setTimeout(r, 4000)); // let the agent boot
-        tmux(["send-keys", "-t", tmuxName, "-l", "--", clean]);
+        await tmuxAsync(["send-keys", "-t", tmuxName, "-l", "--", clean]);
         await new Promise((r) => setTimeout(r, 300));
-        tmux(["send-keys", "-t", tmuxName, "Enter"]);
+        await tmuxAsync(["send-keys", "-t", tmuxName, "Enter"]);
       }
       if (session) {
         session.autostartedAt = new Date().toISOString();
@@ -428,6 +428,11 @@ function applyAgentEnv(tmuxName, cwd) {
   tmux(["set-environment", "-t", tmuxName, "HADRON_TOKEN", AUTH_TOKEN || ""]);
   tmuxSafe(["respawn-pane", "-k", "-t", tmuxName, "-c", cwd || WORKSPACE]);
 }
+async function applyAgentEnvAsync(tmuxName, cwd) {
+  await tmuxAsync(["set-environment", "-t", tmuxName, "HADRON_PORT", String(PORT)]);
+  await tmuxAsync(["set-environment", "-t", tmuxName, "HADRON_TOKEN", AUTH_TOKEN || ""]);
+  await tmuxSafeAsync(["respawn-pane", "-k", "-t", tmuxName, "-c", cwd || WORKSPACE]);
+}
 
 // Let tmux size each window to the SMALLEST attached client so no client's view is ever
 // clipped on the right. NOTE: never call `tmux resize-window` for this — it permanently flips
@@ -440,17 +445,40 @@ function fitWindowToClients(tmuxName) {
 
 // Returns true when it had to CREATE the session — i.e. the pane is a brand-new
 // shell (post-crash boot), the one moment auto-resume is allowed to trigger.
+// Throws when tmux does not answer: a has-session TIMEOUT is not "no such
+// session" — creating on it would stall another TMUX_TIMEOUT_MS and could not
+// succeed either (see isTmuxTimeout). Every caller catches and degrades.
 function ensureTmuxSession(sessionId, cwd) {
   const tmuxName = tmuxSessionName(sessionId);
   let created = false;
   try {
     tmux(["has-session", "-t", tmuxName]);
-  } catch {
+  } catch (e) {
+    if (isTmuxTimeout(e)) throw e;
     tmux(["new-session", "-d", "-s", tmuxName, "-x", "80", "-y", "24", "-c", cwd || WORKSPACE]);
     applyAgentEnv(tmuxName, cwd || WORKSPACE);
     created = true;
   }
   fitWindowToClients(tmuxName);
+  return created;
+}
+
+// The terminal-connect path's twin: same contract, but the event loop keeps
+// serving while tmux answers (or does not). A tmux server that is paging
+// (prod 2026-10-05: 5.6 GB RSS, 1.2 GB swap) stalls has-session for seconds —
+// synchronous, that froze every other terminal and API call for the duration;
+// uncaught, the second stall (new-session) crashed the server, twice in 18 s.
+async function ensureTmuxSessionByName(tmuxName, cwd) {
+  let created = false;
+  try {
+    await tmuxAsync(["has-session", "-t", tmuxName]);
+  } catch (e) {
+    if (isTmuxTimeout(e)) throw e;
+    await tmuxAsync(["new-session", "-d", "-s", tmuxName, "-x", "80", "-y", "24", "-c", cwd || WORKSPACE]);
+    await applyAgentEnvAsync(tmuxName, cwd || WORKSPACE);
+    created = true;
+  }
+  await tmuxSafeAsync(["set-window-option", "-t", tmuxName, "window-size", "smallest"]); // fitWindowToClients
   return created;
 }
 
@@ -556,7 +584,7 @@ function ensureDefaults() {
 // `hadron doctor` compare it against the working tree.
 let PROVENANCE = null;
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true, pid: process.pid, livePtys: livePtys.size, liveSessions: sessions.size, wsClients: wss.clients.size, ...(heartbeat ? heartbeat.status() : {}), ...(PROVENANCE || {}) });
+  res.json({ ok: true, pid: process.pid, livePtys: livePtys.size, liveSessions: sessions.size, wsClients: wss.clients.size, ...(heartbeat ? heartbeat.status() : {}), ...(PROVENANCE || {}), tmux: { ...tmuxStats(), busyRefusals: tmuxBusyRefusals }, guard: { uncaught: crashGuard.uncaught, unhandledRejections: crashGuard.unhandledRejections, lastAt: crashGuard.lastAt } });
 });
 
 // GET but AUTHENTICATED: requireAuth waves GET through, and this returns per-agent
@@ -866,6 +894,10 @@ app.get("/api/doctor", async (req, res) => {
     // for post-hoc forensics); the CLI shows it as a local row. No path leaks
     // beyond the workspace the token holder already knows.
     serverLog: (() => { const l = serverLogStatus(); return { ok: l.ok, error: l.error }; })(),
+    // Errors the process guard absorbed (a bug the operator should read about
+    // in server.log) and the server's own view of tmux's responsiveness.
+    guard: { ...crashGuard },
+    tmux: { ...tmuxStats(), busyRefusals: tmuxBusyRefusals },
     // Claude's own pane → session registry (~/.claude/sessions): the
     // deterministic id source. Counts only — no ids, no pids.
     sessionRegistry: {
@@ -1124,7 +1156,7 @@ app.post("/api/sessions/:id/restore", (req, res) => {
   agent.tmuxSession = tmuxSessionName(id);
   sessions.set(id, agent);
   saveAgent(agent);
-  startMonitor(id);
+  startMonitorSafe(id);
   res.json(agent);
 });
 
@@ -1299,7 +1331,7 @@ function adoptOrphanId(id) {
   if (existing) console.log(`[orphans] adopted ${id}: restored existing record${existing.archived ? " (was archived)" : ""}`);
   sessions.set(id, session);
   saveAgent(session);
-  startMonitor(id);
+  startMonitorSafe(id);
 }
 
 app.post("/api/orphans/:tmuxSession/adopt", (req, res) => {
@@ -1349,7 +1381,7 @@ app.post("/api/orphans/kill-all", (req, res) => {
   res.json({ ok: true, killed });
 });
 
-app.post("/api/sessions", (req, res) => {
+app.post("/api/sessions", async (req, res) => {
   const { name, group, task, cwd, relatedAgents, artifacts, autostart } = req.body;
   if (!name) {
     return res.status(400).json({ error: "name is required" });
@@ -1421,9 +1453,20 @@ app.post("/api/sessions", (req, res) => {
 
   sessions.set(id, session);
   saveAgent(session);
-  ensureTmuxSession(id, resolveAgentCwd(session));
-  startMonitor(id);
-  if (autostart) autostartAgent(id, launchCommand, session.task);
+  // The record is saved either way: a tmux that does not answer right now
+  // (busy/paging) must not lose the creation — the monitor and the first
+  // terminal connect create the session later (startMonitor retries while the
+  // monitor is absent; ensureTmuxSessionByName on connect). The ensure is
+  // async so a stalled tmux costs this request, not every other one.
+  let tmuxOk = false;
+  try {
+    const ensured = await ensureTmuxSessionByName(tmuxSessionName(id), resolveAgentCwd(session));
+    tmuxOk = sessions.get(id) === session && startMonitorSafe(id, { ensured });
+  } catch (e) {
+    console.error(`[monitor] ${id}: tmux did not answer (${e.message}) — monitor not started, will retry on the next connect`);
+  }
+  if (autostart && tmuxOk) autostartAgent(id, launchCommand, session.task);
+  else if (autostart) console.warn(`[autostart] ${id}: skipped — tmux did not answer at creation; launch it from the terminal`);
   res.status(201).json(resolvedSession(session));
 });
 
@@ -1529,7 +1572,7 @@ app.patch("/api/sessions/:id", async (req, res) => {
 });
 
 // Low-level pane-write primitive. Types `keys` literally (no shell) and optionally Enter.
-app.post("/api/sessions/:id/send-keys", (req, res) => {
+app.post("/api/sessions/:id/send-keys", async (req, res) => {
   const { id } = req.params;
   if (!isValidId(id)) return res.status(400).json({ error: "invalid id" });
   if (!sessions.has(id)) return res.status(404).json({ error: "session not found" });
@@ -1537,8 +1580,8 @@ app.post("/api/sessions/:id/send-keys", (req, res) => {
   if (typeof keys !== "string") return res.status(400).json({ error: "keys (string) required" });
   const tmuxName = tmuxSessionName(id);
   try {
-    tmux(["send-keys", "-t", tmuxName, "-l", "--", keys]);
-    if (enter) tmux(["send-keys", "-t", tmuxName, "Enter"]);
+    await tmuxAsync(["send-keys", "-t", tmuxName, "-l", "--", keys]);
+    if (enter) await tmuxAsync(["send-keys", "-t", tmuxName, "Enter"]);
     monitors.get(id)?.wake();   // input landed: capture at full rate again
     res.json({ ok: true });
   } catch (e) {
@@ -1603,10 +1646,10 @@ async function deliverToPane(tmuxName, text, enter = true, guard = null) {
   const buf = `hadron-msg-${Date.now()}-${randomBytes(4).toString("hex")}`;
   try {
     writeFileSync(file, text);
-    tmux(["load-buffer", "-b", buf, file]);
+    await tmuxAsync(["load-buffer", "-b", buf, file]);
     const shell = guard ? guard() : null;
     if (shell) throw Object.assign(new Error(`pane is a ${shell} prompt`), { shell });
-    tmux(["paste-buffer", "-p", "-d", "-b", buf, "-t", tmuxName]);
+    await tmuxAsync(["paste-buffer", "-p", "-d", "-b", buf, "-t", tmuxName]);
   } catch (e) {
     tmuxSafe(["delete-buffer", "-b", buf]);
     throw e;
@@ -1615,7 +1658,7 @@ async function deliverToPane(tmuxName, text, enter = true, guard = null) {
   }
   if (enter) {
     await new Promise((r) => setTimeout(r, 250));
-    tmux(["send-keys", "-t", tmuxName, "Enter"]);
+    await tmuxAsync(["send-keys", "-t", tmuxName, "Enter"]);
   }
 }
 
@@ -1658,10 +1701,10 @@ function annotationAgent(req, res) {
 
 // The dispatch is ONE literal trigger line — comment content never crosses tmux
 // send-keys (it lives in the sidecars; the agent pulls it via `hadron annotations ls`).
-function dispatchReviewTrigger(id) {
+async function dispatchReviewTrigger(id) {
   const tmuxName = tmuxSessionName(id);
-  tmux(["send-keys", "-t", tmuxName, "-l", "--", "/hadron-review"]);
-  tmux(["send-keys", "-t", tmuxName, "Enter"]);
+  await tmuxAsync(["send-keys", "-t", tmuxName, "-l", "--", "/hadron-review"]);
+  await tmuxAsync(["send-keys", "-t", tmuxName, "Enter"]);
   monitors.get(id)?.wake();
 }
 
@@ -1695,10 +1738,10 @@ app.delete("/api/sessions/:id/annotations/:cid", (req, res) => {
   sendAnnotationResult(res, deleteAnnotation(id, req.params.cid));
 });
 
-app.post("/api/sessions/:id/annotations/send", (req, res) => {
+app.post("/api/sessions/:id/annotations/send", async (req, res) => {
   const id = annotationAgent(req, res);
   if (!id) return;
-  sendAnnotationResult(res, sendAnnotations(id, () => dispatchReviewTrigger(id)));
+  sendAnnotationResult(res, await sendAnnotations(id, () => dispatchReviewTrigger(id)));
 });
 
 app.post("/api/sessions/:id/annotations/:cid/resolve", (req, res) => {
@@ -1713,10 +1756,10 @@ app.post("/api/sessions/:id/annotations/reopen", (req, res) => {
   sendAnnotationResult(res, reopenAnnotations(id));
 });
 
-app.post("/api/sessions/:id/annotations/retry-dispatch", (req, res) => {
+app.post("/api/sessions/:id/annotations/retry-dispatch", async (req, res) => {
   const id = annotationAgent(req, res);
   if (!id) return;
-  sendAnnotationResult(res, retryDispatch(id, () => dispatchReviewTrigger(id)));
+  sendAnnotationResult(res, await retryDispatch(id, () => dispatchReviewTrigger(id)));
 });
 
 // Canonicalize a possibly-not-yet-existing absolute path: realpath the nearest
@@ -2524,12 +2567,14 @@ function registryLookupFor(sessionId, registry = null) {
   });
 }
 
-function startMonitor(sessionId) {
+// ensured: the caller already ran ensureTmuxSessionByName and passes its
+// `created` (the terminal-connect path) — no second, synchronous has-session.
+function startMonitor(sessionId, { ensured = null } = {}) {
   if (monitors.has(sessionId)) return;
   const session = sessions.get(sessionId);
   if (!session) return;
 
-  const created = ensureTmuxSession(sessionId, resolveAgentCwd(session));
+  const created = ensured === null ? ensureTmuxSession(sessionId, resolveAgentCwd(session)) : ensured;
   const detector = new StateDetector(tmuxSessionName(sessionId), session);
   detector.onAttention = (s) => saveAgentLocked(s).catch((e) => console.error(`[attention] ${sessionId}: ${e.message}`));
   monitors.set(sessionId, detector);
@@ -2670,7 +2715,8 @@ const wsHeartbeat = setInterval(() => {
 wsHeartbeat.unref();
 
 server.on("upgrade", (request, socket, head) => {
-  const url = new URL(request.url, `http://${request.headers.host}`);
+  let url;
+  try { url = new URL(request.url, `http://${request.headers.host}`); } catch { socket.destroy(); return; }
 
   // Proxy WebSocket for marimo
   const marimoMatch = url.pathname.match(/^\/marimo-proxy\/(\d+)(\/.*)?$/);
@@ -2760,6 +2806,10 @@ const PTY_DEFAULT_SIZE = { cols: 80, rows: 24 };
 // WS close code for "no such live agent" — application range (4000-4999);
 // client/terminal.js stops reconnecting on it instead of retrying forever.
 const WS_CLOSE_AGENT_GONE = 4404;
+// WS close code for "tmux did not answer": the client keeps its backoff
+// reconnect (the tmux server is usually back within seconds) and shows why.
+const WS_CLOSE_TMUX_BUSY = 4503;
+let tmuxBusyRefusals = 0; // /api/health
 function ptySizeFromQuery(params) {
   // Clamp rather than reject an out-of-range value: a 25%-zoomed browser on a
   // wide monitor asks for >1000 cols, and falling back to 80x24 there would
@@ -2773,7 +2823,15 @@ function ptySizeFromQuery(params) {
   return cols && rows ? { cols, rows } : { ...PTY_DEFAULT_SIZE };
 }
 
+// The whole connect path is async (tmux answers off the event loop) and
+// nothing in it may escape: a throw here used to be process-fatal.
 wss.on("connection", (ws) => {
+  handleTerminalConnection(ws).catch((e) => {
+    console.error(`[ws] terminal connect failed for ${isValidId(ws.sessionId) ? ws.sessionId : "<invalid id>"}: ${e.message}`);
+    try { if (ws.readyState === ws.OPEN) ws.close(1011, "internal error"); } catch {}
+  });
+});
+async function handleTerminalConnection(ws) {
   ws.isAlive = true;
   ws.on("pong", () => { ws.isAlive = true; });
   const sessionId = ws.sessionId || "planner";
@@ -2800,18 +2858,38 @@ wss.on("connection", (ws) => {
     return;
   }
 
-  if (isShell) {
-    // For shell sessions, create the tmux session if it doesn't exist
-    const cwd = resolveAgentCwd(sessions.get(sessionId)) || WORKSPACE;
-    try {
-      tmux(["has-session", "-t", effectiveTmuxName]);
-    } catch {
-      tmux(["new-session", "-d", "-s", effectiveTmuxName, "-x", "80", "-y", "24", "-c", cwd]);
-      applyAgentEnv(effectiveTmuxName, cwd);
+  // Create the tmux session (agent or shell tab) if it doesn't exist. A tmux
+  // that does not answer closes THIS connection with 4503 — the client retries
+  // with its backoff and says "tmux busy" — and nothing else: the pre-fix
+  // synchronous has-session → new-session pair threw out of this handler and
+  // took the whole server down (prod 2026-10-05, twice in 18 s).
+  let created = false;
+  try {
+    created = await ensureTmuxSessionByName(effectiveTmuxName, resolveAgentCwd(sessions.get(sessionId)) || WORKSPACE);
+  } catch (e) {
+    const busy = isTmuxTimeout(e);
+    if (busy) tmuxBusyRefusals++;
+    console.warn(`[ws] tmux ${busy ? `did not answer within ${TMUX_TIMEOUT_MS} ms` : `failed (${e.message})`} for ${sessionId}${isShell ? ` (shell: ${shellName})` : ""} — terminal refused with ${WS_CLOSE_TMUX_BUSY}, client will retry`);
+    if (ws.readyState === ws.OPEN) {
+      ws.send(JSON.stringify({ type: "output", data: `\r\n\x1b[33mtmux is busy — ${busy ? `no answer within ${Math.round(TMUX_TIMEOUT_MS / 1000)} s` : e.message}; retrying…\x1b[0m\r\n` }));
+      ws.close(WS_CLOSE_TMUX_BUSY, "tmux busy");
     }
-    fitWindowToClients(effectiveTmuxName);
-  } else {
-    ensureTmuxSession(sessionId, resolveAgentCwd(sessions.get(sessionId)));
+    return;
+  }
+  // The client may have left while tmux was answering (an editor closed
+  // before its first paint, a tab switched away). No pty for a dead socket —
+  // and an editor session created for it is reaped here, since the close
+  // handler below was never registered to do it.
+  const isEditor = isShell && shellName.startsWith("vim-");
+  if (ws.readyState !== ws.OPEN) {
+    if (isEditor && created) await tmuxSafeAsync(["kill-session", "-t", effectiveTmuxName]);
+    console.log(`WebSocket closed before attach for ${sessionId}${isShell ? ` (${isEditor ? "editor" : "shell"}: ${shellName})` : ""}${isEditor && created ? " — vim tmux session killed" : ""}`);
+    return;
+  }
+  if (!sessions.has(sessionId)) { // archived meanwhile: archive killed its sessions, do not leave one we just created
+    if (created) await tmuxSafeAsync(["kill-session", "-t", effectiveTmuxName]);
+    try { ws.close(WS_CLOSE_AGENT_GONE, "unknown"); } catch {}
+    return;
   }
 
   let pty;
@@ -2898,7 +2976,7 @@ wss.on("connection", (ws) => {
     // closed WS means the editor is gone — kill its tmux session to avoid an
     // orphan from reload/tab-close/crash. Main terminal + persistent shells are
     // deliberately preserved so they survive a reload.
-    if (isShell && shellName && shellName.startsWith("vim-")) {
+    if (isEditor) {
       tmuxSafe(["kill-session", "-t", effectiveTmuxName]);
       console.log(`WebSocket disconnected for ${sessionId} (editor: ${shellName}) — vim tmux session killed`);
     } else {
@@ -2911,10 +2989,22 @@ wss.on("connection", (ws) => {
   // State monitor last, and never fatal to this connection: it runs shell
   // commands (ensureTmuxSession/execFileSync) that can throw, and before this
   // ordering a throw here orphaned a handler-less pty.
-  if (!isShell) {
-    try { startMonitor(sessionId); } catch (e) { console.error(`startMonitor failed for ${sessionId}: ${e.message}`); }
+  if (!isShell) startMonitorSafe(sessionId, { ensured: created });
+}
+
+// A tmux that does not answer (busy, paging, wedged) is a degraded agent, never
+// a crashed server: log, leave no monitor (so the next connect/boot retries),
+// return false. Every HTTP and boot caller goes through here; the terminal WS
+// path has its own async ensure and passes `ensured`.
+function startMonitorSafe(sessionId, opts) {
+  try {
+    startMonitor(sessionId, opts);
+    return true;
+  } catch (e) {
+    console.error(`[monitor] ${sessionId}: tmux did not answer (${e.message}) — monitor not started, will retry on the next connect`);
+    return false;
   }
-});
+}
 
 const PORT = process.env.PORT || 3000;
 const HADRON_HOST = process.env.HADRON_HOST || "127.0.0.1";
@@ -2969,6 +3059,41 @@ function resolveAgentCwd(session) {
 }
 
 
+// Express 4 does not catch a rejected async handler — the rejection reaches
+// process-level unhandledRejection (the crash guard logs it) and the request
+// hangs open with no reply. Every async route/middleware handler registered
+// above is wrapped so a rejection becomes next(err) → the 500 below, and the
+// client gets an answer. Applied once, after every route is registered.
+// (The WebSocket twin is handleTerminalConnection(ws).catch(...) in the wss
+// 'connection' handler — any new async emitter handler needs its own catch.)
+// app._router is Express-4-private (package.json pins ^4); on a dependency
+// bump that removes it, degrade to unwrapped handlers with a loud warning
+// rather than a boot crash.
+function guardAsyncRoutes() {
+  let wrapped = 0;
+  const wrap = (layer) => {
+    const h = layer.handle;
+    // arity 4 = an error middleware, deliberately left alone (it must keep 4 args)
+    if (typeof h !== "function" || h.constructor.name !== "AsyncFunction" || h.length > 3) return;
+    layer.handle = function (req, res, next) { return h.call(this, req, res, next).catch(next); };
+    wrapped++;
+  };
+  const stack = app._router?.stack;
+  if (!Array.isArray(stack)) { warnOnce("async-route-guard", "[http] app._router.stack not found — async route rejections are NOT guarded (express version?)"); return; }
+  for (const layer of stack) {
+    if (layer.route) for (const l of layer.route.stack) wrap(l);
+    else wrap(layer);
+  }
+  console.log(`[http] async-route guard wrapped ${wrapped} handlers`);
+  app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
+    const status = Number.isInteger(err?.status) && err.status >= 400 && err.status < 600 ? err.status : 500;
+    if (status >= 500) console.error(`[http] ${req.method} ${req.path}: ${err && err.stack ? err.stack : err}`);
+    if (res.headersSent) return next(err);
+    res.status(status).json({ error: status >= 500 ? "internal error" : (err.expose && err.message) || "bad request" });
+  });
+}
+guardAsyncRoutes();
+
 server.listen(PORT, HADRON_HOST, () => {
   const config = initWorkspace(WORKSPACE);
   // Mirror the console into <workspace>/.hadron/server.log (0600, 2 MB, one
@@ -3010,11 +3135,29 @@ server.listen(PORT, HADRON_HOST, () => {
   console.log(`Loaded ${activeCount} active agents, ${archivedCount} archived`);
   ensureDefaults();
   detectOrphanedTmuxSessions();
+  bootMonitors().then(() => bootStage2(), (e) => { console.error(`[boot] ${e.message}`); bootStage2(); });
+});
+
+// Boot, stage 1: one monitor per agent, sequentially, with the async ensure —
+// N agents × a slow tmux stays bounded per call and the port already serves
+// (health, the dashboard's first GET) while it runs.
+async function bootMonitors() {
   for (const s of sessions.values()) {
-    startMonitor(s.id);
-    // Heal any window left pinned to `window-size manual` by older versions (caused clipping).
-    fitWindowToClients(tmuxSessionName(s.id));
+    const tmuxName = tmuxSessionName(s.id);
+    let ensured;
+    try {
+      ensured = await ensureTmuxSessionByName(tmuxName, resolveAgentCwd(s));
+    } catch (e) {
+      console.error(`[monitor] ${s.id}: tmux did not answer (${e.message}) — monitor not started, will retry on the next connect`);
+      continue;
+    }
+    if (!sessions.has(s.id)) continue; // archived while tmux answered
+    startMonitorSafe(s.id, { ensured });
   }
+}
+
+// Boot, stage 2: everything that must wait for the monitors.
+function bootStage2() {
   // Watch agent JSON files for external edits (e.g. Claude agents editing their own config)
   const agentsDir = join(getWorkspaceDir(), ".hadron", "agents");
   try {
@@ -3043,8 +3186,34 @@ server.listen(PORT, HADRON_HOST, () => {
   heartbeat = startHeartbeat(join(getWorkspaceDir(), ".hadron", "heartbeat"), {
     intervalMs: Number(process.env.HADRON_HEARTBEAT_INTERVAL_MS) > 0 ? Number(process.env.HADRON_HEARTBEAT_INTERVAL_MS) : undefined, // test hook
   });
+  installCrashGuard();
   console.log(`Hadron server running on http://localhost:${PORT}`);
-});
+}
+
+// Process-level last line of defence. Hadron's value is the agents in tmux;
+// a server that exits on one bad code path drops every terminal and monitor
+// while the agents keep running unobserved (prod 2026-10-05: one uncaught
+// tmux timeout → exit 1 → systemd restart → every dashboard reconnected, twice).
+// An error that reaches here is logged with its stack, counted on /api/health
+// and `hadron doctor` (yellow: the server has a bug, go read server.log), and
+// the process keeps serving. Installed only once the server is listening — a
+// boot-time error (EADDRINUSE, unreadable workspace) must still exit so the
+// supervisor and the operator see it, not a live pid that serves nothing.
+const crashGuard = { uncaught: 0, unhandledRejections: 0, lastAt: null, lastError: null };
+function installCrashGuard() {
+  const note = (kind, err) => {
+    crashGuard[kind]++;
+    crashGuard.lastAt = new Date().toISOString();
+    crashGuard.lastError = String(err && err.message ? err.message : err).slice(0, 200);
+    console.error(`[guard] ${kind === "uncaught" ? "uncaught exception" : "unhandled rejection"} (server kept running): ${err && err.stack ? err.stack : err}`);
+  };
+  process.on("uncaughtException", (err) => note("uncaught", err));
+  process.on("unhandledRejection", (reason) => note("unhandledRejections", reason));
+  if (process.env.HADRON_TEST_THROW_UNCAUGHT) { // test hook: prove the guard, never set in service units
+    setTimeout(() => { throw new Error("HADRON_TEST_THROW_UNCAUGHT"); }, 300);
+    setTimeout(() => { Promise.reject(new Error("HADRON_TEST_THROW_UNCAUGHT rejection")); }, 400);
+  }
+}
 
 function cleanupSubprocesses() {
   for (const pty of [...livePtys]) reapPty(pty); // release every master fd on shutdown
