@@ -353,8 +353,10 @@ npm test
 #   + test-tmux-health.js   (tmux server health probe — server/tmux-health.js, prod 2026-10-05 (5.6 GB tmux paging):
 #                            latency is the wall time of the state detector's own per-second `list-panes -a` batch
 #                            (setProbeObserver in state-detector.js — no extra spawn), RSS/VmSwap from /proc/<pid>/status
-#                            every 30 s (pid from `display-message -p #{pid}`, asked again every 5 s while unknown, null +
-#                            memError on macOS); judge: down = the last 3 probes failed in a row — the reason says "timed out" (not answering) vs "refused at once (no tmux server?)" (state-detector passes isTmuxTimeout through the observer), a threshold of 0 disables that memory check, a reused pid (/proc Name not tmux) is dropped and re-resolved (the first
+#                            every 30 s (pid from `display-message -p #{pid}`, asked again every 5 s while unknown); without
+#                            /proc (HAS_PROC decided once — macOS 2026-10-06: ENOENT per read was taken for "pid gone", so the
+#                            pid was re-resolved every 5 s forever and memory never read) RSS comes from `ps -o rss=,comm= -p`
+#                            (readStatusViaPs, injectable exec; comm's basename is the pid-reuse check; swap null); judge: down = the last 3 probes failed in a row — the reason says "timed out" (not answering) vs "refused at once (no tmux server?)" (state-detector passes isTmuxTimeout through the observer), a threshold of 0 disables that memory check, a reused pid (/proc Name not tmux) is dropped and re-resolved (the first
 #                            answered probe clears it), warn = ≥ 3 probes over 500 ms in the 60-s window or RSS ≥
 #                            HADRON_TMUX_WARN_RSS_MB (2048) / swap GROWTH ≥ HADRON_TMUX_WARN_SWAP_MB (512) within the last
 #                            hour (the figure itself never warns — 4 GB of an old peak's residue is ok, +600 MB in an hour is

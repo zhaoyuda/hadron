@@ -29,7 +29,7 @@ import { createServer } from "http";
 import { tmpdir } from "os";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
-import { judge, parseProcStatus, parseHistory, createTmuxHealth, FAIL_PROBES_DOWN, SLOW_PROBES_WARN, PID_RETRY_MS, SWAP_WINDOW_MS, PROC_INTERVAL_MS } from "../../server/tmux-health.js";
+import { judge, parseProcStatus, parseHistory, readStatusViaPs, HAS_PROC, createTmuxHealth, FAIL_PROBES_DOWN, SLOW_PROBES_WARN, PID_RETRY_MS, SWAP_WINDOW_MS, PROC_INTERVAL_MS } from "../../server/tmux-health.js";
 import { TMUX_HISTORY_LINES } from "../../server/tmux.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -173,6 +173,77 @@ console.log("[restart baseline + inventory gating]");
   ok(h.snapshot().level === "ok" && listed === before + 1, "inventory resumes once tmux answers");
 }
 
+console.log("[macOS: memory via ps, no /proc]");
+{
+  // 2026-10-06 (Mac): /proc missing → every read ENOENT → "pid gone" → pid
+  // re-asked of tmux every 5 s forever, memory never read. The ps reader keeps
+  // the pid, reads RSS, leaves swap null, and still catches a reused pid.
+  const calls = [];
+  const psExec = (lines) => (cmd, args, opts, cb) => { calls.push({ cmd, args }); cb(null, lines); };
+  let text = await readStatusViaPs(4242, { exec: psExec("  123456 /opt/homebrew/bin/tmux\n") });
+  ok(/^Name:\ttmux$/m.test(text) && parseProcStatus(text).rssMb === 121 && parseProcStatus(text).swapMb === null, `macOS ps line → Name tmux (basename of the path), RSS 121 MB, swap null (${JSON.stringify(text)})`);
+  ok(calls[0].cmd === "ps" && calls[0].args.join(" ") === "-o rss=,comm= -p 4242", `one ps -o rss=,comm= -p <pid> (${calls[0].args.join(" ")})`);
+  text = await readStatusViaPs(1, { exec: psExec("  2048 tmux: server\n") });
+  ok(/^Name:\ttmux: server$/m.test(text), "Linux-shaped comm with a space passes through");
+  let err = null;
+  try { await readStatusViaPs(4242, { exec: psExec("") }); } catch (e) { err = e; }
+  ok(err && err.code === "ENOENT", `no line from ps → ENOENT, the tracker's "pid gone" path (${err && err.code})`);
+  let t = 0, resolved = 0, rssKb = 100 * 1024;
+  const h = createTmuxHealth({
+    now: () => t,
+    resolvePid: async () => { resolved++; return 4242; },
+    readStatus: (pid) => readStatusViaPs(pid, { exec: psExec(`${rssKb} /opt/homebrew/bin/tmux\n`) }),
+    listHistory: async () => "hadron-w-a|10|5000\n",
+    log: { log() {}, warn() {} },
+  });
+  for (let i = 0; i < 5; i++) { t += PROC_INTERVAL_MS; await h.sampleMemory(); }
+  let s = h.snapshot();
+  ok(resolved === 1 && s.pid === 4242, `the pid is resolved once and kept — no 5-s re-resolve loop (${resolved})`);
+  ok(s.rssMb === 100 && s.swapMb === null && s.swapGrowthMb === null && s.memError === null && s.level === "ok", `RSS read, swap null, growth null, no error (${JSON.stringify({ rss: s.rssMb, swap: s.swapMb, err: s.memError })})`);
+  ok(s.history && s.history.panes === 1, "the scrollback inventory runs there too");
+  rssKb = 3000 * 1024; t += PROC_INTERVAL_MS; await h.sampleMemory();
+  s = h.snapshot();
+  ok(s.level === "warn" && /RSS 3000 MB/.test(s.reasons[0]), `RSS is judged on macOS now (${s.reasons[0]})`);
+  const h2 = createTmuxHealth({
+    now: () => t, resolvePid: async () => 4242,
+    readStatus: (pid) => readStatusViaPs(pid, { exec: psExec("  500 /usr/local/bin/node\n") }),
+    log: { log() {}, warn() {} },
+  });
+  await h2.sampleMemory();
+  ok(h2.snapshot().pid === null && /reused/.test(h2.snapshot().memError), "a reused pid (comm is not tmux) is dropped through the same check");
+  // ps itself failing is not "pid gone": the pid and the swap baseline stay.
+  const failing = (e) => (cmd, args, opts, cb) => cb(e, "");
+  for (const [what, e] of [["timeout", Object.assign(new Error("killed"), { killed: true, signal: "SIGTERM", code: null })], ["ps missing", Object.assign(new Error("spawn ps ENOENT"), { code: "ENOENT", syscall: "spawn ps", path: "ps" })], ["fork failure", Object.assign(new Error("EAGAIN"), { code: "EAGAIN", syscall: "spawn" })]]) {
+    err = null;
+    try { await readStatusViaPs(4242, { exec: failing(e) }); } catch (x) { err = x; }
+    ok(err && err.code === "EPS", `${what} → EPS, not ENOENT (${err && err.code})`);
+  }
+  err = null;
+  try { await readStatusViaPs(4242, { exec: failing(Object.assign(new Error("exit 1"), { code: 1 })) }); } catch (x) { err = x; }
+  ok(err && err.code === "ENOENT", "exit 1 with no line (the real 'no such process') → ENOENT");
+  let psOk = true;
+  const h3 = createTmuxHealth({
+    now: () => t, resolvePid: async () => { resolved++; return 4242; },
+    readStatus: (pid) => readStatusViaPs(pid, { exec: psOk ? psExec("  100000 /opt/homebrew/bin/tmux\n") : failing(Object.assign(new Error("killed"), { killed: true, signal: "SIGTERM", code: null })) }),
+    log: { log() {}, warn() {} },
+  });
+  resolved = 0;
+  t += PROC_INTERVAL_MS; await h3.sampleMemory();
+  psOk = false; t += PROC_INTERVAL_MS; await h3.sampleMemory();
+  s = h3.snapshot();
+  ok(s.pid === 4242 && resolved === 1 && /memory unreadable this round \(EPS\)/.test(s.memError) && !/killed/.test(s.memError), `one timed-out ps keeps the pid, says so with the code only (${s.memError})`);
+  psOk = true; t += PROC_INTERVAL_MS; await h3.sampleMemory();
+  s = h3.snapshot();
+  ok(s.pid === 4242 && resolved === 1 && s.memError === null && typeof s.rssMb === "number" && s.rssMb > 90, `…and the next sample reads again without re-resolving (RSS ${s.rssMb} MB)`);
+    // The real ps on this box, against this very process: the shape holds here too.
+  const self = parseProcStatus(await readStatusViaPs(process.pid));
+  ok(typeof self.rssMb === "number" && self.rssMb > 10 && self.swapMb === null, `readStatusViaPs(process.pid) on ${process.platform}: RSS ${self.rssMb} MB, swap null`);
+  if (HAS_PROC) {
+    const viaProc = parseProcStatus(readFileSync(`/proc/${process.pid}/status`, "utf-8"));
+    ok(Math.abs(viaProc.rssMb - self.rssMb) <= 4, `…within 4 MB of /proc/self/status read back-to-back (${viaProc.rssMb} vs ${self.rssMb})`);
+  }
+}
+
 console.log("[pid reuse]");
 {
   // The kernel reused the tmux pid after a hand restart: /proc reads fine but
@@ -282,11 +353,13 @@ try {
   ok(t.pid === tmuxPid, `health.tmux.pid is the tmux server's pid (${t.pid})`);
   ok(typeof t.latencyMs === "number" && t.latencyMs >= 0 && t.latencyMs < 2000, `latencyMs from the detector's own batch (${t.latencyMs} ms)`);
   ok(typeof t.latencyP95Ms === "number", `latencyP95Ms present (${t.latencyP95Ms} ms)`);
-  if (process.platform === "linux") {
-    ok(typeof t.rssMb === "number" && t.rssMb >= 0 && typeof t.swapMb === "number", `rssMb/swapMb read from /proc (${t.rssMb} MB, ${t.swapMb} MB swap)`);
-    ok(t.memError === null, `memError null (${t.memError})`);
-  } else {
-    ok(t.rssMb === null && typeof t.memError === "string", `no /proc on ${process.platform} → rssMb null, memError says so`);
+  ok(typeof t.rssMb === "number" && t.rssMb >= 0, `rssMb read (${t.rssMb} MB, via ${HAS_PROC ? "/proc" : "ps"})`);
+  ok(HAS_PROC ? typeof t.swapMb === "number" : t.swapMb === null, `swapMb ${HAS_PROC ? "from /proc" : "null without /proc"} (${t.swapMb})`);
+  ok(t.memError === null, `memError null (${t.memError})`);
+  {
+    const viaPs = parseProcStatus(await readStatusViaPs(tmuxPid));
+    const ref = HAS_PROC ? parseProcStatus(readFileSync(`/proc/${tmuxPid}/status`, "utf-8")).rssMb : t.rssMb;
+    ok(/^Name:\ttmux/m.test(await readStatusViaPs(tmuxPid)) && typeof viaPs.rssMb === "number" && Math.abs(viaPs.rssMb - ref) <= 8, `the ps reader names the real tmux server and agrees on its RSS (${viaPs.rssMb} vs ${ref} MB)`);
   }
   ok(typeof t.calls === "number" && typeof t.busyRefusals === "number", "the tmux call stats and busyRefusals are still on the same object");
   ok(t.ntfy && t.ntfy.enabled === false && t.ntfy.topicReadable === true, `ntfy: enabled=false by default, topicReadable=true (${JSON.stringify(t.ntfy)})`);
@@ -361,7 +434,7 @@ try {
   await stopServer();
 
   console.log("[memory over threshold: HADRON_TMUX_WARN_RSS_MB=1]");
-  if (process.platform === "linux") {
+  { // RSS is read on every platform now (/proc or ps)
     serverLog = "";
     await boot({ HADRON_TMUX_WARN_RSS_MB: "1", HADRON_TMUX_HISTORY_LINES: "0" });
     TOKEN = readFileSync(join(WS, ".hadron", "token"), "utf-8").trim();
@@ -382,8 +455,6 @@ try {
     ok(/tmux is degraded/.test(dt.stdout) && !dt.stdout.includes(TOPIC), "text doctor shows the row, no topic");
     ok(pushes.length === 2, `no push: alerts are off in this workspace (${pushes.length})`);
     await stopServer();
-  } else {
-    console.log("  skip (no /proc on this platform)");
   }
 } catch (e) {
   failed++;

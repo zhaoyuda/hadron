@@ -7,13 +7,18 @@
 // without a single extra tmux spawn: the state detector already runs one
 // `list-panes -a` per second for ALL agents — its wall time IS the latency
 // probe (noteProbe). Memory is read from /proc/<pid>/status (VmRSS, VmSwap)
-// every PROC_INTERVAL_MS, a file read, no process. macOS has no /proc: memory
-// is null there and only latency is judged.
+// every PROC_INTERVAL_MS, a file read, no process. macOS has no /proc (decided
+// once at boot, not per read — 2026-10-06: every read there threw ENOENT, which
+// was taken for "pid gone", so the pid was re-asked of tmux every 5 s forever
+// and memory never read): RSS comes from one `ps -o rss=,comm= -p <pid>` per
+// sample instead, comm doubling as the pid-reuse check; swap stays null there
+// (not a per-process figure on macOS) so only RSS is judged.
 //
 // It never kills, restarts or resizes anything: the verdict goes to
 // /api/health.tmux, a topbar pill, a `hadron doctor` row and — opt-in, default
 // off — one ntfy push per state change (rate-limited). The operator decides.
-import { readFileSync } from "fs";
+import { readFileSync, existsSync } from "fs";
+import { execFile } from "child_process";
 import { join } from "path";
 import { homedir } from "os";
 import { tmuxSafeAsync, TMUX_SLOW_MS, TMUX_HISTORY_LINES } from "./tmux.js";
@@ -67,6 +72,33 @@ export function judge({ probes, rssMb, swapGrowthMb, swapMb, now = Date.now(), s
 }
 
 // Pure: /proc/<pid>/status text → { rssMb, swapMb } (null fields when absent).
+// /proc is a Linux thing; decided once, not per read.
+export const HAS_PROC = existsSync("/proc/self/status");
+
+// The ps-based reader for a host without /proc: returns the same shape as a
+// /proc status text (Name + VmRSS, no VmSwap) so one parser serves both. A pid
+// that is gone makes ps exit 1 (a numeric code) with no line → ENOENT, like
+// the /proc read; ps itself failing — timed out (killed), not spawnable (a
+// string code / syscall) — is NOT "pid gone": that would drop the pid and the
+// swap baseline and spend a tmux spawn on a server that is already slow.
+export function readStatusViaPs(pid, { exec = execFile } = {}) {
+  return new Promise((resolve, reject) => {
+    exec("ps", ["-o", "rss=,comm=", "-p", String(pid)], { timeout: 5000 }, (err, stdout) => {
+      // trim() BEFORE split: the first line is left-padded for narrow values.
+      const line = String(stdout || "").trim().split("\n")[0] || "";
+      const m = line.match(/^(\d+)\s+(\S.*)$/);
+      if (!m) {
+        const psFailed = err && (err.killed || err.syscall || typeof err.code === "string");
+        const e = new Error(psFailed ? `ps failed: ${err.signal || err.code}` : `ps -p ${pid}: no such process`);
+        e.code = psFailed ? "EPS" : "ENOENT";
+        return reject(e);
+      }
+      const name = m[2].split("/").pop();   // macOS prints the executable path
+      resolve(`Name:\t${name}\nVmRSS:\t${Number(m[1])} kB\n`);
+    });
+  });
+}
+
 export function parseProcStatus(text) {
   const kb = (key) => { const m = String(text || "").match(new RegExp(`^${key}:\\s+(\\d+) kB`, "m")); return m ? Number(m[1]) : null; };
   const rss = kb("VmRSS"), swap = kb("VmSwap");
@@ -101,7 +133,7 @@ function p95(values) {
 }
 
 export function createTmuxHealth({
-  readStatus = (pid) => readFileSync(`/proc/${pid}/status`, "utf-8"),
+  readStatus = HAS_PROC ? (pid) => readFileSync(`/proc/${pid}/status`, "utf-8") : readStatusViaPs,
   resolvePid = async () => { const out = await tmuxSafeAsync(["display-message", "-p", "#{pid}"]); const n = Number(out); return Number.isInteger(n) && n > 0 ? n : null; },
   listHistory = () => tmuxSafeAsync(["list-panes", "-a", "-F", "#{session_name}|#{history_size}|#{history_limit}"]),
   historyCap = TMUX_HISTORY_LINES,
@@ -156,10 +188,10 @@ export function createTmuxHealth({
         if (pid !== null && pid !== lastPid) { memSamples.length = 0; lastPid = pid; }
       }
       if (pid === null) { mem = { ...mem, error: "tmux pid unknown" }; return; }
-      const text = readStatus(pid);
+      const text = await readStatus(pid);
       // A pid the kernel reused after a hand restart of tmux reads fine and is
       // somebody else's memory: /proc's Name says whose it is.
-      if (!/^Name:\s+tmux/m.test(text)) { pid = null; memSamples.length = 0; mem = { ...mem, error: "tmux pid reused by another process, re-resolving" }; return; }
+      if (!/^Name:\s+tmux(:|\s|$)/m.test(text)) { pid = null; memSamples.length = 0; mem = { ...mem, error: "tmux pid reused by another process, re-resolving" }; return; }
       mem = { ...parseProcStatus(text), sampledAt: new Date(now()).toISOString(), error: null };
       if (typeof mem.swapMb === "number") {
         memSamples.push({ at: now(), swapMb: mem.swapMb });
@@ -167,9 +199,11 @@ export function createTmuxHealth({
       }
     } catch (e) {
       // ENOENT = the pid is gone (tmux restarted) → resolve again next time;
-      // no /proc at all (macOS) → memory stays unknown, latency still judged.
+      // anything else (/proc unreadable, ps timed out or missing) → the pid is
+      // kept, memory unknown this round, latency still judged. The error code
+      // alone goes on the open /api/health, never the message.
       if (e && e.code === "ENOENT") { pid = null; memSamples.length = 0; }
-      mem = { ...mem, error: e && e.code === "ENOENT" ? "tmux pid gone, re-resolving" : "memory unreadable on this platform" };
+      mem = { ...mem, error: e && e.code === "ENOENT" ? "tmux pid gone, re-resolving" : `memory unreadable this round (${(e && e.code) || "error"})` };
     } finally { evaluate(); }
   }
 
