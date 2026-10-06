@@ -115,6 +115,29 @@ try {
   await page.evaluate(() => pollQuota());
   r.ok(await widget.isHidden(), "nothing known for either vendor → widget hidden");
 
+  // A generic source (hadron-quota.d/<name>.json — README "Quota sources") is a
+  // third vendor under its own label behind a neutral gauge, same rules.
+  const srcDir = join(CFG, "hadron-quota.d");
+  mkdirSync(srcDir, { recursive: true });
+  const source = (file, rec) => writeFileSync(join(srcDir, file), typeof rec === "string" ? rec : JSON.stringify(rec));
+  source("litellm.json", { at: new Date().toISOString(), label: "LiteLLM", windows: [{ label: "1mo", usedPct: 45, resetsAt: nowS + 86400 * 12 }, { label: "day", usedPct: 12, resetsAt: null }] });
+  source("broken.json", "{ nope");
+  source("spicy.json", { at: new Date().toISOString(), label: "<b>Spicy</b>", windows: [{ label: "1mo", usedPct: 90 }] });
+  await wait(11000);
+  await page.evaluate(() => pollQuota());
+  await page.evaluate(() => handleMenuAction("set-quota-from", { dataset: { quotaFrom: "30" } }));
+  await widget.waitFor({ state: "visible", timeout: 5000 });
+  r.ok((await widget.locator(".q-vendor").count()) === 2 && (await vendorText("src:litellm")) === "LiteLLM 1mo 45%" && (await logo("src:litellm")) === "LiteLLM" && (await widget.locator('.q-vendor[data-vendor="src:litellm"] .q-label').innerText()) === "LiteLLM", `a source file is a vendor under its label, drawn as text (every source shares the gauge mark); 45 shown, 12 hidden at 30% (${await text()})`);
+  r.ok((await widget.locator('.q-vendor[data-vendor="src:litellm"] svg.q-logo-source').count()) === 1, "behind the neutral gauge mark, not a vendor logo");
+  const ts = await widget.getAttribute("title");
+  r.ok(/LiteLLM \(hadron-quota\.d\/litellm\.json, just now\)/.test(ts) && /1mo window: 45% used, resets in \d+d/.test(ts) && /day window: 12% used/.test(ts) && !/day window: 12% used,/.test(ts), `tooltip: file name as the source, age, every window, countdown only with resetsAt (${ts.replace(/\n/g, " | ")})`);
+  r.ok((await vendorText("src:spicy")) === "<b>Spicy</b> 1mo 90%" && (await logo("src:spicy")) === "<b>Spicy</b>" && (await widget.locator('.q-vendor[data-vendor="src:spicy"] b').count()) === 0 && /q-hot/.test(await cls("src:spicy", "1mo")), "a label with markup is drawn as text (escaped), red from 80%");
+  r.ok((await widget.locator('.q-vendor[data-vendor="src:broken"]').count()) === 0, "the invalid file is not a vendor (doctor names it)");
+  rmSync(join(srcDir, "litellm.json")); rmSync(join(srcDir, "spicy.json")); rmSync(join(srcDir, "broken.json"));
+  await wait(11000);
+  await page.evaluate(() => pollQuota());
+  r.ok(await widget.isHidden(), "files removed → the sources drop out, widget hidden again");
+
   r.ok(pageErrors.length === 0, `no page errors (${pageErrors.join("; ") || "none"})`);
 } catch (e) {
   r.fail(`exception: ${e.stack || e}`);

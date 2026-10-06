@@ -10,7 +10,7 @@
  */
 import "./hadron-home.js"; // private HADRON_HOME before any server spawns
 import { spawn, spawnSync } from "child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, utimesSync, statSync } from "fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, utimesSync, statSync, symlinkSync } from "fs";
 import { tmpdir } from "os";
 import { join, dirname, basename } from "path";
 import { fileURLToPath } from "url";
@@ -252,6 +252,57 @@ try {
   r = hadron(["quota", "--help"]);
   ok(r.status === 0 && /hadron quota \[--json\]/.test(r.out), "`hadron quota --help` prints usage");
 
+  console.log("\n[generic sources: hadron-quota.d/<name>.json]");
+  {
+    const { parseQuotaSource, readQuotaSources, SOURCES_DIR, SOURCE_STALE_MS } = Q;
+    const nowMs = Date.now(), nowS2 = Math.floor(nowMs / 1000);
+    const good = { at: new Date(nowMs - 60000).toISOString(), label: "LiteLLM", windows: [{ label: "1mo", usedPct: 9.4, resetsAt: nowS2 + 86400 * 20 }, { label: "day", usedPct: 55, resetsAt: null }] };
+    const p = parseQuotaSource(good, { now: nowMs });
+    ok(p.label === "LiteLLM" && p.windows.length === 2 && p.windows[0].usedPct === 9 && p.windows[0].resetsAt === nowS2 + 86400 * 20 && p.windows[1].resetsAt === null, `the contract parses, usedPct rounded, resetsAt null allowed (${JSON.stringify(p.windows)})`);
+    ok(parseQuotaSource({ ...good, windows: [{ label: "1mo", usedPct: 9, resetsAt: nowS2 - 5 }] }, { now: nowMs }).windows.length === 0, "a window whose reset passed is dropped (none left → nothing to show)");
+    const bad = [
+      [null, /object/], [[], /object/], [{ ...good, label: "" }, /label/], [{ ...good, label: "x".repeat(33) }, /label/], [{ ...good, label: "a\nb" }, /label/], [{ ...good, label: " pad" }, /label/],
+      [{ ...good, at: "yesterday" }, /ISO/], [{ ...good, at: new Date(nowMs + 3600000).toISOString() }, /future/], [{ ...good, windows: [] }, /1-8/], [{ ...good, windows: new Array(9).fill(good.windows[0]) }, /1-8/],
+      [{ ...good, windows: [1] }, /windows\[0\] is not an object/], [{ ...good, windows: [{ label: "1mo", usedPct: "9" }] }, /usedPct/], [{ ...good, windows: [{ label: "1mo", usedPct: 101 }] }, /usedPct/],
+      [{ ...good, windows: [{ label: "1mo", usedPct: 9, resetsAt: "soon" }] }, /resetsAt/], [{ ...good, windows: [{ label: "", usedPct: 9 }] }, /windows\[0\]\.label/],
+      [{ ...good, windows: [{ label: "1mo", usedPct: 1 }, { label: "1mo", usedPct: 2 }] }, /distinct/],
+      [{ ...good, windows: [{ label: "1mo", usedPct: 9, resetsAt: nowS2 - 5 }, { label: "x", usedPct: "bad" }] }, /usedPct/],
+    ];
+    let rejected = 0;
+    for (const [rec, re] of bad) { try { parseQuotaSource(rec, { now: nowMs }); } catch (e) { if (re.test(e.message)) rejected++; else console.log(`    (unexpected reason: ${e.message})`); } }
+    ok(rejected === bad.length, `${rejected}/${bad.length} out-of-contract records refused with the field named (an expired bad window still fails the file)`);
+    const dir = join(CFG, SOURCES_DIR);
+    ok(readQuotaSources({ configDir: CFG, now: nowMs }).sources.length === 0, "no directory → no sources, no problems");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "litellm.json"), JSON.stringify(good));
+    writeFileSync(join(dir, "broken.json"), "{ not json");
+    writeFileSync(join(dir, "half.json"), JSON.stringify({ ...good, label: "Half", windows: [{ label: "ok", usedPct: 50 }, { label: "bad", usedPct: -1 }] }));
+    writeFileSync(join(dir, "old.json"), JSON.stringify({ ...good, label: "Old", at: new Date(nowMs - SOURCE_STALE_MS - 1000).toISOString() }));
+    writeFileSync(join(dir, "reset.json"), JSON.stringify({ ...good, label: "Reset", windows: [{ label: "1mo", usedPct: 9, resetsAt: nowS2 - 5 }] }));
+    writeFileSync(join(dir, "bad name.json"), JSON.stringify(good));
+    writeFileSync(join(dir, "notes.txt"), "ignored");
+    writeFileSync(join(dir, "big.json"), JSON.stringify({ ...good, label: "Big", windows: [{ label: "1mo", usedPct: 1 }], pad: "x".repeat(70000) }));
+    symlinkSync(join(dir, "gone-elsewhere.json"), join(dir, "dangling.json")); // a writer mid-rename, or a stale link
+    mkdirSync(join(dir, "adir.json"));
+    writeFileSync(join(dir, "esc\x1b[31mred.json"), JSON.stringify(good));
+    const r2 = readQuotaSources({ configDir: CFG, now: nowMs });
+    ok(r2.sources.length === 1 && r2.sources[0].name === "litellm" && r2.sources[0].label === "LiteLLM" && r2.sources[0].source === "file" && r2.sources[0].windows.length === 2, `only the good file is a source (${JSON.stringify(r2.sources.map((v) => v.name))})`);
+    const probs = Object.fromEntries(r2.problems.map((x) => [x.name, x.error]));
+    ok(/JSON/.test(probs.broken) && /usedPct/.test(probs.half) && /stale/.test(probs.old) && /file name/.test(probs["bad name"]) && /bytes/.test(probs.big) && !("reset" in probs) && !("notes" in probs), `each skipped file is a named problem — invalid JSON, one bad window fails the whole file, stale, bad name, too big; a fully reset receipt is not a problem (${JSON.stringify(probs)})`);
+    ok(/^unreadable \(ENOENT\)$/.test(probs.dangling) && probs.adir === "not a regular file", `a dangling symlink and a directory are problems with a code, not a path (${probs.dangling} / ${probs.adir})`);
+    const files = Object.fromEntries(r2.problems.map((x) => [x.name, x.file]));
+    ok(files["bad name"] === "hadron-quota.d/bad name.json" && files.broken === "hadron-quota.d/broken.json" && files["esc?[31mred"] === "hadron-quota.d/esc?[31mred.json", `problems carry the display path, control characters stripped from the file name (${files["esc?[31mred"]})`);
+    ok(!JSON.stringify(r2).includes(CFG) && !/\x1b/.test(JSON.stringify(r2)), "no file path and no control character in the result");
+    for (let i = 0; i < 20; i++) writeFileSync(join(dir, `f${String(i).padStart(2, "0")}.json`), "{ nope");
+    const r3 = readQuotaSources({ configDir: CFG, now: nowMs });
+    const over = r3.problems.find((x) => x.name === SOURCES_DIR);
+    ok(over && over.file === SOURCES_DIR && /30 files, only the first 16 by name are read — 14 skipped, the first of them f\d\d\.json/.test(over.error), `over the file cap the row says how many were skipped and where they start (${over && over.error})`);
+    for (let i = 0; i < 20; i++) rmSync(join(dir, `f${String(i).padStart(2, "0")}.json`));
+    for (const f of ["broken", "half", "old", "reset", "big", "bad name", "dangling", "esc\x1b[31mred"]) rmSync(join(dir, `${f}.json`));
+    rmSync(join(dir, "adir.json"), { recursive: true });
+    rmSync(join(dir, "notes.txt"));
+  }
+
   console.log("\n[GET /api/quota + doctor row]");
   await boot();
   const token = readFileSync(join(WS, ".hadron", "token"), "utf-8").trim();
@@ -261,6 +312,7 @@ try {
   let body = await res.json();
   ok(res.status === 200 && body.claude.windows.length === 2 && body.claude.source === "statusline" && body.codex.windows.length === 2 && body.codex.source === "rollout" && typeof body.at === "string", `with the token: {claude, codex, at} (${JSON.stringify(body).slice(0, 160)}…)`);
   ok(!JSON.stringify(body).includes("SECRET") && !JSON.stringify(body).includes(CODEX) && !JSON.stringify(body).includes(CFG), "payload carries no session id, cwd, or file path");
+  ok(Array.isArray(body.sources) && body.sources.length === 1 && body.sources[0].name === "litellm" && body.sources[0].label === "LiteLLM" && body.sources[0].source === "file" && Array.isArray(body.sourceProblems) && body.sourceProblems.length === 0, `the generic source rides on /api/quota as sources[] (${JSON.stringify(body.sources)})`);
   res = await fetch(`${BASE}/api/quota?token=${token}`);
   ok(res.status === 200, "…query-string token accepted like the other authenticated GETs");
   r = hadron(["doctor", "--json"], { env: { HADRON_TOKEN: token } });
@@ -280,6 +332,14 @@ try {
   ok(!r.out.includes("SECRET"), "doctor output carries no session id");
   r = hadron(["doctor"], { env: { HADRON_TOKEN: token } });
   ok(/✓ quota widget: claude receipt/.test(r.out), "doctor text form shows the row");
+  ok(/✓ quota source LiteLLM \(hadron-quota\.d\/litellm\.json\): receipt \d+m ago \(1mo 9% · day 55%\)/.test(r.out), `doctor: one green row per generic source (${r.out.split("\n").find((l) => /quota source/.test(l))})`);
+  writeFileSync(join(CFG, Q.SOURCES_DIR, "proxy.json"), "{ nope");
+  r = hadron(["doctor", "--json"], { env: { HADRON_TOKEN: token } });
+  row = JSON.parse(r.out).local.find((f) => /^quota source hadron-quota\.d\/proxy\.json skipped/.test(f.message));
+  ok(row && row.level === "yellow" && /not valid JSON/.test(row.message) && /README/.test(row.message), `doctor: a skipped file is a yellow row with the reason (${row && row.message})`);
+  r = hadron(["quota"]);
+  ok(/^LiteLLM 1mo 9%/m.test(r.out) && /^proxy   skipped: not valid JSON \(hadron-quota\.d\/proxy\.json\)/m.test(r.out) && /^claude  /m.test(r.out), `\`hadron quota\` lists the source and the skipped file (${r.out.split("\n").filter((l) => /LiteLLM|proxy/.test(l)).join(" | ")})`);
+  rmSync(join(CFG, Q.SOURCES_DIR, "proxy.json"));
   hadron(["quota", "--uninstall"]);
 } catch (e) {
   failed++;

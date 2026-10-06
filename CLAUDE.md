@@ -314,7 +314,12 @@ npm test
 #                            ANOTHER checkout's hadron.js is repointed with the wrapped command kept and `hadron
 #                            quota` says "installed from ANOTHER checkout" until then; bare-sink uninstall keeps a
 #                            sibling key like padding); GET /api/quota 401 without token, {claude, codex, at} with it;
-#                            doctor local row info (not installed / no receipt yet) or green (receipt age + numbers))
+#                            doctor local row info (not installed / no receipt yet) or green (receipt age + numbers);
+#                            generic sources <CLAUDE_CONFIG_DIR>/hadron-quota.d/<name>.json {at, label, windows:[{label,
+#                            usedPct, resetsAt}]} (readQuotaSources / parseQuotaSource — strict, a bad file skipped WHOLE,
+#                            stale after 24 h, 16 files / 64 KB caps, names = file stems of letters/digits/_.-) → `sources`
+#                            + `sourceProblems` on /api/quota, `hadron quota` lines, doctor green row per source / yellow
+#                            per skipped file; the widget draws each under its label behind a neutral gauge (M24))
 #   + test-changes.js       (Changes view, server side — server/changes.js + GET /api/sessions/:id/changes
 #                            (token; a non-git cwd → {root:null, cwd}; branch + one row per `git status -z`
 #                            entry with status word (modified/added/untracked/renamed+from/deleted/conflict),

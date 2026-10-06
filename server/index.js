@@ -819,7 +819,11 @@ app.get("/api/quota", (req, res) => {
   const now = Date.now();
   if (!quotaCache || now - quotaCache.readAt > QUOTA_CACHE_MS) {
     let body;
-    try { body = readQuota({ now }); } catch (e) { body = { claude: null, codex: null, at: new Date(now).toISOString(), error: "quota sources unreadable" }; warnOnce("quota-read", `[quota] sources unreadable: ${e.message}`); }
+    try {
+      body = readQuota({ now });
+      // Silent-failure rule: a skipped source file is a gauge that quietly vanished — say so once per file.
+      for (const pr of body.sourceProblems) warnOnce(`quota-source:${pr.file}`, `[quota] ${pr.file} skipped: ${pr.error} — \`hadron doctor\` has the row`);
+    } catch (e) { body = { claude: null, codex: null, sources: [], sourceProblems: [], at: new Date(now).toISOString(), error: "quota sources unreadable" }; warnOnce("quota-read", `[quota] sources unreadable: ${e.message}`); }
     quotaCache = { readAt: now, body };
   }
   res.json(quotaCache.body);

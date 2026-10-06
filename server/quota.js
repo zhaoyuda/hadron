@@ -166,8 +166,91 @@ export function readCodexQuota({ codexHome = CODEX_HOME, now = Date.now() } = {}
   return null;
 }
 
+// ── generic sources: <CLAUDE_CONFIG_DIR>/hadron-quota.d/<name>.json ──
+// For whatever else meters you (an API-key proxy, LiteLLM, a team budget): any
+// script writes a small receipt and the widget shows it beside Claude and Codex
+// with a neutral mark and the receipt's own label. Contract (README "Quota
+// sources"): { "at": ISO-8601, "label": "LiteLLM", "windows": [{ "label": "1mo",
+// "usedPct": 9, "resetsAt": epochSeconds | null }] }. Strict: a file that
+// fails any check is skipped WHOLE (one bad window never shows a half picture)
+// and `hadron doctor` names it; a receipt older than SOURCE_STALE_MS is skipped
+// as stale — the writer stopped, the number is not current.
+export const SOURCES_DIR = "hadron-quota.d";
+export const sourcesDir = (configDir = CLAUDE_CONFIG_DIR) => join(configDir, SOURCES_DIR);
+export const SOURCE_STALE_MS = 24 * 60 * 60 * 1000;
+export const SOURCE_MAX_FILES = 16;
+export const SOURCE_MAX_BYTES = 64 * 1024;
+const SOURCE_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+const CLEAN = /^[^\x00-\x1f\x7f-\x9f]+$/; // one line, no C0/C1 control characters — it goes on a <span> and on a terminal
+// A file name is attacker-shaped text that reaches `hadron doctor` stdout: no control characters, 80 chars.
+const safeFile = (f) => String(f).replace(/[\x00-\x1f\x7f-\x9f]/g, "?").slice(0, 80);
+const text = (v, max) => typeof v === "string" && v.length >= 1 && v.length <= max && CLEAN.test(v) && v.trim() === v;
+
+// Pure. Returns { label, at, windows: [{ key, label, usedPct, resetsAt }] } or
+// throws with the reason (what doctor prints). Expired windows are dropped
+// AFTER validation: a file with a bad window is bad even if that window is over.
+export function parseQuotaSource(rec, { now = Date.now() } = {}) {
+  if (!rec || typeof rec !== "object" || Array.isArray(rec)) throw new Error("not a JSON object");
+  if (!text(rec.label, 32)) throw new Error("label must be a string of 1-32 printable characters");
+  const atMs = typeof rec.at === "string" ? Date.parse(rec.at) : NaN;
+  if (!Number.isFinite(atMs)) throw new Error("at must be an ISO-8601 timestamp");
+  if (atMs - now > 5 * 60 * 1000) throw new Error("at is in the future");
+  if (!Array.isArray(rec.windows) || rec.windows.length < 1 || rec.windows.length > 8) throw new Error("windows must be an array of 1-8 entries");
+  const nowS = Math.floor(now / 1000);
+  const windows = rec.windows.map((w, i) => {
+    if (!w || typeof w !== "object" || Array.isArray(w)) throw new Error(`windows[${i}] is not an object`);
+    if (!text(w.label, 16)) throw new Error(`windows[${i}].label must be a string of 1-16 printable characters`);
+    if (typeof w.usedPct !== "number" || !Number.isFinite(w.usedPct) || w.usedPct < 0 || w.usedPct > 100) throw new Error(`windows[${i}].usedPct must be a number from 0 to 100`);
+    let resetsAt = null;
+    if (w.resetsAt !== undefined && w.resetsAt !== null) {
+      resetsAt = typeof w.resetsAt === "number" ? epochSeconds(w.resetsAt) : null;
+      if (resetsAt === null) throw new Error(`windows[${i}].resetsAt must be epoch seconds or null`);
+    }
+    return { key: `w${i}`, label: w.label, usedPct: Math.round(w.usedPct), resetsAt };
+  });
+  const labels = new Set(windows.map((w) => w.label));
+  if (labels.size !== windows.length) throw new Error("window labels must be distinct");
+  return { label: rec.label, at: new Date(atMs).toISOString(), windows: liveWindows(windows, nowS) };
+}
+
+// { sources: [{ name, label, at, windows, source: "file" }], problems: [{ name, file, error }] }
+// — sources is what the widget shows (files with no live window are left out,
+// not a problem), problems is what doctor shows: `file` is the display path
+// ("hadron-quota.d/<file>", control characters stripped), `name` the stem. A
+// file whose name is not a stem (spaces, dots first, too long) is a problem
+// too; a symlink to something that is not a file is a problem with one word.
+export function readQuotaSources({ configDir = CLAUDE_CONFIG_DIR, now = Date.now() } = {}) {
+  const dir = sourcesDir(configDir);
+  let names;
+  try { names = readdirSync(dir).filter((f) => f.endsWith(".json")).sort(); } catch { return { sources: [], problems: [] }; }
+  const sources = [], problems = [];
+  for (const file of names.slice(0, SOURCE_MAX_FILES)) {
+    const name = file.slice(0, -5);
+    const shown = `${SOURCES_DIR}/${safeFile(file)}`;
+    if (!SOURCE_NAME.test(name)) { problems.push({ name: safeFile(name), file: shown, error: "file name must be <name>.json with letters, digits, _ . - only (64 max)" }); continue; }
+    try {
+      let st;
+      try { st = statSync(join(dir, file)); } catch (e) { throw new Error(`unreadable (${(e && e.code) || "stat failed"})`); } // never the path: fs messages carry it
+      if (!st.isFile()) throw new Error("not a regular file");
+      if (st.size > SOURCE_MAX_BYTES) throw new Error(`file is ${st.size} bytes (max ${SOURCE_MAX_BYTES})`);
+      let raw;
+      try { raw = readFileSync(join(dir, file), "utf-8"); } catch (e) { throw new Error(`unreadable (${(e && e.code) || "read failed"})`); }
+      if (raw.length > SOURCE_MAX_BYTES) throw new Error(`file is over ${SOURCE_MAX_BYTES} bytes`); // grew between stat and read
+      let rec;
+      try { rec = JSON.parse(raw); } catch { throw new Error("not valid JSON"); }
+      const parsed = parseQuotaSource(rec, { now });
+      if (now - Date.parse(parsed.at) > SOURCE_STALE_MS) throw new Error(`stale: written ${Math.floor((now - Date.parse(parsed.at)) / 3600000)} h ago (the writer stopped?)`);
+      if (!parsed.windows.length) continue; // every window reset: nothing current to show, nothing wrong
+      sources.push({ name, ...parsed, source: "file" });
+    } catch (e) { problems.push({ name, file: shown, error: e.message }); }
+  }
+  if (names.length > SOURCE_MAX_FILES) problems.push({ name: SOURCES_DIR, file: SOURCES_DIR, error: `${names.length} files, only the first ${SOURCE_MAX_FILES} by name are read — ${names.length - SOURCE_MAX_FILES} skipped, the first of them ${safeFile(names[SOURCE_MAX_FILES])}` });
+  return { sources, problems };
+}
+
 export function readQuota(opts = {}) {
-  return { claude: readClaudeQuota(opts), codex: readCodexQuota(opts), at: new Date(opts.now || Date.now()).toISOString() };
+  const extra = readQuotaSources(opts);
+  return { claude: readClaudeQuota(opts), codex: readCodexQuota(opts), sources: extra.sources, sourceProblems: extra.problems, at: new Date(opts.now || Date.now()).toISOString() };
 }
 
 // ── statusLine install (explicit, idempotent, reversible) ──

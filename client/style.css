@@ -2795,6 +2795,8 @@ mark.ann-mark.ann-mark-flash { background: rgba(210, 153, 34, .8); outline: 1px 
 #quota .q-name { display: inline-flex; align-items: center; color: var(--text2); }
 #quota .q-logo { width: 12px; height: 12px; display: block; }
 #quota .q-logo-claude { color: #d97757; }
+#quota .q-logo-source { color: var(--text2); }
+#quota .q-label { color: var(--text2); font-size: 11px; max-width: 9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: .3em; } /* every source shares the gauge mark: the label is the identity */
 #quota .q-vendor.q-quiet .q-name { opacity: .45; }
 #quota .q-win { color: var(--text2); }
 #quota .q-win.q-warn { color: #d29922; }

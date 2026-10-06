@@ -14,7 +14,7 @@ import { fileURLToPath } from "url";
 import { syncSkills, removeSkills, skillsStatus, userSkillsDir } from "../server/skills.js";
 import { gitInfo, packageVersion, short } from "../server/provenance.js";
 import { hookInstallStatus, installSessionHook, uninstallSessionHook } from "../server/checkpoint.js";
-import { pickClaudeRateLimits, writeReceipt, readQuota, readClaudeQuota, quotaInstallStatus, installQuotaSink, uninstallQuotaSink, STDIN_MAX_BYTES } from "../server/quota.js";
+import { readQuotaSources, pickClaudeRateLimits, writeReceipt, readQuota, readClaudeQuota, quotaInstallStatus, installQuotaSink, uninstallQuotaSink, STDIN_MAX_BYTES } from "../server/quota.js";
 import { summarizePerf, parseSince } from "../server/perf-log.js";
 
 const REPO = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -864,6 +864,11 @@ async function main() {
         else if (!st.installed) local.push({ level: "info", message: "quota widget: claude statusline sink not installed — `hadron quota --install` adds it (codex usage is read from its rollouts regardless)" });
         else if (!rc) local.push({ level: "info", message: "quota widget: statusline sink installed, no receipt yet — claude writes one on its next turn (subscription sessions only; API-key sessions carry no rate limits)" });
         else local.push({ level: "green", message: `quota widget: claude receipt ${ago(rc.at)} (${rc.windows.map((w) => `${w.label} ${w.usedPct}%`).join(" · ")})` });
+        // Generic sources (hadron-quota.d/<name>.json): one row per file — a
+        // file that is skipped is a silent widget gap, so it is yellow and says why.
+        const ex = readQuotaSources();
+        for (const v of ex.sources) local.push({ level: "green", message: `quota source ${v.label} (hadron-quota.d/${v.name}.json): receipt ${ago(v.at)} (${v.windows.map((w) => `${w.label} ${w.usedPct}%`).join(" · ")})` });
+        for (const pr of ex.problems) local.push({ level: "yellow", message: `quota source ${pr.file} skipped: ${pr.error} — the contract is in README "Quota sources"` });
       } catch (e) { local.push({ level: "info", message: `quota widget: ${e.message}` }); }
 
       // per-agent findings + caps (authenticated GET — send the token on this GET)
@@ -1045,10 +1050,13 @@ async function main() {
       let st = null;
       try { st = quotaInstallStatus({ hadronBin }); } catch (e) { st = { installed: false, error: e.message }; }
       if (flags.json) { console.log(JSON.stringify({ ...q, sink: st }, null, 2)); break; }
-      const line = (name, v) => console.log(`${name.padEnd(7)}${v ? v.windows.map((w) => `${w.label} ${w.usedPct}%${w.resetsAt ? ` (resets ${resetsIn(w.resetsAt)})` : ""}`).join("  ·  ") + `   as of ${ago(v.at)}` : "unknown"}`);
+      const width = Math.max(7, ...(q.sources || []).map((v) => v.label.slice(0, 12).length + 1), ...(q.sourceProblems || []).map((pr) => pr.name.slice(0, 12).length + 1));
+      const line = (name, v) => console.log(`${name.padEnd(width)}${v ? v.windows.map((w) => `${w.label} ${w.usedPct}%${w.resetsAt ? ` (resets ${resetsIn(w.resetsAt)})` : ""}`).join("  ·  ") + `   as of ${ago(v.at)}` : "unknown"}`);
       line("claude", q.claude);
       line("codex", q.codex);
-      console.log(st.installed ? (st.current ? "sink    installed in claude's statusLine" : `sink    installed from ANOTHER checkout — \`hadron quota --install\` from here repoints it (${st.command})`) : st.error ? `sink    ${st.error}` : "sink    not installed — `hadron quota --install` (claude usage stays unknown without it)");
+      for (const v of q.sources || []) line(v.label.slice(0, 12), v);
+      for (const pr of q.sourceProblems || []) console.log(`${pr.name.slice(0, 12).padEnd(width)}skipped: ${pr.error} (${pr.file})`);
+      console.log(st.installed ? (st.current ? `${"sink".padEnd(width)}installed in claude's statusLine` : `${"sink".padEnd(width)}installed from ANOTHER checkout — \`hadron quota --install\` from here repoints it (${st.command})`) : st.error ? `sink    ${st.error}` : "sink    not installed — `hadron quota --install` (claude usage stays unknown without it)");
       break;
     }
     case "quota-sink": {
