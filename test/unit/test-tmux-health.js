@@ -29,7 +29,8 @@ import { createServer } from "http";
 import { tmpdir } from "os";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
-import { judge, parseProcStatus, createTmuxHealth, FAIL_PROBES_DOWN, SLOW_PROBES_WARN, PID_RETRY_MS } from "../../server/tmux-health.js";
+import { judge, parseProcStatus, parseHistory, createTmuxHealth, FAIL_PROBES_DOWN, SLOW_PROBES_WARN, PID_RETRY_MS, SWAP_WINDOW_MS, PROC_INTERVAL_MS } from "../../server/tmux-health.js";
+import { TMUX_HISTORY_LINES } from "../../server/tmux.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = join(__dirname, "..", "..");
@@ -62,7 +63,7 @@ console.log("[judge]");
   ok(v.level === "down" && /refused at once \(no tmux server\?\)/.test(v.reasons[0]), `three instant refusals → down, reason says no tmux server (${v.reasons[0]})`);
   v = judge({ probes: [P(2000, true), P(3, true, 0, false), P(2000, true)], rssMb: 100, swapMb: 0, now });
   ok(v.level === "down" && /failed or timed out/.test(v.reasons[0]), `mixed failures → "failed or timed out" (${v.reasons[0]})`);
-  v = judge({ probes: [P(10)], rssMb: 9000, swapMb: 9000, now, warnRssMb: 0, warnSwapMb: 0 });
+  v = judge({ probes: [P(10)], rssMb: 9000, swapMb: 9000, swapGrowthMb: 9000, now, warnRssMb: 0, warnSwapMb: 0, swapCeilingMb: 0 });
   ok(v.level === "ok", "a threshold of 0 switches that memory check off (HADRON_TMUX_WARN_*_MB=0)");
   v = judge({ probes: [P(2000, true), P(2000, true), P(2000, true), P(12)], rssMb: 100, swapMb: 0, now });
   ok(v.level === "ok" && v.failedProbes === 0, "one answered probe after three failures → ok at once (trailing run, not window count)");
@@ -70,9 +71,13 @@ console.log("[judge]");
   ok(v.level === "ok" && v.probesJudged === 0, "failures older than 60 s are not judged");
   v = judge({ probes: [P(10)], rssMb: 3000, swapMb: 0, now, warnRssMb: 2048 });
   ok(v.level === "warn" && /RSS 3000 MB \(warn from 2048 MB\)/.test(v.reasons[0]), `RSS over threshold → warn (${v.reasons[0]})`);
-  v = judge({ probes: [P(10)], rssMb: 100, swapMb: 600, now, warnSwapMb: 512 });
-  ok(v.level === "warn" && /600 MB swapped out/.test(v.reasons[0]), `swap over threshold → warn (${v.reasons[0]})`);
-  v = judge({ probes: [P(2000, true), P(2000, true), P(2000, true)], rssMb: 3000, swapMb: 600, now });
+  v = judge({ probes: [P(10)], rssMb: 100, swapMb: 4000, swapGrowthMb: 0, now, warnSwapMb: 512 });
+  ok(v.level === "ok", "4 GB of swap that is not growing (an old peak's residue) → ok");
+  v = judge({ probes: [P(10)], rssMb: 100, swapMb: 900, swapGrowthMb: 600, now, warnSwapMb: 512 });
+  ok(v.level === "warn" && /swap grew 600 MB in the last hour, 900 MB out now/.test(v.reasons[0]), `swap growing past the threshold → warn (${v.reasons[0]})`);
+  v = judge({ probes: [P(10)], rssMb: 100, swapMb: 900, swapGrowthMb: null, now, warnSwapMb: 512 });
+  ok(v.level === "ok", "no growth figure yet (first sample) → not judged");
+  v = judge({ probes: [P(2000, true), P(2000, true), P(2000, true)], rssMb: 3000, swapMb: 600, swapGrowthMb: 600, now });
   ok(v.level === "down" && v.reasons.length === 3, "down + memory reasons: level stays down, every reason listed");
   v = judge({ probes: [P(10)], rssMb: null, swapMb: null, now });
   ok(v.level === "ok", "unknown memory (macOS) judges latency only");
@@ -86,6 +91,86 @@ console.log("[parseProcStatus]");
   ok(n.rssMb === null && n.swapMb === null, "missing fields → null");
   const self = parseProcStatus(existsSync("/proc/self/status") ? readFileSync("/proc/self/status", "utf-8") : "");
   if (existsSync("/proc/self/status")) ok(self.rssMb > 0, `this process' own RSS reads as ${self.rssMb} MB`);
+}
+
+console.log("[parseHistory]");
+{
+  const h = parseHistory("hadron-w-a|40000|50000\nhadron-w-b|120|5000\nother|7000|50000\nbad line\n", 5000);
+  ok(h.panes === 3 && h.lines === 47120, `panes and total lines over every session (${h.panes}, ${h.lines})`);
+  ok(h.overCap === 1 && h.overCapLines === 40000, `overCap counts only hadron-* panes whose limit is above the cap (${h.overCap}, ${h.overCapLines} lines)`);
+  ok(h.largest && h.largest.session === "hadron-w-a" && h.largest.lines === 40000, "largest pane named");
+  ok(parseHistory("hadron-w-a|40000|50000\n", 0).overCap === 0, "cap 0 (disabled) → nothing is over the cap");
+  ok(parseHistory("", 5000).panes === 0 && parseHistory(null, 5000).lines === 0, "empty / null → zeros");
+}
+
+console.log("[swap growth]");
+{
+  // Residue stays quiet; the same figure reached by GROWTH inside the window warns.
+  let t = 0, swapKb = 2_000_000;
+  const h = createTmuxHealth({
+    now: () => t,
+    resolvePid: async () => 4242,
+    readStatus: () => `Name:\ttmux: server\nVmRSS:\t 400000 kB\nVmSwap:\t ${swapKb} kB\n`,
+    listHistory: async () => "hadron-w-a|10|5000\n",
+    log: { log() {}, warn() {} },
+  });
+  await h.sampleMemory();
+  let s = h.snapshot();
+  ok(s.swapMb === 1953 && s.swapGrowthMb === 0 && s.level === "ok", `first sample: 1.9 GB swapped, growth 0, ok (${s.swapMb}, ${s.swapGrowthMb})`);
+  ok(s.history && s.history.panes === 1 && s.history.cap === TMUX_HISTORY_LINES, `history inventory on the snapshot (${JSON.stringify(s.history)})`);
+  t += PROC_INTERVAL_MS; swapKb += 300 * 1024; await h.sampleMemory();
+  s = h.snapshot();
+  ok(s.swapGrowthMb === 300 && s.level === "ok", `+300 MB → growth 300, still ok (${s.swapGrowthMb})`);
+  t += PROC_INTERVAL_MS; swapKb += 300 * 1024; await h.sampleMemory();
+  s = h.snapshot();
+  ok(s.swapGrowthMb === 600 && s.level === "warn" && /swap grew 600 MB/.test(s.reasons[0]), `+600 MB within the hour → warn (${s.reasons[0]})`);
+  t += SWAP_WINDOW_MS + 1; await h.sampleMemory();
+  s = h.snapshot();
+  ok(s.swapGrowthMb === 0 && s.level === "ok", `an hour later with no further growth the baseline has moved on → ok (${s.swapGrowthMb})`);
+  t += PROC_INTERVAL_MS; swapKb -= 2_000_000; await h.sampleMemory();
+  s = h.snapshot();
+  ok(s.swapGrowthMb === 0 && s.swapMb < 1000, `a drop (swapoff/swapon, page-ins) is never growth (${s.swapGrowthMb})`);
+}
+
+console.log("[swap ceiling]");
+{
+  const base = { probes: [], rssMb: 300, swapGrowthMb: 0, now: 0 };
+  ok(judge({ ...base, swapMb: 4096 }).level === "warn" && /4096 MB swapped out \(ceiling 4096 MB\)/.test(judge({ ...base, swapMb: 4096 }).reasons[0]), "4 GB out with no growth → warn on the ceiling");
+  ok(judge({ ...base, swapMb: 4095 }).level === "ok", "just under the ceiling → ok");
+  ok(judge({ ...base, swapMb: 9000, swapCeilingMb: 0 }).level === "ok", "ceiling 0 disables it");
+  const both = judge({ ...base, swapMb: 9000, swapGrowthMb: 700 });
+  ok(both.reasons.length === 1 && /grew/.test(both.reasons[0]), "growth and ceiling at once → one reason, growth");
+}
+
+console.log("[restart baseline + inventory gating]");
+{
+  // A hand restart of tmux: new pid, its swap is its own — the hour of samples
+  // from the old server would otherwise read the new figure as growth.
+  let t = 0, pid = 100, swapKb = 4_000_000, listed = 0;
+  const h = createTmuxHealth({
+    now: () => t,
+    resolvePid: async () => pid,
+    readStatus: (p) => { if (p !== pid) { const e = new Error("gone"); e.code = "ENOENT"; throw e; } return `Name:\ttmux: server\nVmRSS:\t 400000 kB\nVmSwap:\t ${swapKb} kB\n`; },
+    listHistory: async () => { listed++; return "hadron-w-a|10|5000\nscratch|20|2000\n"; },
+    log: { log() {}, warn() {} },
+  });
+  await h.sampleMemory();
+  let s = h.snapshot();
+  ok(s.history.largest.session === null && s.history.lines === 30 && typeof s.history.at === "string", `largest pane outside hadron-* is nameless on the open payload (${JSON.stringify(s.history.largest)})`);
+  t += PROC_INTERVAL_MS; swapKb = 100_000; pid = 200; await h.sampleMemory();   // old pid: ENOENT → pid null, ring cleared
+  s = h.snapshot();
+  ok(s.pid === null, "ENOENT on the old pid drops it");
+  t += 6000; await h.sampleMemory();                                              // re-resolve → 200
+  t += PROC_INTERVAL_MS; swapKb = 500_000; await h.sampleMemory();               // +390 MB on the NEW server
+  s = h.snapshot();
+  ok(s.pid === 200 && s.swapGrowthMb === 390 && s.level === "ok", `growth is measured from the new server's first sample only (${s.swapGrowthMb})`);
+  const before = listed;
+  for (let i = 0; i < 3; i++) h.noteProbe(2500, true, true);
+  t += PROC_INTERVAL_MS; await h.sampleMemory();
+  ok(h.snapshot().level === "down" && listed === before, "no list-panes spawn while tmux is down");
+  for (let i = 0; i < 3; i++) h.noteProbe(5, false, false);
+  t += PROC_INTERVAL_MS; await h.sampleMemory();
+  ok(h.snapshot().level === "ok" && listed === before + 1, "inventory resumes once tmux answers");
 }
 
 console.log("[pid reuse]");
@@ -172,8 +257,22 @@ try {
   console.log("[healthy tmux]");
   await boot();
   TOKEN = readFileSync(join(WS, ".hadron", "token"), "utf-8").trim();
+  // A session made by hand before the cap existed (the prod fleet): the
+  // server's default limit, 300 lines of history — the inventory must name it.
+  tmuxS(["new-session", "-d", "-s", "hadron-old", "-x", "80", "-y", "24"]);
+  const globalLimit = Number(tmuxS(["show-options", "-g", "-v", "history-limit"]));
+  tmuxS(["send-keys", "-t", "=hadron-old:", "for i in $(seq 1 300); do echo line $i; done", "Enter"]);
   const r = await fetch(`${BASE}/api/sessions`, { method: "POST", headers: H(), body: JSON.stringify({ name: "probe", cwd: WS, launchCommand: "shell", group: "Workers", autostart: false }) });
   ok(r.status === 201, `shell agent created (${r.status}) — the state detector now probes every second`);
+  console.log("[history cap on Hadron's sessions]");
+  const probeName = `hadron-${WS.split("/").pop()}-probe`;
+  const panes = tmuxS(["list-panes", "-t", `=${probeName}:`, "-F", "#{window_index}|#{history_limit}|#{pane_current_path}"]).split("\n");
+  ok(panes.length === 1 && panes[0].split("|")[1] === String(TMUX_HISTORY_LINES), `the agent's session has one window, history-limit ${TMUX_HISTORY_LINES} (${panes[0]})`);
+  ok(panes[0].split("|")[2] === WS, `the window's cwd is the agent's cwd (${panes[0].split("|")[2]})`);
+  ok(tmuxS(["list-windows", "-t", `=${probeName}:`]).split("\n").length === 1, "the placeholder window is gone");
+  ok(Number(tmuxS(["show-options", "-g", "-v", "history-limit"])) === globalLimit && globalLimit !== TMUX_HISTORY_LINES, `the global history-limit is untouched (${globalLimit})`);
+  ok(Number(tmuxS(["display-message", "-p", "-t", "=hadron-old:", "#{history_limit}"])) === globalLimit, "the hand-made session keeps the global limit");
+  ok(tmuxS(["show-environment", "-t", `=${probeName}:`, "HADRON_PORT"]) === `HADRON_PORT=${PORT}`, "the agent env still lands in the capped session");
   tmuxPid = Number(tmuxS(["display-message", "-p", "#{pid}"]));
   ok(Number.isInteger(tmuxPid) && tmuxPid > 0, `private tmux server pid ${tmuxPid}`);
   await sleep(PID_RETRY_MS + 1500); // the pid is asked for once a session exists, at most every PID_RETRY_MS
@@ -198,6 +297,10 @@ try {
   const trow = dj && dj.local.find((f) => /^tmux: \d+ calls since boot/.test(f.message));
   ok(trow && trow.level === "green" && /server pid \d+ RSS \d+ MB/.test(trow.message) === (process.platform === "linux"), `doctor green tmux row (${trow && trow.message})`);
   ok(!d.stdout.includes(TOPIC), "the topic string is not in doctor output");
+  ok(t.history && t.history.panes >= 2 && t.history.lines >= 250 && t.history.overCap === 1 && t.history.overCapLines >= 250 && t.history.cap === TMUX_HISTORY_LINES && typeof t.swapGrowthMb !== "undefined", `health.tmux.history: the hand-made hadron-* pane is the one over the cap (${JSON.stringify(t.history)})`);
+  ok(trow && /scrollback \d+ lines over \d+ panes \(largest hadron-old: \d+\)/.test(trow.message), "the green row carries the scrollback inventory");
+  const hrow = dj && dj.local.find((f) => /^tmux scrollback: /.test(f.message));
+  ok(hrow && hrow.level === "yellow" && new RegExp(`1 Hadron pane created before the ${TMUX_HISTORY_LINES}-line cap still holds \\d+ lines`).test(hrow.message) && /clear-history/.test(hrow.message), `doctor yellow scrollback row with clear-history advice (${hrow && hrow.message})`);
 
   console.log("[PATCH /api/workspace tmuxAlerts]");
   for (const bad of [{ tmuxAlerts: true }, { tmuxAlerts: { ntfy: "yes" } }, { tmuxAlerts: [] }, { tmuxAlerts: {} }, { tmuxAlerts: null }]) {
@@ -260,8 +363,11 @@ try {
   console.log("[memory over threshold: HADRON_TMUX_WARN_RSS_MB=1]");
   if (process.platform === "linux") {
     serverLog = "";
-    await boot({ HADRON_TMUX_WARN_RSS_MB: "1" });
+    await boot({ HADRON_TMUX_WARN_RSS_MB: "1", HADRON_TMUX_HISTORY_LINES: "0" });
     TOKEN = readFileSync(join(WS, ".hadron", "token"), "utf-8").trim();
+    const r0 = await fetch(`${BASE}/api/sessions`, { method: "POST", headers: H(), body: JSON.stringify({ name: "uncapped", cwd: WS, launchCommand: "shell", group: "Workers", autostart: false }) });
+    const p0 = tmuxS(["list-panes", "-t", `=hadron-${WS.split("/").pop()}-uncapped:`, "-F", "#{history_limit}"]);
+    ok(r0.status === 201 && Number(p0) === globalLimit, `HADRON_TMUX_HISTORY_LINES=0 leaves the session at the global limit (${p0})`);
     h = await waitLevel("warn", 10000);
     ok(h.tmux.level === "warn" && h.tmux.reasons.some((r) => /^RSS \d+ MB \(warn from 1 MB\)/.test(r)), `warn with an RSS reason (${JSON.stringify(h.tmux.reasons)})`);
     ok(h.tmux.warnRssMb === 1, "warnRssMb on the payload");
@@ -270,6 +376,7 @@ try {
     dj = null; try { dj = JSON.parse(d.stdout); } catch {}
     const warn = dj && dj.local.find((f) => /^tmux is degraded since/.test(f.message));
     ok(warn && warn.level === "yellow" && /RSS \d+ MB \+ \d+ MB swap, p95 \d+ ms/.test(warn.message) && /ntfy alerts off \(View/.test(warn.message), `doctor yellow "tmux is degraded" row names RSS/swap/p95 and the alert setting (${warn && warn.message})`);
+    ok(warn && /paging: close finished agents/.test(warn.message) && !(dj.local.some((f) => /^tmux scrollback: /.test(f.message))), "with the cap off nothing is 'over the cap': no clear-history hint, no scrollback row");
     ok(d.status === 0, "a yellow tmux row does not fail doctor (exit 0)");
     const dt = doctor();
     ok(/tmux is degraded/.test(dt.stdout) && !dt.stdout.includes(TOPIC), "text doctor shows the row, no topic");

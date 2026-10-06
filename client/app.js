@@ -3254,13 +3254,17 @@ function renderTmuxHealth(t) {
   el.classList.toggle("th-down", t.level === "down");
   const gb = typeof t.rssMb === "number" ? `${(t.rssMb / 1024).toFixed(1)} GB` : null;
   const swap = typeof t.swapMb === "number" && t.swapMb > 0 ? ` + ${(t.swapMb / 1024).toFixed(1)} GB swap` : "";
+  // Swap is judged by growth (what tmux is pushing out NOW), not by the figure.
+  const swapRising = typeof t.swapGrowthMb === "number" && t.warnSwapMb > 0 && t.swapGrowthMb >= t.warnSwapMb;
   const memBad = (t.reasons || []).some((r) => /RSS|swap/i.test(r));
   el.textContent = t.level === "down" ? "⚠ tmux not answering"
+    : swapRising ? `⚠ tmux swapping +${(t.swapGrowthMb / 1024).toFixed(1)} GB`
     : memBad && gb ? `⚠ tmux ${gb}${swap}`
     : `⚠ tmux slow ${t.latencyP95Ms ?? t.latencyMs ?? "?"} ms`;
   el.title = `tmux server pid ${t.pid || "?"} ${t.level} since ${t.since || "?"}\n` +
     (t.reasons || []).map((r) => `  ${r}`).join("\n") +
     (gb ? `\nRSS ${gb}${swap}` : "") + (typeof t.latencyP95Ms === "number" ? `\nprobe p95 ${t.latencyP95Ms} ms` : "") +
+    (t.history ? `\nscrollback ${t.history.lines} lines over ${t.history.panes} panes` : "") +
     "\nHadron never kills tmux — see hadron doctor";
 }
 async function pollTmuxHealth() {

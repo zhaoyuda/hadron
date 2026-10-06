@@ -67,6 +67,22 @@ export function isTmuxTimeout(err) {
 // Exposed on /api/health as `tmux` so the health probe and `hadron doctor` can
 // say "tmux is slow" from the server's own calls, no extra probing.
 export const TMUX_SLOW_MS = 500;
+
+// Scrollback kept per pane in the tmux sessions Hadron creates (agents, shell
+// tabs, editor panes). tmux's history is an in-memory grid: every line of
+// every pane stays resident in the ONE tmux server process, and on the
+// 2026-10-05 incident 171k lines over 76 panes were 5.6 GB RSS + 1.2 GB swap —
+// the server paged and every call stalled. The browser side (xterm.js) keeps
+// 5000 rows per terminal and nothing more is ever shown, so the pane needs no
+// more either; what came before lives in claude's transcript, which Hadron
+// reads for the card. A per-session option (never the global one — other
+// sessions on the shared server keep their own setting); 0 leaves tmux's
+// default/global value alone.
+export const TMUX_HISTORY_LINES = (() => {
+  const v = process.env.HADRON_TMUX_HISTORY_LINES;
+  const n = v === undefined || v === "" ? NaN : Number(v);
+  return Number.isInteger(n) && n >= 0 ? n : 5000;
+})();
 const SLOW_LOG_EVERY_MS = 10000;
 const stats = { calls: 0, slowCalls: 0, timeouts: 0, maxMs: 0, lastMs: 0, lastSlowAt: null, lastSlowMs: 0, lastSlowCmd: null, lastTimeoutAt: null, lastTimeoutCmd: null };
 let lastSlowLogAt = 0;

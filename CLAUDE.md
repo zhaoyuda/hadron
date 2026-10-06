@@ -356,9 +356,24 @@ npm test
 #                            every 30 s (pid from `display-message -p #{pid}`, asked again every 5 s while unknown, null +
 #                            memError on macOS); judge: down = the last 3 probes failed in a row — the reason says "timed out" (not answering) vs "refused at once (no tmux server?)" (state-detector passes isTmuxTimeout through the observer), a threshold of 0 disables that memory check, a reused pid (/proc Name not tmux) is dropped and re-resolved (the first
 #                            answered probe clears it), warn = ≥ 3 probes over 500 ms in the 60-s window or RSS ≥
-#                            HADRON_TMUX_WARN_RSS_MB (2048) / swap ≥ HADRON_TMUX_WARN_SWAP_MB (512); never kills anything.
+#                            HADRON_TMUX_WARN_RSS_MB (2048) / swap GROWTH ≥ HADRON_TMUX_WARN_SWAP_MB (512) within the last
+#                            hour (the figure itself never warns — 4 GB of an old peak's residue is ok, +600 MB in an hour is
+#                            not; a drop resets the baseline; no growth figure on the first sample); never kills anything.
+#                            Scrollback cap (server/tmux.js TMUX_HISTORY_LINES, HADRON_TMUX_HISTORY_LINES, 5000, 0 = off):
+#                            every Hadron-created session gets history-limit set ON THE SESSION before its real window is
+#                            opened (new-session → set-option -t → new-window → kill-window ^, one tmux process) — the
+#                            global option and a hand-made session on the same server keep their limit, the agent env still
+#                            lands; parseHistory over `list-panes -a` (one spawn per 30-s memory sample) → health.tmux.history
+#                            {panes, lines, overCap (hadron-* panes whose limit is above the cap), overCapLines, largest (session
+#                            named only for hadron-*), cap, at}, skipped while down or pid unknown; a swap CEILING
+#                            (HADRON_TMUX_SWAP_CEILING_MB, 4096) warns beside the growth rule; the sample ring is cleared when
+#                            the pid changes/vanishes/is reused so a hand restart never reads as growth; a failed cap chain
+#                            warns once per session and counts on health.tmux.historyCapFailures (yellow doctor row);
+#                            the doctor green row carries "scrollback N lines over M panes (largest …)", a yellow "tmux
+#                            scrollback:" row names the pre-cap panes with `tmux clear-history` advice (folded into the
+#                            paging advice when memory is already bad; absent with the cap off).
 #                            Live on a private tmux server: /api/health.tmux {level, reasons, since, pid, latencyMs,
-#                            latencyP95Ms, rssMb, swapMb, memError, ntfy:{enabled, topicReadable}} next to the call stats;
+#                            latencyP95Ms, rssMb, swapMb, swapGrowthMb, memError, history, ntfy:{enabled, topicReadable}} next to the call stats;
 #                            SIGSTOP → down (server stays up), SIGCONT → ok on the next probe; PATCH /api/workspace
 #                            tmuxAlerts = { ntfy: boolean } only (400 otherwise, persisted in .hadron/config.json, View →
 #                            Notifications → "tmux Alerts via ntfy", DEFAULT OFF); with it on, one POST to

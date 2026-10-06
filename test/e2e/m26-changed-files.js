@@ -108,6 +108,7 @@ try {
   const alpha = await filesOf("alpha");
   r.ok(alpha.complete === true && alpha.changed.map((e) => rel(e.path)).join() === "src/app.js,notes.md,README.md", `changed: newest write first, the sidechain's write included, the Read-only util.js absent (${alpha.changed.map((e) => rel(e.path)).join()})`);
   r.ok(alpha.changed[0].writes === 2 && alpha.changed[0].reads === 0 && typeof alpha.changed[0].lastWriteAt === "string", `app.js: writes 2 (${JSON.stringify(alpha.changed[0])})`);
+  r.ok(await until(async () => (await filesOf("beta"))?.total === 1), "beta: files on the list");
   const beta = await filesOf("beta");
   r.ok(beta?.total === 1 && rel(beta.changed[0].path) === "src/util.js", `beta, same cwd, lists only its own util.js (${JSON.stringify(beta?.changed.map((e) => rel(e.path)))})`);
   r.ok((await filesOf(plain)) === null, "a shell agent (no session) has no files field");

@@ -899,13 +899,22 @@ async function main() {
         // The health probe's verdict (server/tmux-health.js): latency from the
         // state detector's own per-second batch, RSS/swap from /proc (Linux —
         // "memory unknown" on macOS). Never a kill: the row says what to look at.
+        // Scrollback inventory (one list-panes per memory sample): tmux keeps
+        // every pane's history in its own memory, so lines ARE the RSS. Hadron
+        // caps its own sessions at creation (HADRON_TMUX_HISTORY_LINES, 5000);
+        // a pane made before the cap keeps its old limit until its history is
+        // cleared — the row says which to clear.
+        const memBadRow = (t.level === "warn" || t.level === "down") && (t.reasons || []).some((r) => /RSS|swap/i.test(r));
+        const h = t.history && typeof t.history.lines === "number" ? t.history : null;
+        const histLine = h ? `scrollback ${h.lines} lines over ${h.panes} panes${h.largest ? ` (largest ${h.largest.session || "pane, not Hadron's"}: ${h.largest.lines})` : ""}` : "";
+        const histAdvice = h && h.overCap ? `${h.overCap} Hadron pane${h.overCap === 1 ? "" : "s"} created before the ${h.cap}-line cap still hold${h.overCap === 1 ? "s" : ""} ${h.overCapLines} lines — \`tmux clear-history -t <session>\` on the idle ones frees them (the cap applies to sessions created from now on)` : "";
         if (t.level === "warn" || t.level === "down") {
           const gb = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`);
           const mem = typeof t.rssMb === "number" ? `RSS ${gb(t.rssMb)} + ${gb(t.swapMb || 0)} swap` : `memory unknown (${t.memError || "no /proc"})`;
           const alerts = t.ntfy ? (t.ntfy.enabled ? (t.ntfy.topicReadable ? "ntfy alerts on" : "ntfy alerts on but ~/.ntfy_topic_log is unreadable") : "ntfy alerts off (View → tmux Alerts via ntfy)") : "";
-          const memBad = (typeof t.rssMb === "number" && t.warnRssMb > 0 && t.rssMb >= t.warnRssMb) || (typeof t.swapMb === "number" && t.warnSwapMb > 0 && t.swapMb >= t.warnSwapMb);
+          const memBad = (typeof t.rssMb === "number" && t.warnRssMb > 0 && t.rssMb >= t.warnRssMb) || (typeof t.swapGrowthMb === "number" && t.warnSwapMb > 0 && t.swapGrowthMb >= t.warnSwapMb) || (typeof t.swapMb === "number" && t.swapCeilingMb > 0 && t.swapMb >= t.swapCeilingMb);
           const refused = (t.reasons || []).some((r) => /refused/.test(r));
-          const advice = memBad ? "a tmux this size is paging: close finished agents' sessions or restart the tmux server by hand when no agent is working"
+          const advice = memBad ? `a tmux this size is paging: ${histAdvice ? `${histAdvice}, ` : ""}close finished agents' sessions, or restart the tmux server by hand when no agent is working`
             : refused ? "the probes are refused at once — is the tmux server still alive (`tmux list-sessions`)?"
             : t.level === "down" ? "it is not answering at all — if it is alive it is probably paging or wedged: check its RSS/swap (/proc/<pid>/status) and `tmux list-sessions`"
             : "it is answering slowly — under load, or starting to page: check its RSS/swap (/proc/<pid>/status)";
@@ -913,7 +922,9 @@ async function main() {
         }
         if (t.timeouts || t.busyRefusals) local.push({ level: "yellow", message: `tmux: ${t.timeouts} call${t.timeouts === 1 ? "" : "s"} timed out (> ${t.timeoutMs} ms) and ${t.busyRefusals} terminal connect${t.busyRefusals === 1 ? "" : "s"} refused as busy since boot (last timeout ${t.lastTimeoutAt || "?"}, ${t.lastTimeoutCmd || "?"}) — the tmux server is overloaded or paging; check its RSS/swap (\`tmux display -p '#{pid}'\`, /proc/<pid>/status)` });
         else if (t.slowCalls) local.push({ level: "yellow", message: `tmux: ${t.slowCalls} of ${t.calls} calls slower than ${t.slowMs} ms since boot (slowest ${t.maxMs} ms, last ${t.lastSlowAt || "?"}: ${t.lastSlowCmd || "?"}) — the tmux server is under load` });
-        else if (t.level !== "warn" && t.level !== "down") local.push({ level: "green", message: `tmux: ${t.calls} calls since boot, none slower than ${t.slowMs} ms (max ${t.maxMs} ms)${typeof t.rssMb === "number" ? `; server pid ${t.pid} RSS ${t.rssMb} MB + ${t.swapMb} MB swap` : ""}${typeof t.latencyP95Ms === "number" ? `, probe p95 ${t.latencyP95Ms} ms` : ""}` });
+        else if (t.level !== "warn" && t.level !== "down") local.push({ level: "green", message: `tmux: ${t.calls} calls since boot, none slower than ${t.slowMs} ms (max ${t.maxMs} ms)${typeof t.rssMb === "number" ? `; server pid ${t.pid} RSS ${t.rssMb} MB${typeof t.swapMb === "number" ? ` + ${t.swapMb} MB swap` : ""}${typeof t.swapGrowthMb === "number" && t.swapGrowthMb > 0 ? ` (+${t.swapGrowthMb} MB this hour)` : ""}` : ""}${typeof t.latencyP95Ms === "number" ? `, probe p95 ${t.latencyP95Ms} ms` : ""}${histLine ? `; ${histLine}` : ""}` });
+        if (histAdvice && !memBadRow) local.push({ level: "yellow", message: `tmux scrollback: ${histAdvice}` });
+        if (t.historyCapFailures) local.push({ level: "yellow", message: `tmux scrollback: the cap could not be applied to ${t.historyCapFailures} session${t.historyCapFailures === 1 ? "" : "s"} created since boot — they keep tmux's global history-limit (server.log names them and the tmux error)` });
       }
       const agents = (doctor && doctor.agents) || [];
       const reds = local.filter((f) => f.level === "red").length + agents.filter((a) => a.finding.level === "red").length;

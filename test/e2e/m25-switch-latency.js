@@ -49,7 +49,7 @@ try {
   // ── seed: a 35k-line CJK scrollback in 'big', a one-liner in 'small' ──
   // Written by the shell in the pane itself (no browser attached yet), so the
   // history lives in tmux's scrollback exactly like a long claude session's.
-  // tmux's default history-limit is 2000 rows and Hadron does not raise it, so
+  // Hadron caps its sessions at 5000 rows (HADRON_TMUX_HISTORY_LINES), so
   // the seeded pane would be trimmed to nothing on a clean box. history-limit
   // is read when a pane is CREATED, so raise it on the session and re-create
   // its (only) window — the agent is still unattached, nothing observes the

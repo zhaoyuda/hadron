@@ -16,7 +16,7 @@
 import { readFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
-import { tmuxSafeAsync, TMUX_SLOW_MS } from "./tmux.js";
+import { tmuxSafeAsync, TMUX_SLOW_MS, TMUX_HISTORY_LINES } from "./tmux.js";
 
 export const PROC_INTERVAL_MS = 30_000;
 export const PID_RETRY_MS = 5_000;        // how often an unknown tmux pid is asked for again
@@ -28,10 +28,20 @@ export const NTFY_MIN_INTERVAL_MS = 30 * 60_000; // at most one push per level c
 // An unset or malformed override keeps the default; 0 switches that half off.
 const num = (v, d) => (v === undefined || v === "" || !Number.isFinite(Number(v)) || Number(v) < 0 ? d : Number(v));
 export const WARN_RSS_MB = num(process.env.HADRON_TMUX_WARN_RSS_MB, 2048);
+// Swap is judged by GROWTH, not by the figure: pages tmux pushed out during
+// an old peak stay out (prod 2026-10-06: 3.9 GB swapped, 387 MB RSS, nothing
+// paging, 16 GB free) and only cost something if they are ever touched again.
+// Swap that is RISING is tmux being pushed out right now — that is the alarm.
 export const WARN_SWAP_MB = num(process.env.HADRON_TMUX_WARN_SWAP_MB, 512);
+// …and a high absolute ceiling beside it: a tmux that pages out slowly
+// (+100 MB/h for days) never trips the growth rule, and swapped-out pages
+// are not RSS, so without this it would read ok forever.
+export const SWAP_CEILING_MB = num(process.env.HADRON_TMUX_SWAP_CEILING_MB, 4096);
+export const SWAP_WINDOW_MS = 60 * 60_000;  // growth is measured against the lowest sample this far back
+export const MEM_SAMPLES = Math.ceil(SWAP_WINDOW_MS / PROC_INTERVAL_MS) + 1;
 
 // Pure: the verdict from the samples. Exported for the unit test.
-export function judge({ probes, rssMb, swapMb, now = Date.now(), slowMs = TMUX_SLOW_MS, warnRssMb = WARN_RSS_MB, warnSwapMb = WARN_SWAP_MB }) {
+export function judge({ probes, rssMb, swapGrowthMb, swapMb, now = Date.now(), slowMs = TMUX_SLOW_MS, warnRssMb = WARN_RSS_MB, warnSwapMb = WARN_SWAP_MB, swapCeilingMb = SWAP_CEILING_MB }) {
   const recent = probes.filter((p) => now - p.at <= RECENT_MS);
   // "down" is the TRAILING run of failures: the first probe that answers
   // again ends it at once (recovery must not wait for the window to drain);
@@ -51,7 +61,8 @@ export function judge({ probes, rssMb, swapMb, now = Date.now(), slowMs = TMUX_S
   }
   else if (slow >= SLOW_PROBES_WARN) { level = "warn"; reasons.push(`${slow} of the last ${recent.length} pane probes took over ${slowMs} ms`); }
   if (warnRssMb > 0 && typeof rssMb === "number" && rssMb >= warnRssMb) { if (level === "ok") level = "warn"; reasons.push(`RSS ${rssMb} MB (warn from ${warnRssMb} MB)`); }
-  if (warnSwapMb > 0 && typeof swapMb === "number" && swapMb >= warnSwapMb) { if (level === "ok") level = "warn"; reasons.push(`${swapMb} MB swapped out (warn from ${warnSwapMb} MB)`); }
+  if (warnSwapMb > 0 && typeof swapGrowthMb === "number" && swapGrowthMb >= warnSwapMb) { if (level === "ok") level = "warn"; reasons.push(`swap grew ${swapGrowthMb} MB in the last hour, ${swapMb} MB out now (warn from ${warnSwapMb} MB of growth)`); }
+  else if (swapCeilingMb > 0 && typeof swapMb === "number" && swapMb >= swapCeilingMb) { if (level === "ok") level = "warn"; reasons.push(`${swapMb} MB swapped out (ceiling ${swapCeilingMb} MB)`); }
   return { level, reasons, slowProbes: slow, failedProbes: failed, probesJudged: recent.length };
 }
 
@@ -60,6 +71,27 @@ export function parseProcStatus(text) {
   const kb = (key) => { const m = String(text || "").match(new RegExp(`^${key}:\\s+(\\d+) kB`, "m")); return m ? Number(m[1]) : null; };
   const rss = kb("VmRSS"), swap = kb("VmSwap");
   return { rssMb: rss === null ? null : Math.round(rss / 1024), swapMb: swap === null ? null : Math.round(swap / 1024) };
+}
+
+// Pure: `list-panes -a -F '#{session_name}|#{history_size}|#{history_limit}'`
+// → what the server's memory is made of. `overCap` counts Hadron's own panes
+// whose grid was allocated before the cap existed (their limit is above it):
+// the ones `tmux clear-history` would shrink; other sessions on the shared
+// server are counted in the totals and left alone.
+export function parseHistory(text, cap, prefix = "hadron-") {
+  let panes = 0, lines = 0, overCap = 0, overCapLines = 0, largest = null;
+  for (const line of String(text || "").split("\n")) {
+    const m = line.match(/^(.*)\|(\d+)\|(\d+)$/);
+    if (!m) continue;
+    const name = m[1], size = Number(m[2]), limit = Number(m[3]);
+    panes++; lines += size;
+    const ours = name.startsWith(prefix);
+    if (cap > 0 && ours && limit > cap) { overCap++; overCapLines += size; }
+    // The name goes on the OPEN /api/health: only Hadron's own (agent ids are
+    // public there already) — the operator's other sessions stay nameless.
+    if (!largest || size > largest.lines) largest = { session: ours ? name : null, lines: size, limit };
+  }
+  return { panes, lines, overCap, overCapLines, largest, cap, at: null };
 }
 
 function p95(values) {
@@ -71,6 +103,8 @@ function p95(values) {
 export function createTmuxHealth({
   readStatus = (pid) => readFileSync(`/proc/${pid}/status`, "utf-8"),
   resolvePid = async () => { const out = await tmuxSafeAsync(["display-message", "-p", "#{pid}"]); const n = Number(out); return Number.isInteger(n) && n > 0 ? n : null; },
+  listHistory = () => tmuxSafeAsync(["list-panes", "-a", "-F", "#{session_name}|#{history_size}|#{history_limit}"]),
+  historyCap = TMUX_HISTORY_LINES,
   now = Date.now,
   notify = null,              // (event: {level, previous, reasons, summary}) => void — the ntfy sender
   isNotifyEnabled = () => false,
@@ -79,6 +113,8 @@ export function createTmuxHealth({
   const probes = [];          // { at, ms, failed, timedOut }
   let pid = null;
   let mem = { rssMb: null, swapMb: null, sampledAt: null, error: null };
+  const memSamples = [];      // { at, swapMb } — the last hour, for the growth figure
+  let history = null;         // parseHistory() of the last inventory, null until one succeeded
   let level = "ok";
   let reasons = [];
   let since = null;           // when the current level began
@@ -95,28 +131,57 @@ export function createTmuxHealth({
     if (pid === null && !failed && !sampling && now() - lastResolveAt >= PID_RETRY_MS) sampleMemory();
   }
 
-  let sampling = false, lastResolveAt = 0;
+  let sampling = false, lastResolveAt = 0, lastPid = null;
   async function sampleMemory() {
     if (sampling) return;
     sampling = true;
     try {
-      if (pid === null) { lastResolveAt = now(); pid = await resolvePid(); }
+      await readMemory();
+      // What the memory is made of: one list-panes per sample (≈ 9 ms for 100
+      // panes), after the verdict so a stalled tmux cannot delay it — and not
+      // at all while tmux is not answering (one more client queued on a
+      // stalled server every 30 s, each a counted timeout) or has no session.
+      if (level === "down" || pid === null) return;
+      const out = await listHistory();
+      if (out !== null) history = { ...parseHistory(out, historyCap), at: new Date(now()).toISOString() };
+    } catch {} finally { sampling = false; }
+  }
+  async function readMemory() {
+    try {
+      if (pid === null) {
+        lastResolveAt = now();
+        pid = await resolvePid();
+        // A new server's swap is its own: an hour of samples from the old one
+        // would read a restarted tmux's first figure as growth.
+        if (pid !== null && pid !== lastPid) { memSamples.length = 0; lastPid = pid; }
+      }
       if (pid === null) { mem = { ...mem, error: "tmux pid unknown" }; return; }
       const text = readStatus(pid);
       // A pid the kernel reused after a hand restart of tmux reads fine and is
       // somebody else's memory: /proc's Name says whose it is.
-      if (!/^Name:\s+tmux/m.test(text)) { pid = null; mem = { ...mem, error: "tmux pid reused by another process, re-resolving" }; return; }
+      if (!/^Name:\s+tmux/m.test(text)) { pid = null; memSamples.length = 0; mem = { ...mem, error: "tmux pid reused by another process, re-resolving" }; return; }
       mem = { ...parseProcStatus(text), sampledAt: new Date(now()).toISOString(), error: null };
+      if (typeof mem.swapMb === "number") {
+        memSamples.push({ at: now(), swapMb: mem.swapMb });
+        while (memSamples.length && (memSamples.length > MEM_SAMPLES || now() - memSamples[0].at > SWAP_WINDOW_MS)) memSamples.shift();
+      }
     } catch (e) {
       // ENOENT = the pid is gone (tmux restarted) → resolve again next time;
       // no /proc at all (macOS) → memory stays unknown, latency still judged.
-      if (e && e.code === "ENOENT") pid = null;
+      if (e && e.code === "ENOENT") { pid = null; memSamples.length = 0; }
       mem = { ...mem, error: e && e.code === "ENOENT" ? "tmux pid gone, re-resolving" : "memory unreadable on this platform" };
-    } finally { sampling = false; evaluate(); }
+    } finally { evaluate(); }
+  }
+
+  // Swap growth over the window: now minus the lowest sample (a shrink after a
+  // swapoff/swapon or page-ins resets the baseline downwards at once).
+  function swapGrowth() {
+    if (typeof mem.swapMb !== "number" || !memSamples.length) return null;
+    return mem.swapMb - Math.min(...memSamples.map((s) => s.swapMb));
   }
 
   function evaluate() {
-    const v = judge({ probes, rssMb: mem.rssMb, swapMb: mem.swapMb, now: now() });
+    const v = judge({ probes, rssMb: mem.rssMb, swapMb: mem.swapMb, swapGrowthMb: swapGrowth(), now: now() });
     const prev = level;
     level = v.level; reasons = v.reasons;
     if (prev !== level) {
@@ -150,8 +215,9 @@ export function createTmuxHealth({
       latencyP95Ms: p95(ok),
       slowProbes: probes.filter((p) => !p.failed && p.ms > TMUX_SLOW_MS).length,
       failedProbes: probes.filter((p) => p.failed).length,
-      rssMb: mem.rssMb, swapMb: mem.swapMb, memSampledAt: mem.sampledAt, memError: mem.error,
-      warnRssMb: WARN_RSS_MB, warnSwapMb: WARN_SWAP_MB,
+      rssMb: mem.rssMb, swapMb: mem.swapMb, swapGrowthMb: swapGrowth(), memSampledAt: mem.sampledAt, memError: mem.error,
+      warnRssMb: WARN_RSS_MB, warnSwapMb: WARN_SWAP_MB, swapCeilingMb: SWAP_CEILING_MB,
+      history,
     };
   }
 

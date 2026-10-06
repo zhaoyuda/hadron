@@ -16,7 +16,7 @@ import { probeClaudeCaps, RuntimeTracker, performResume, BOOT, isClaudeCmd, deci
 import { randomUUID } from "crypto";
 import { loadAgents, loadAgent, saveAgent, saveAgentLocked, archiveAgent, deleteAgent, initWorkspace, getWorkspaceDir, appendAgentField, removeAgentArtifact, isSelfWrite } from "./agent-store.js";
 import { resolve } from "path";
-import { tmux, tmuxSafe, tmuxAsync, tmuxSafeAsync, isTmuxTimeout, tmuxStats, TMUX_TIMEOUT_MS, isValidId, shellQuoteArgv, tmuxArgv, setSlowCallObserver } from "./tmux.js";
+import { tmux, tmuxSafe, tmuxAsync, tmuxSafeAsync, isTmuxTimeout, tmuxStats, TMUX_TIMEOUT_MS, TMUX_HISTORY_LINES, isValidId, shellQuoteArgv, tmuxArgv, setSlowCallObserver } from "./tmux.js";
 import { findRegistrySession, findTmuxlessRecordFor, classifyTmuxless, readRegistry, processIdentity, parentPid, REGISTRY_ROOT, REGISTRY_STATUSES, REGISTRY_TMUX_SINCE } from "./session-registry.js";
 import { syncSkills } from "./skills.js";
 import { collectProvenance } from "./provenance.js";
@@ -459,6 +459,45 @@ async function applyAgentEnvAsync(tmuxName, cwd) {
   await tmuxSafeAsync(["respawn-pane", "-k", "-t", tmuxName, "-c", cwd || WORKSPACE]);
 }
 
+// Create a Hadron tmux session with its scrollback capped at TMUX_HISTORY_LINES
+// (server/tmux.js). history-limit is read when a pane's grid is allocated and
+// never again — the window new-session makes already carries the server's
+// default (50000 on prod from ~/.tmux.conf), and respawn-pane keeps the grid.
+// So: create the session, set history-limit ON THE SESSION (it is a session
+// option: the global value and every other session on the shared server are
+// untouched), open the real window under it, then kill the one new-session
+// made (`^` = the lowest window index).
+// The three steps are one tmux process (a command sequence), so a half-done
+// session is never left behind on a timeout between them.
+function newSessionArgs(tmuxName, cwd) {
+  return ["new-session", "-d", "-s", tmuxName, "-x", "80", "-y", "24", "-c", cwd];
+}
+function capHistoryArgs(tmuxName, cwd) {
+  if (!(TMUX_HISTORY_LINES > 0)) return null;
+  return ["set-option", "-t", tmuxName, "history-limit", String(TMUX_HISTORY_LINES), ";",
+    "new-window", "-t", tmuxName, "-c", cwd, ";",
+    "kill-window", "-t", `${tmuxName}:^`];
+}
+// A failed cap chain keeps the uncapped window — the session still works — but
+// the agent silently has tmux's global limit, so it warns once per agent and
+// counts on /api/health.tmux.historyCapFailures (a yellow doctor row).
+let historyCapFailures = 0;
+function noteCapResult(tmuxName, out) {
+  if (out !== null) return;
+  historyCapFailures++;
+  warnOnce(`tmux-history-cap:${tmuxName}`, `[tmux] scrollback cap not applied to ${tmuxName} — the session keeps tmux's global history-limit (see server.log for the tmux error)`);
+}
+function createTmuxSession(tmuxName, cwd) {
+  tmux(newSessionArgs(tmuxName, cwd));
+  const cap = capHistoryArgs(tmuxName, cwd);
+  if (cap) noteCapResult(tmuxName, tmuxSafe(cap));
+}
+async function createTmuxSessionAsync(tmuxName, cwd) {
+  await tmuxAsync(newSessionArgs(tmuxName, cwd));
+  const cap = capHistoryArgs(tmuxName, cwd);
+  if (cap) noteCapResult(tmuxName, await tmuxSafeAsync(cap));
+}
+
 // Let tmux size each window to the SMALLEST attached client so no client's view is ever
 // clipped on the right. NOTE: never call `tmux resize-window` for this — it permanently flips
 // the window to `window-size manual`, freezing it at one width. A window frozen wider than the
@@ -480,7 +519,7 @@ function ensureTmuxSession(sessionId, cwd) {
     tmux(["has-session", "-t", tmuxName]);
   } catch (e) {
     if (isTmuxTimeout(e)) throw e;
-    tmux(["new-session", "-d", "-s", tmuxName, "-x", "80", "-y", "24", "-c", cwd || WORKSPACE]);
+    createTmuxSession(tmuxName, cwd || WORKSPACE);
     applyAgentEnv(tmuxName, cwd || WORKSPACE);
     created = true;
   }
@@ -499,7 +538,7 @@ async function ensureTmuxSessionByName(tmuxName, cwd) {
     await tmuxAsync(["has-session", "-t", tmuxName]);
   } catch (e) {
     if (isTmuxTimeout(e)) throw e;
-    await tmuxAsync(["new-session", "-d", "-s", tmuxName, "-x", "80", "-y", "24", "-c", cwd || WORKSPACE]);
+    await createTmuxSessionAsync(tmuxName, cwd || WORKSPACE);
     await applyAgentEnvAsync(tmuxName, cwd || WORKSPACE);
     created = true;
   }
@@ -2869,7 +2908,7 @@ setProbeObserver((ms, failed, timedOut) => tmuxHealth.noteProbe(ms, failed, time
 let ntfyStatusCache = { at: 0, value: null };
 function tmuxReport() {
   if (Date.now() - ntfyStatusCache.at > 5000) ntfyStatusCache = { at: Date.now(), value: { enabled: tmuxAlertsEnabled(), topicReadable: readNtfyTopic() !== null } };
-  return { ...tmuxStats(), busyRefusals: tmuxBusyRefusals, ...tmuxHealth.snapshot(), ntfy: { ...ntfyStatusCache.value } };
+  return { ...tmuxStats(), busyRefusals: tmuxBusyRefusals, historyCapFailures, ...tmuxHealth.snapshot(), ntfy: { ...ntfyStatusCache.value } };
 } // /api/health
 function ptySizeFromQuery(params) {
   // Clamp rather than reject an out-of-range value: a 25%-zoomed browser on a
