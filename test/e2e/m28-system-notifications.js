@@ -160,7 +160,10 @@ try {
   // ── 6. a burst (many agents flipping in ONE poll) is coalesced: 3 raised, the rest collapse ──
   await setVisible(page, false);
   for (const name of ["C1", "C2", "C3", "C4", "C5"]) await api("POST", "/api/sessions", { name, launchCommand: "shell" });
-  await until(() => page.evaluate(() => sessions.length >= 7));
+  // Wait until the CLIENT lists all five (not a count: the sample agent makes
+  // 7 true with C5 still unseen, and an agent first seen already done is no
+  // state change — detectStateChanges skips ids absent from the snapshot).
+  await until(() => page.evaluate(() => ["c1", "c2", "c3", "c4", "c5"].every((id) => sessions.some((s) => s.id === id))));
   await page.evaluate(() => { window.__notifs = []; });
   await Promise.all(["c1", "c2", "c3", "c4", "c5"].map((id) => api("PATCH", `/api/sessions/${id}`, { state: "done" })));
   r.ok(await until(async () => (await notifs(page)).some((n) => n.tag === "hadron-burst")), "5 agents done at once → a collapsed \"N agents need you\" notification");
@@ -168,7 +171,7 @@ try {
   const burst = await notifs(page);
   const single = burst.filter((n) => /^C\d is done$/.test(n.title));
   const coll = burst.filter((n) => n.tag === "hadron-burst" && !n.closed);
-  r.ok(single.length === 3 && coll.length === 1 && coll[0].title === "5 agents need you", `3 raised individually + one "5 agents need you" (${single.length} single, ${JSON.stringify(coll.map((n) => n.title))})`);
+  r.ok(single.length === 3 && coll.length === 1 && coll[0].title === "5 agents need you", `3 raised individually + one "5 agents need you" (${single.length} single, ${JSON.stringify(coll.map((n) => n.title))}; all: ${JSON.stringify(burst.map((n) => [n.title, n.closed ? "closed" : "open"]))})`);
 
   // ── 7. permission revoked later: the ✓ comes off and an in-page message says why ──
   await page.evaluate(() => { window.__perm = "denied"; });

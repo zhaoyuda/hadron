@@ -95,11 +95,13 @@ console.log("[parseProcStatus]");
 
 console.log("[parseHistory]");
 {
-  const h = parseHistory("hadron-w-a|40000|50000\nhadron-w-b|120|5000\nother|7000|50000\nbad line\n", 5000);
-  ok(h.panes === 3 && h.lines === 47120, `panes and total lines over every session (${h.panes}, ${h.lines})`);
-  ok(h.overCap === 1 && h.overCapLines === 40000, `overCap counts only hadron-* panes whose limit is above the cap (${h.overCap}, ${h.overCapLines} lines)`);
+  const h = parseHistory("hadron-w-a|40000|50000\nhadron-w-b|120|5000\nhadron-w-c|0|100000\nother|7000|50000\nbad line\n", 5000);
+  ok(h.panes === 4 && h.lines === 47120, `panes and total lines over every session (${h.panes}, ${h.lines})`);
+  ok(h.overCap === 1 && h.overCapLines === 40000, `overCap counts only hadron-* panes that HOLD more than the cap (${h.overCap}, ${h.overCapLines} lines)`);
+  ok(h.uncapped === 2, `uncapped counts hadron-* panes whose limit is above the cap, cleared or not (${h.uncapped}) — a cleared pane is not advice`);
+  ok(parseHistory("hadron-w-a|0|100000\n", 5000).overCap === 0, "a pane cleared by the row's own advice drops out of the row (limit unchanged)");
   ok(h.largest && h.largest.session === "hadron-w-a" && h.largest.lines === 40000, "largest pane named");
-  ok(parseHistory("hadron-w-a|40000|50000\n", 0).overCap === 0, "cap 0 (disabled) → nothing is over the cap");
+  ok(parseHistory("hadron-w-a|40000|50000\n", 0).overCap === 0 && parseHistory("hadron-w-a|40000|50000\n", 0).uncapped === 0, "cap 0 (disabled) → nothing is over the cap, nothing uncapped");
   ok(parseHistory("", 5000).panes === 0 && parseHistory(null, 5000).lines === 0, "empty / null → zeros");
 }
 
@@ -328,11 +330,16 @@ try {
   console.log("[healthy tmux]");
   await boot();
   TOKEN = readFileSync(join(WS, ".hadron", "token"), "utf-8").trim();
-  // A session made by hand before the cap existed (the prod fleet): the
-  // server's default limit, 300 lines of history — the inventory must name it.
+  // Two sessions made by hand before the cap existed (the prod fleet), both at
+  // the server's global limit: hadron-old holds more lines than the cap — the
+  // one the row must name; hadron-small holds 50 — uncapped, not advice
+  // (a Mac fleet with `set -g history-limit 100000` showed 14 such panes yellow).
   tmuxS(["new-session", "-d", "-s", "hadron-old", "-x", "80", "-y", "24"]);
+  tmuxS(["new-session", "-d", "-s", "hadron-small", "-x", "80", "-y", "24"]);
   const globalLimit = Number(tmuxS(["show-options", "-g", "-v", "history-limit"]));
-  tmuxS(["send-keys", "-t", "=hadron-old:", "for i in $(seq 1 300); do echo line $i; done", "Enter"]);
+  ok(globalLimit > TMUX_HISTORY_LINES + 200, `the private server's global history-limit (${globalLimit}) is above the cap ${TMUX_HISTORY_LINES}`);
+  tmuxS(["send-keys", "-t", "=hadron-old:", `for i in $(seq 1 ${TMUX_HISTORY_LINES + 200}); do echo line $i; done`, "Enter"]);
+  tmuxS(["send-keys", "-t", "=hadron-small:", "for i in $(seq 1 50); do echo line $i; done", "Enter"]);
   const r = await fetch(`${BASE}/api/sessions`, { method: "POST", headers: H(), body: JSON.stringify({ name: "probe", cwd: WS, launchCommand: "shell", group: "Workers", autostart: false }) });
   ok(r.status === 201, `shell agent created (${r.status}) — the state detector now probes every second`);
   console.log("[history cap on Hadron's sessions]");
@@ -370,10 +377,25 @@ try {
   const trow = dj && dj.local.find((f) => /^tmux: \d+ calls since boot/.test(f.message));
   ok(trow && trow.level === "green" && /server pid \d+ RSS \d+ MB/.test(trow.message) === (process.platform === "linux"), `doctor green tmux row (${trow && trow.message})`);
   ok(!d.stdout.includes(TOPIC), "the topic string is not in doctor output");
-  ok(t.history && t.history.panes >= 2 && t.history.lines >= 250 && t.history.overCap === 1 && t.history.overCapLines >= 250 && t.history.cap === TMUX_HISTORY_LINES && typeof t.swapGrowthMb !== "undefined", `health.tmux.history: the hand-made hadron-* pane is the one over the cap (${JSON.stringify(t.history)})`);
-  ok(trow && /scrollback \d+ lines over \d+ panes \(largest hadron-old: \d+\)/.test(trow.message), "the green row carries the scrollback inventory");
+  ok(t.history && t.history.panes >= 3 && t.history.lines > TMUX_HISTORY_LINES && t.history.overCap === 1 && t.history.overCapLines > TMUX_HISTORY_LINES && t.history.uncapped === 2 && t.history.cap === TMUX_HISTORY_LINES && typeof t.swapGrowthMb !== "undefined", `health.tmux.history: the hand-made hadron-* pane is the one over the cap (${JSON.stringify(t.history)})`);
+  ok(trow && /scrollback \d+ lines over \d+ panes \(largest hadron-old: \d+\); 2 Hadron panes have a limit above the \d+-line cap \(allocated before the cap; kept until the session is recreated\)/.test(trow.message), `the green row carries the scrollback inventory and the uncapped count (${trow && trow.message.replace(/^.*scrollback/, "scrollback")})`);
   const hrow = dj && dj.local.find((f) => /^tmux scrollback: /.test(f.message));
-  ok(hrow && hrow.level === "yellow" && new RegExp(`1 Hadron pane created before the ${TMUX_HISTORY_LINES}-line cap still holds \\d+ lines`).test(hrow.message) && /clear-history/.test(hrow.message), `doctor yellow scrollback row with clear-history advice (${hrow && hrow.message})`);
+  ok(hrow && hrow.level === "yellow" && new RegExp(`1 Hadron pane holds more than the ${TMUX_HISTORY_LINES}-line cap \\(\\d+ lines\\)`).test(hrow.message) && /clear-history/.test(hrow.message) && /keeps its old limit/.test(hrow.message) && /hadron close/.test(hrow.message), `doctor yellow scrollback row with clear-history advice and the durable remedy (${hrow && hrow.message})`);
+  // The complaint that motivated the size rule, end to end: following the
+  // row's own advice makes the row go away while the pane's limit stays.
+  tmuxS(["clear-history", "-t", "=hadron-old:"]);
+  ok(Number(tmuxS(["display-message", "-p", "-t", "=hadron-old:", "#{history_limit}"])) === globalLimit, "clear-history leaves the pane's limit where it was");
+  let afterClear = null, hrow2 = true;
+  for (let i = 0; i < 80 && hrow2; i++) {
+    await sleep(500);
+    afterClear = (await (await fetch(`${BASE}/api/health`)).json()).tmux;
+    if (afterClear.history && afterClear.history.at !== t.history.at) {
+      let d2 = null; try { d2 = JSON.parse(doctor("--json").stdout); } catch {}
+      hrow2 = (d2 && d2.local.find((f) => /^tmux scrollback: \d+ Hadron pane/.test(f.message))) || null;
+    }
+  }
+  ok(afterClear && afterClear.history && afterClear.history.overCap === 0 && afterClear.history.uncapped === 2, `after the clear the pane is no longer over the cap and the uncapped count is unchanged (${JSON.stringify(afterClear && afterClear.history)})`);
+  ok(hrow2 === null, "…and the yellow scrollback row is gone — the row can be cleared by its own advice");
 
   console.log("[PATCH /api/workspace tmuxAlerts]");
   for (const bad of [{ tmuxAlerts: true }, { tmuxAlerts: { ntfy: "yes" } }, { tmuxAlerts: [] }, { tmuxAlerts: {} }, { tmuxAlerts: null }]) {

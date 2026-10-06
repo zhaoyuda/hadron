@@ -371,14 +371,16 @@ npm test
 #                            opened (new-session → set-option -t → new-window → kill-window ^, one tmux process) — the
 #                            global option and a hand-made session on the same server keep their limit, the agent env still
 #                            lands; parseHistory over `list-panes -a` (one spawn per 30-s memory sample) → health.tmux.history
-#                            {panes, lines, overCap (hadron-* panes whose limit is above the cap), overCapLines, largest (session
+#                            {panes, lines, overCap (hadron-* panes HOLDING more than the cap — a cleared pane drops out, its limit stays), overCapLines, uncapped (limit above the cap), largest (session
 #                            named only for hadron-*), cap, at}, skipped while down or pid unknown; a swap CEILING
 #                            (HADRON_TMUX_SWAP_CEILING_MB, 4096) warns beside the growth rule; the sample ring is cleared when
 #                            the pid changes/vanishes/is reused so a hand restart never reads as growth; a failed cap chain
 #                            warns once per session and counts on health.tmux.historyCapFailures (yellow doctor row);
-#                            the doctor green row carries "scrollback N lines over M panes (largest …)", a yellow "tmux
-#                            scrollback:" row names the pre-cap panes with `tmux clear-history` advice (folded into the
-#                            paging advice when memory is already bad; absent with the cap off).
+#                            the doctor tmux row (green or degraded) carries "scrollback N lines over M panes (largest …)"
+#                            plus the uncapped count as information; a yellow "tmux scrollback:" row names the panes that
+#                            HOLD more than the cap with `tmux clear-history` advice and the durable remedy (recreate the
+#                            session) — the live fixture proves a clear-history makes the row go away while the limit stays
+#                            (folded into the paging advice when memory is already bad; absent with the cap off).
 #                            Live on a private tmux server: /api/health.tmux {level, reasons, since, pid, latencyMs,
 #                            latencyP95Ms, rssMb, swapMb, swapGrowthMb, memError, history, ntfy:{enabled, topicReadable}} next to the call stats;
 #                            SIGSTOP → down (server stays up), SIGCONT → ok on the next probe; PATCH /api/workspace
