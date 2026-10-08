@@ -823,6 +823,8 @@ app.get("/api/quota", (req, res) => {
       body = readQuota({ now });
       // Silent-failure rule: a skipped source file is a gauge that quietly vanished — say so once per file.
       for (const pr of body.sourceProblems) warnOnce(`quota-source:${pr.file}`, `[quota] ${pr.file} skipped: ${pr.error} — \`hadron doctor\` has the row`);
+      // …and an ignored optional field (detail/level out of contract) is a note on a source that IS shown — once per file + note.
+      for (const v of body.sources) for (const n of v.notes || []) warnOnce(`quota-source-field:${v.name}:${n}`, `[quota] hadron-quota.d/${v.name}.json: ${n} (the file is still read) — \`hadron doctor\` has the note`);
     } catch (e) { body = { claude: null, codex: null, sources: [], sourceProblems: [], at: new Date(now).toISOString(), error: "quota sources unreadable" }; warnOnce("quota-read", `[quota] sources unreadable: ${e.message}`); }
     quotaCache = { readAt: now, body };
   }

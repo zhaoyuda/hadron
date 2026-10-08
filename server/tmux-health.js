@@ -107,23 +107,29 @@ export function parseProcStatus(text) {
 
 // Pure: `list-panes -a -F '#{session_name}|#{history_size}|#{history_limit}'`
 // → what the server's memory is made of. `overCap` counts Hadron's own panes
-// whose grid was allocated before the cap existed (their limit is above it):
-// the ones `tmux clear-history` would shrink; other sessions on the shared
-// server are counted in the totals and left alone.
+// that HOLD more than the cap — the ones `tmux clear-history` would shrink;
+// `uncapped` counts Hadron's panes whose limit is above the cap (allocated
+// before it existed; a global history-limit makes that every old pane) — a
+// fact, not a problem: clear-history empties a pane but leaves its limit, so
+// counting by limit kept the row yellow after its own advice was followed.
+// Other sessions on the shared server are in the totals and left alone.
 export function parseHistory(text, cap, prefix = "hadron-") {
-  let panes = 0, lines = 0, overCap = 0, overCapLines = 0, largest = null;
+  let panes = 0, lines = 0, overCap = 0, overCapLines = 0, uncapped = 0, largest = null;
   for (const line of String(text || "").split("\n")) {
     const m = line.match(/^(.*)\|(\d+)\|(\d+)$/);
     if (!m) continue;
     const name = m[1], size = Number(m[2]), limit = Number(m[3]);
     panes++; lines += size;
     const ours = name.startsWith(prefix);
-    if (cap > 0 && ours && limit > cap) { overCap++; overCapLines += size; }
+    // tmux clamps size to limit, so overCap is a subset of uncapped: a capped
+    // pane can never be counted, and uncapped === 0 implies overCap === 0.
+    if (cap > 0 && ours && size > cap) { overCap++; overCapLines += size; }
+    if (cap > 0 && ours && limit > cap) uncapped++;
     // The name goes on the OPEN /api/health: only Hadron's own (agent ids are
     // public there already) — the operator's other sessions stay nameless.
     if (!largest || size > largest.lines) largest = { session: ours ? name : null, lines: size, limit };
   }
-  return { panes, lines, overCap, overCapLines, largest, cap, at: null };
+  return { panes, lines, overCap, overCapLines, uncapped, largest, cap, at: null };
 }
 
 function p95(values) {

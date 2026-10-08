@@ -81,6 +81,8 @@ function ago(iso) {
   return `${Math.floor(h / 24)}d ago`;
 }
 // "in 2h 13m" from epoch seconds (a passed reset reads "now" — the reader drops those windows).
+// A source window's own verdict (README "Quota sources": `level` ok/warn/bad) beside its number — text where the widget uses colour.
+function quotaLevelMark(w) { return w && (w.level === "warn" || w.level === "bad") ? ` [${w.level}]` : ""; }
 function resetsIn(epochS) {
   const ms = epochS * 1000 - Date.now();
   if (!(ms > 0)) return "now";
@@ -867,7 +869,8 @@ async function main() {
         // Generic sources (hadron-quota.d/<name>.json): one row per file — a
         // file that is skipped is a silent widget gap, so it is yellow and says why.
         const ex = readQuotaSources();
-        for (const v of ex.sources) local.push({ level: "green", message: `quota source ${v.label} (hadron-quota.d/${v.name}.json): receipt ${ago(v.at)} (${v.windows.map((w) => `${w.label} ${w.usedPct}%`).join(" · ")})` });
+        // An ignored optional field (detail/level out of contract) rides on the green row: the gauge shows, the typo is named.
+        for (const v of ex.sources) local.push({ level: "green", message: `quota source ${v.label} (hadron-quota.d/${v.name}.json): receipt ${ago(v.at)} (${v.windows.length ? v.windows.map((w) => `${w.label} ${w.usedPct}%${quotaLevelMark(w)}`).join(" · ") : "every window reset"})${v.notes && v.notes.length ? ` — ${v.notes.join("; ")} (the file is still read — the contract is in README "Quota sources")` : ""}` });
         for (const pr of ex.problems) local.push({ level: "yellow", message: `quota source ${pr.file} skipped: ${pr.error} — the contract is in README "Quota sources"` });
       } catch (e) { local.push({ level: "info", message: `quota widget: ${e.message}` }); }
 
@@ -911,19 +914,26 @@ async function main() {
         // cleared — the row says which to clear.
         const memBadRow = (t.level === "warn" || t.level === "down") && (t.reasons || []).some((r) => /RSS|swap/i.test(r));
         const h = t.history && typeof t.history.lines === "number" ? t.history : null;
-        const histLine = h ? `scrollback ${h.lines} lines over ${h.panes} panes${h.largest ? ` (largest ${h.largest.session || "pane, not Hadron's"}: ${h.largest.lines})` : ""}` : "";
-        const histAdvice = h && h.overCap ? `${h.overCap} Hadron pane${h.overCap === 1 ? "" : "s"} created before the ${h.cap}-line cap still hold${h.overCap === 1 ? "s" : ""} ${h.overCapLines} lines — \`tmux clear-history -t <session>\` on the idle ones frees them (the cap applies to sessions created from now on)` : "";
+        // The uncapped count is information, not advice: a pane allocated
+        // before the cap (or one whose cap chain failed — historyCapFailures has
+        // its own row) keeps its limit until its session is recreated.
+        const histInfo = h && h.uncapped ? `${h.uncapped} Hadron pane${h.uncapped === 1 ? "" : "s"} ${h.uncapped === 1 ? "has" : "have"} a limit above the ${h.cap}-line cap (${t.historyCapFailures ? "allocated before the cap or with a failed cap" : "allocated before the cap"}; kept until the session is recreated)` : "";
+        const histLine = h ? `scrollback ${h.lines} lines over ${h.panes} panes${h.largest ? ` (largest${h.largest.session ? ` ${h.largest.session}` : ""}: ${h.largest.lines}${h.largest.session ? "" : ", not a Hadron pane"})` : ""}${histInfo ? `; ${histInfo}` : ""}` : "";
+        // Yellow only for panes that HOLD more than the cap — what clear-history
+        // frees. The limit survives the clear, so a busy pane fills up again:
+        // the durable remedy is recreating the session (hadron close + respawn).
+        const histAdvice = h && h.overCap ? `${h.overCap} Hadron pane${h.overCap === 1 ? "" : "s"} hold${h.overCap === 1 ? "s" : ""} more than the ${h.cap}-line cap (${h.overCapLines} lines) — \`tmux clear-history -t <session>\` frees the lines now; the pane keeps its old limit and fills up again until its session is recreated (\`hadron close\` + respawn), so clear the idle ones and recreate the busy ones` : "";
         if (t.level === "warn" || t.level === "down") {
           const gb = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb} MB`);
           const mem = typeof t.rssMb === "number" ? `RSS ${gb(t.rssMb)}${typeof t.swapMb === "number" ? ` + ${gb(t.swapMb)} swap` : ""}` : `memory unknown (${t.memError || "not read yet"})`;
           const alerts = t.ntfy ? (t.ntfy.enabled ? (t.ntfy.topicReadable ? "ntfy alerts on" : "ntfy alerts on but ~/.ntfy_topic_log is unreadable") : "ntfy alerts off (View → tmux Alerts via ntfy)") : "";
           const memBad = (typeof t.rssMb === "number" && t.warnRssMb > 0 && t.rssMb >= t.warnRssMb) || (typeof t.swapGrowthMb === "number" && t.warnSwapMb > 0 && t.swapGrowthMb >= t.warnSwapMb) || (typeof t.swapMb === "number" && t.swapCeilingMb > 0 && t.swapMb >= t.swapCeilingMb);
           const refused = (t.reasons || []).some((r) => /refused/.test(r));
-          const advice = memBad ? `a tmux this size is paging: ${histAdvice ? `${histAdvice}, ` : ""}close finished agents' sessions, or restart the tmux server by hand when no agent is working`
+          const advice = memBad ? `a tmux this size is paging: ${histAdvice ? `${histAdvice}; ` : ""}close finished agents' sessions, or restart the tmux server by hand when no agent is working${histInfo ? ` (${histInfo})` : ""}`
             : refused ? "the probes are refused at once — is the tmux server still alive (`tmux list-sessions`)?"
             : t.level === "down" ? "it is not answering at all — if it is alive it is probably paging or wedged: check its RSS" + (typeof t.swapMb === "number" ? "/swap (/proc/<pid>/status)" : " (`ps -o rss= -p <pid>`)") + " and `tmux list-sessions`"
             : "it is answering slowly — under load, or starting to page: check its RSS" + (typeof t.swapMb === "number" ? "/swap (/proc/<pid>/status)" : " (`ps -o rss= -p <pid>`)") + "";
-          local.push({ level: "yellow", message: `tmux ${t.level === "down" ? "is not answering" : "is degraded"} since ${t.since || "?"}: ${(t.reasons || []).join("; ") || "?"} (pid ${t.pid || "?"}, ${mem}, p95 ${t.latencyP95Ms ?? "n/a"} ms over the last minute${alerts ? `; ${alerts}` : ""}) — Hadron never kills it; ${advice}` });
+          local.push({ level: "yellow", message: `tmux ${t.level === "down" ? "is not answering" : "is degraded"} since ${t.since || "?"}: ${(t.reasons || []).join("; ") || "?"} (pid ${t.pid || "?"}, ${mem}, p95 ${t.latencyP95Ms ?? "n/a"} ms over the last minute${alerts ? `; ${alerts}` : ""}) — Hadron never kills it; ${advice}${!memBad && histInfo ? ` (${histInfo})` : ""}` });
         }
         if (t.timeouts || t.busyRefusals) local.push({ level: "yellow", message: `tmux: ${t.timeouts} call${t.timeouts === 1 ? "" : "s"} timed out (> ${t.timeoutMs} ms) and ${t.busyRefusals} terminal connect${t.busyRefusals === 1 ? "" : "s"} refused as busy since boot (last timeout ${t.lastTimeoutAt || "?"}, ${t.lastTimeoutCmd || "?"}) — the tmux server is overloaded or paging; check its RSS${typeof t.swapMb === "number" ? "/swap" : ""} (\`tmux display -p '#{pid}'\`, ${typeof t.swapMb === "number" ? "/proc/<pid>/status" : "\`ps -o rss= -p <pid>\`"})` });
         else if (t.slowCalls) local.push({ level: "yellow", message: `tmux: ${t.slowCalls} of ${t.calls} calls slower than ${t.slowMs} ms since boot (slowest ${t.maxMs} ms, last ${t.lastSlowAt || "?"}: ${t.lastSlowCmd || "?"}) — the tmux server is under load` });
@@ -1051,10 +1061,10 @@ async function main() {
       try { st = quotaInstallStatus({ hadronBin }); } catch (e) { st = { installed: false, error: e.message }; }
       if (flags.json) { console.log(JSON.stringify({ ...q, sink: st }, null, 2)); break; }
       const width = Math.max(7, ...(q.sources || []).map((v) => v.label.slice(0, 12).length + 1), ...(q.sourceProblems || []).map((pr) => pr.name.slice(0, 12).length + 1));
-      const line = (name, v) => console.log(`${name.padEnd(width)}${v ? v.windows.map((w) => `${w.label} ${w.usedPct}%${w.resetsAt ? ` (resets ${resetsIn(w.resetsAt)})` : ""}`).join("  ·  ") + `   as of ${ago(v.at)}` : "unknown"}`);
+      const line = (name, v) => console.log(`${name.padEnd(width)}${v ? (v.windows.length ? v.windows.map((w) => `${w.label} ${w.usedPct}%${quotaLevelMark(w)}${w.resetsAt ? ` (resets ${resetsIn(w.resetsAt)})` : ""}${w.detail ? ` — ${w.detail}` : ""}`).join("  ·  ") : "every window reset") + `   as of ${ago(v.at)}` : "unknown"}`);
       line("claude", q.claude);
       line("codex", q.codex);
-      for (const v of q.sources || []) line(v.label.slice(0, 12), v);
+      for (const v of q.sources || []) { line(v.label.slice(0, 12), v); for (const n of v.notes || []) console.log(`${"".padEnd(width)}note: ${n} (the file is still read)`); }
       for (const pr of q.sourceProblems || []) console.log(`${pr.name.slice(0, 12).padEnd(width)}skipped: ${pr.error} (${pr.file})`);
       console.log(st.installed ? (st.current ? `${"sink".padEnd(width)}installed in claude's statusLine` : `${"sink".padEnd(width)}installed from ANOTHER checkout — \`hadron quota --install\` from here repoints it (${st.command})`) : st.error ? `sink    ${st.error}` : "sink    not installed — `hadron quota --install` (claude usage stays unknown without it)");
       break;

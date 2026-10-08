@@ -181,14 +181,25 @@ export const SOURCE_STALE_MS = 24 * 60 * 60 * 1000;
 export const SOURCE_MAX_FILES = 16;
 export const SOURCE_MAX_BYTES = 64 * 1024;
 const SOURCE_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
-const CLEAN = /^[^\x00-\x1f\x7f-\x9f]+$/; // one line, no C0/C1 control characters — it goes on a <span> and on a terminal
+const CLEAN = /^[^\x00-\x1f\x7f-\x9f\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]+$/; // one line, no C0/C1 control characters, no Unicode line separators / zero-widths / bidi overrides — it goes on a <span>, a tooltip and a terminal line
 // A file name is attacker-shaped text that reaches `hadron doctor` stdout: no control characters, 80 chars.
 const safeFile = (f) => String(f).replace(/[\x00-\x1f\x7f-\x9f]/g, "?").slice(0, 80);
 const text = (v, max) => typeof v === "string" && v.length >= 1 && v.length <= max && CLEAN.test(v) && v.trim() === v;
 
-// Pure. Returns { label, at, windows: [{ key, label, usedPct, resetsAt }] } or
-// throws with the reason (what doctor prints). Expired windows are dropped
-// AFTER validation: a file with a bad window is bad even if that window is over.
+// Pure. Returns { label, at, windows: [{ key, label, usedPct, resetsAt, detail,
+// level }], notes } or throws with the reason (what doctor prints). Expired
+// windows are dropped AFTER validation: a file with a bad window is bad even if
+// that window is over. Two OPTIONAL per-window fields ride along: `detail`
+// (1-80 printable characters, tooltip + `hadron quota` text — what the number
+// means, e.g. "$12.40 of $50") and `level` ("ok" | "warn" | "bad" — the writer
+// knows its own thresholds; it replaces the widget's 50/80 colours and warn/bad
+// draw the number under the Show Quota threshold). An out-of-contract value of
+// EITHER is ignored for that field only (null, the window and the file stay) and
+// named in `notes` — doctor's green row and a warnOnce carry it, so a typo is
+// never silent and never costs the gauge. Unknown fields anywhere are ignored
+// without a note: a writer may keep its own keys (a top-level budget block) in
+// the same file.
+export const SOURCE_LEVELS = ["ok", "warn", "bad"];
 export function parseQuotaSource(rec, { now = Date.now() } = {}) {
   if (!rec || typeof rec !== "object" || Array.isArray(rec)) throw new Error("not a JSON object");
   if (!text(rec.label, 32)) throw new Error("label must be a string of 1-32 printable characters");
@@ -197,6 +208,7 @@ export function parseQuotaSource(rec, { now = Date.now() } = {}) {
   if (atMs - now > 5 * 60 * 1000) throw new Error("at is in the future");
   if (!Array.isArray(rec.windows) || rec.windows.length < 1 || rec.windows.length > 8) throw new Error("windows must be an array of 1-8 entries");
   const nowS = Math.floor(now / 1000);
+  const notes = [];
   const windows = rec.windows.map((w, i) => {
     if (!w || typeof w !== "object" || Array.isArray(w)) throw new Error(`windows[${i}] is not an object`);
     if (!text(w.label, 16)) throw new Error(`windows[${i}].label must be a string of 1-16 printable characters`);
@@ -206,14 +218,24 @@ export function parseQuotaSource(rec, { now = Date.now() } = {}) {
       resetsAt = typeof w.resetsAt === "number" ? epochSeconds(w.resetsAt) : null;
       if (resetsAt === null) throw new Error(`windows[${i}].resetsAt must be epoch seconds or null`);
     }
-    return { key: `w${i}`, label: w.label, usedPct: Math.round(w.usedPct), resetsAt };
+    let detail = null, level = null;
+    // A note names the window by index AND label: the index is the file's, and an expired window is dropped from what the row shows.
+    if (w.detail !== undefined && w.detail !== null && w.detail !== "") { // "" is a template with nothing to say — absent, not a typo
+      if (text(w.detail, 80)) detail = w.detail;
+      else notes.push(`windows[${i}] ("${w.label}").detail ignored: must be a string of 1-80 printable characters`); // never the value: attacker-shaped text
+    }
+    if (w.level !== undefined && w.level !== null) {
+      if (SOURCE_LEVELS.includes(w.level)) level = w.level;
+      else notes.push(`windows[${i}] ("${w.label}").level ignored: must be "ok", "warn" or "bad" (lower-case)`);
+    }
+    return { key: `w${i}`, label: w.label, usedPct: Math.round(w.usedPct), resetsAt, detail, level };
   });
   const labels = new Set(windows.map((w) => w.label));
   if (labels.size !== windows.length) throw new Error("window labels must be distinct");
-  return { label: rec.label, at: new Date(atMs).toISOString(), windows: liveWindows(windows, nowS) };
+  return { label: rec.label, at: new Date(atMs).toISOString(), windows: liveWindows(windows, nowS), notes };
 }
 
-// { sources: [{ name, label, at, windows, source: "file" }], problems: [{ name, file, error }] }
+// { sources: [{ name, label, at, windows, notes, source: "file" }], problems: [{ name, file, error }] }
 // — sources is what the widget shows (files with no live window are left out,
 // not a problem), problems is what doctor shows: `file` is the display path
 // ("hadron-quota.d/<file>", control characters stripped), `name` the stem. A
@@ -240,7 +262,7 @@ export function readQuotaSources({ configDir = CLAUDE_CONFIG_DIR, now = Date.now
       try { rec = JSON.parse(raw); } catch { throw new Error("not valid JSON"); }
       const parsed = parseQuotaSource(rec, { now });
       if (now - Date.parse(parsed.at) > SOURCE_STALE_MS) throw new Error(`stale: written ${Math.floor((now - Date.parse(parsed.at)) / 3600000)} h ago (the writer stopped?)`);
-      if (!parsed.windows.length) continue; // every window reset: nothing current to show, nothing wrong
+      if (!parsed.windows.length && !parsed.notes.length) continue; // every window reset: nothing current to show, nothing wrong (with a note the source stays, so the typo is named before the window comes back)
       sources.push({ name, ...parsed, source: "file" });
     } catch (e) { problems.push({ name, file: shown, error: e.message }); }
   }
