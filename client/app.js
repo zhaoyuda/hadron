@@ -3189,7 +3189,12 @@ function dismissOrphans() {
 // numbers move once per turn, not per second.
 const QUOTA_POLL_MS = 30000;
 let quota = null;
-function quotaClass(p) { return p >= 80 ? "q-hot" : p >= 50 ? "q-warn" : ""; }
+// A window's colour: the writer's own `level` when it sent one (generic sources
+// know their thresholds — "bad" at 12% of a budget that is already gone), else
+// amber from 50 / red from 80 of the percentage.
+function quotaClass(w) { return w.level === "bad" ? "q-hot" : w.level === "warn" ? "q-warn" : w.level === "ok" ? "" : w.usedPct >= 80 ? "q-hot" : w.usedPct >= 50 ? "q-warn" : ""; }
+// Drawn in the bar: over the Show Quota threshold, or flagged warn/bad by its writer.
+function quotaShown(w) { return w.usedPct >= quotaShowFrom || w.level === "warn" || w.level === "bad"; }
 function quotaResetsIn(epochS) {
   const ms = epochS * 1000 - Date.now();
   if (!(ms > 0)) return "now";
@@ -3217,7 +3222,8 @@ function renderQuota() {
   const el = document.getElementById("quota");
   if (!el) return;
   // A window earns its place in the bar by being used (View → Show Quota,
-  // default 30%): a fresh week is not information. The tooltip and `hadron
+  // default 30%) or by its writer flagging it warn/bad: a fresh week is not
+  // information, an exhausted budget at 12% is. The tooltip and `hadron
   // quota` keep every window; only the numbers filter. When a vendor is known
   // but nothing clears the threshold its logo stays, dimmed, so "quiet" and
   // "not installed" never look the same and the numbers stay one hover away.
@@ -3226,15 +3232,15 @@ function renderQuota() {
   const extra = quota && Array.isArray(quota.sources) ? quota.sources.filter((v) => v && typeof v.name === "string" && typeof v.label === "string") : [];
   const known = [["Claude", "claude", quota && quota.claude], ["Codex", "codex", quota && quota.codex], ...extra.map((v) => [v.label, `src:${v.name}`, v])]
     .filter(([, , v]) => v && Array.isArray(v.windows) && v.windows.length)
-    .map(([name, key, v]) => [name, key, v, v.windows.filter((w) => w.usedPct >= quotaShowFrom)]);
+    .map(([name, key, v]) => [name, key, v, v.windows.filter(quotaShown)]);
   el.hidden = known.length === 0;
   if (el.hidden) { el.innerHTML = ""; el.title = ""; return; }
   el.innerHTML = known.map(([name, key, , shown]) =>
     `<span class="q-vendor${shown.length ? "" : " q-quiet"}" data-vendor="${esc(key)}"><span class="q-name" role="img" aria-label="${esc(name)}">${QUOTA_LOGO[key] || QUOTA_LOGO.source}</span>${key.startsWith("src:") ? `<span class="q-label">${esc(name)}</span>` : ""}${shown.map((w) =>
-      `<span class="q-win ${quotaClass(w.usedPct)}" data-win="${esc(w.label)}">${esc(w.label)} ${w.usedPct}%</span>`).join('<span class="q-sep">·</span>')}</span>`).join("");
+      `<span class="q-win ${quotaClass(w)}" data-win="${esc(w.label)}">${esc(w.label)} ${w.usedPct}%</span>`).join('<span class="q-sep">·</span>')}</span>`).join("");
   el.title = known.map(([name, , v]) =>
     `${name} (${v.source === "statusline" ? "claude's statusline" : v.source === "file" ? `hadron-quota.d/${v.name}.json` : "codex rollout"}, ${quotaAge(v.at)}${v.plan ? `, ${v.plan}` : ""}):\n` +
-    v.windows.map((w) => `  ${w.label} window: ${w.usedPct}% used${w.resetsAt ? `, resets ${quotaResetsIn(w.resetsAt)}` : ""}`).join("\n")).join("\n");
+    v.windows.map((w) => `  ${w.label} window: ${w.usedPct}% used${w.level === "warn" || w.level === "bad" ? ` (${w.level})` : ""}${w.resetsAt ? `, resets ${quotaResetsIn(w.resetsAt)}` : ""}${w.detail ? ` — ${w.detail}` : ""}`).join("\n")).join("\n");
 }
 async function pollQuota() {
   try {

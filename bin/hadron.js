@@ -81,6 +81,8 @@ function ago(iso) {
   return `${Math.floor(h / 24)}d ago`;
 }
 // "in 2h 13m" from epoch seconds (a passed reset reads "now" — the reader drops those windows).
+// A source window's own verdict (README "Quota sources": `level` ok/warn/bad) beside its number — text where the widget uses colour.
+function quotaLevelMark(w) { return w && (w.level === "warn" || w.level === "bad") ? ` [${w.level}]` : ""; }
 function resetsIn(epochS) {
   const ms = epochS * 1000 - Date.now();
   if (!(ms > 0)) return "now";
@@ -867,7 +869,8 @@ async function main() {
         // Generic sources (hadron-quota.d/<name>.json): one row per file — a
         // file that is skipped is a silent widget gap, so it is yellow and says why.
         const ex = readQuotaSources();
-        for (const v of ex.sources) local.push({ level: "green", message: `quota source ${v.label} (hadron-quota.d/${v.name}.json): receipt ${ago(v.at)} (${v.windows.map((w) => `${w.label} ${w.usedPct}%`).join(" · ")})` });
+        // An ignored optional field (detail/level out of contract) rides on the green row: the gauge shows, the typo is named.
+        for (const v of ex.sources) local.push({ level: "green", message: `quota source ${v.label} (hadron-quota.d/${v.name}.json): receipt ${ago(v.at)} (${v.windows.length ? v.windows.map((w) => `${w.label} ${w.usedPct}%${quotaLevelMark(w)}`).join(" · ") : "every window reset"})${v.notes && v.notes.length ? ` — ${v.notes.join("; ")} (the file is still read — the contract is in README "Quota sources")` : ""}` });
         for (const pr of ex.problems) local.push({ level: "yellow", message: `quota source ${pr.file} skipped: ${pr.error} — the contract is in README "Quota sources"` });
       } catch (e) { local.push({ level: "info", message: `quota widget: ${e.message}` }); }
 
@@ -1058,10 +1061,10 @@ async function main() {
       try { st = quotaInstallStatus({ hadronBin }); } catch (e) { st = { installed: false, error: e.message }; }
       if (flags.json) { console.log(JSON.stringify({ ...q, sink: st }, null, 2)); break; }
       const width = Math.max(7, ...(q.sources || []).map((v) => v.label.slice(0, 12).length + 1), ...(q.sourceProblems || []).map((pr) => pr.name.slice(0, 12).length + 1));
-      const line = (name, v) => console.log(`${name.padEnd(width)}${v ? v.windows.map((w) => `${w.label} ${w.usedPct}%${w.resetsAt ? ` (resets ${resetsIn(w.resetsAt)})` : ""}`).join("  ·  ") + `   as of ${ago(v.at)}` : "unknown"}`);
+      const line = (name, v) => console.log(`${name.padEnd(width)}${v ? (v.windows.length ? v.windows.map((w) => `${w.label} ${w.usedPct}%${quotaLevelMark(w)}${w.resetsAt ? ` (resets ${resetsIn(w.resetsAt)})` : ""}${w.detail ? ` — ${w.detail}` : ""}`).join("  ·  ") : "every window reset") + `   as of ${ago(v.at)}` : "unknown"}`);
       line("claude", q.claude);
       line("codex", q.codex);
-      for (const v of q.sources || []) line(v.label.slice(0, 12), v);
+      for (const v of q.sources || []) { line(v.label.slice(0, 12), v); for (const n of v.notes || []) console.log(`${"".padEnd(width)}note: ${n} (the file is still read)`); }
       for (const pr of q.sourceProblems || []) console.log(`${pr.name.slice(0, 12).padEnd(width)}skipped: ${pr.error} (${pr.file})`);
       console.log(st.installed ? (st.current ? `${"sink".padEnd(width)}installed in claude's statusLine` : `${"sink".padEnd(width)}installed from ANOTHER checkout — \`hadron quota --install\` from here repoints it (${st.command})`) : st.error ? `sink    ${st.error}` : "sink    not installed — `hadron quota --install` (claude usage stays unknown without it)");
       break;

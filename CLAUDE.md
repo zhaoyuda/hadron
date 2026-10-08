@@ -319,7 +319,17 @@ npm test
 #                            usedPct, resetsAt}]} (readQuotaSources / parseQuotaSource — strict, a bad file skipped WHOLE,
 #                            stale after 24 h, 16 files / 64 KB caps, names = file stems of letters/digits/_.-) → `sources`
 #                            + `sourceProblems` on /api/quota, `hadron quota` lines, doctor green row per source / yellow
-#                            per skipped file; the widget draws each under its label behind a neutral gauge (M24))
+#                            per skipped file; the widget draws each under its label behind a neutral gauge (M24); optional
+#                            per-window `detail` (1-80 printable chars → tooltip + `hadron quota`, never the bar) and `level`
+#                            (ok/warn/bad — the writer's verdict replaces the 50/80 colours, warn/bad draw the number under the
+#                            Show Quota threshold, `[bad]` in the CLI/doctor text); an out-of-contract value of either is ignored
+#                            per FIELD, never the value echoed — the window and file stay, `notes[]` on the source names
+#                            'windows[i] ("label").level ignored: …' (index AND label: an expired window is dropped from the
+#                            row, and a fully reset receipt WITH a note stays a windowless source so the typo is named now) on
+#                            the wire, doctor's green row, a `hadron quota` note line and a warnOnce in server.log; "" detail is
+#                            absent, not a note; CLEAN also refuses U+2028/9, zero-widths, bidi overrides and BOM (label, window
+#                            label and detail alike); unknown keys at both levels are allowed and not forwarded (a writer's own
+#                            `budget` block) — no reserved key)
 #   + test-changes.js       (Changes view, server side — server/changes.js + GET /api/sessions/:id/changes
 #                            (token; a non-git cwd → {root:null, cwd}; branch + one row per `git status -z`
 #                            entry with status word (modified/added/untracked/renamed+from/deleted/conflict),

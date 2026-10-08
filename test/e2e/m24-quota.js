@@ -123,17 +123,24 @@ try {
   source("litellm.json", { at: new Date().toISOString(), label: "LiteLLM", windows: [{ label: "1mo", usedPct: 45, resetsAt: nowS + 86400 * 12 }, { label: "day", usedPct: 12, resetsAt: null }] });
   source("broken.json", "{ nope");
   source("spicy.json", { at: new Date().toISOString(), label: "<b>Spicy</b>", windows: [{ label: "1mo", usedPct: 90 }] });
+  // Optional `detail` + `level`: the writer's verdict colours the window and
+  // puts it in the bar under the threshold; its text is one hover away.
+  source("budget.json", { at: new Date().toISOString(), label: "Budget", budget: { monthlyUsd: 50 }, windows: [{ label: "day", usedPct: 12, level: "bad", detail: "daily cap hit", resetsAt: nowS + 3600 }, { label: "1mo", usedPct: 60, level: "ok", detail: "$6.10 of $50" }, { label: "wk", usedPct: 85, level: "warn" }, { label: "yr", usedPct: 95, level: "ok" }, { label: "qtr", usedPct: 2, level: "red", detail: "x".repeat(81) }] });
   await wait(11000);
   await page.evaluate(() => pollQuota());
   await page.evaluate(() => handleMenuAction("set-quota-from", { dataset: { quotaFrom: "30" } }));
   await widget.waitFor({ state: "visible", timeout: 5000 });
-  r.ok((await widget.locator(".q-vendor").count()) === 2 && (await vendorText("src:litellm")) === "LiteLLM 1mo 45%" && (await logo("src:litellm")) === "LiteLLM" && (await widget.locator('.q-vendor[data-vendor="src:litellm"] .q-label').innerText()) === "LiteLLM", `a source file is a vendor under its label, drawn as text (every source shares the gauge mark); 45 shown, 12 hidden at 30% (${await text()})`);
+  r.ok((await widget.locator(".q-vendor").count()) === 3 && (await vendorText("src:litellm")) === "LiteLLM 1mo 45%" && (await logo("src:litellm")) === "LiteLLM" && (await widget.locator('.q-vendor[data-vendor="src:litellm"] .q-label').innerText()) === "LiteLLM", `a source file is a vendor under its label, drawn as text (every source shares the gauge mark); 45 shown, 12 hidden at 30% (${await text()})`);
   r.ok((await widget.locator('.q-vendor[data-vendor="src:litellm"] svg.q-logo-source').count()) === 1, "behind the neutral gauge mark, not a vendor logo");
   const ts = await widget.getAttribute("title");
   r.ok(/LiteLLM \(hadron-quota\.d\/litellm\.json, just now\)/.test(ts) && /1mo window: 45% used, resets in \d+d/.test(ts) && /day window: 12% used/.test(ts) && !/day window: 12% used,/.test(ts), `tooltip: file name as the source, age, every window, countdown only with resetsAt (${ts.replace(/\n/g, " | ")})`);
   r.ok((await vendorText("src:spicy")) === "<b>Spicy</b> 1mo 90%" && (await logo("src:spicy")) === "<b>Spicy</b>" && (await widget.locator('.q-vendor[data-vendor="src:spicy"] b').count()) === 0 && /q-hot/.test(await cls("src:spicy", "1mo")), "a label with markup is drawn as text (escaped), red from 80%");
   r.ok((await widget.locator('.q-vendor[data-vendor="src:broken"]').count()) === 0, "the invalid file is not a vendor (doctor names it)");
-  rmSync(join(srcDir, "litellm.json")); rmSync(join(srcDir, "spicy.json")); rmSync(join(srcDir, "broken.json"));
+  r.ok((await vendorText("src:budget")) === "Budget day 12% · 1mo 60% · wk 85% · yr 95%", `level: a "bad" window at 12% is drawn under the 30% threshold, an ignored level (qtr, "red") still hides at 2% — the file was not skipped (${await vendorText("src:budget")})`);
+  r.ok(/q-hot/.test(await cls("src:budget", "day")) && !/q-warn|q-hot/.test(await cls("src:budget", "1mo")) && /q-warn/.test(await cls("src:budget", "wk")) && !/q-hot/.test(await cls("src:budget", "wk")) && !/q-warn|q-hot/.test(await cls("src:budget", "yr")), `level replaces the 50/80 thresholds: bad → red at 12%, ok → plain at 60% AND at 95% (the writer's verdict, never a floor; the number still draws), warn → amber at 85% (${await cls("src:budget", "day")} / ${await cls("src:budget", "1mo")} / ${await cls("src:budget", "wk")})`);
+  const tb = await widget.getAttribute("title");
+  r.ok(/day window: 12% used \(bad\), resets in \d+h?\s?\d*m — daily cap hit/.test(tb) && /1mo window: 60% used — \$6\.10 of \$50/.test(tb) && /wk window: 85% used \(warn\)$/m.test(tb) && /qtr window: 2% used$/m.test(tb) && !/xxxx/.test(tb), `tooltip: level in words after the number, detail after the countdown, nothing for an ignored field (${tb.split("\n").filter((l) => /Budget|day|1mo window: 60|wk|qtr/.test(l)).join(" | ")})`);
+  rmSync(join(srcDir, "litellm.json")); rmSync(join(srcDir, "spicy.json")); rmSync(join(srcDir, "broken.json")); rmSync(join(srcDir, "budget.json"));
   await wait(11000);
   await page.evaluate(() => pollQuota());
   r.ok(await widget.isHidden(), "files removed → the sources drop out, widget hidden again");
