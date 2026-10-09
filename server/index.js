@@ -1238,7 +1238,8 @@ app.post("/api/sessions/:id/restore", (req, res) => {
   delete agent.archivedAt;
   agent.state = "idle";
   agent.tmuxSession = tmuxSessionName(id);
-  migrateFolderPinsOn(agent); // an archived record missed the boot-time pass
+  canonicalizeArtifactsOn(agent); // an archived record missed the boot-time passes
+  migrateFolderPinsOn(agent);
   sessions.set(id, agent);
   saveAgent(agent);
   startMonitorSafe(id);
@@ -2013,8 +2014,30 @@ app.post("/api/sessions/:id/artifacts", async (req, res) => {
   if (out.error) return res.status(400).json({ error: out.error });
   const updated = await appendAgentField(id, "artifacts", out.item);
   if (updated) sessions.get(id).artifacts = updated.artifacts;
-  res.json(resolvedSession(sessions.get(id)));
+  res.json({ ...resolvedSession(sessions.get(id)), ...pinCoverage(sessions.get(id).artifacts, out.item) });
 });
+
+// What the panel will do with a pin that overlaps a folder pin, told to the
+// caller (the CLI prints it as a note): a file whose parent is a pinned dir
+// renders inside that group → { coveredBy: "<dir>" } (the stored, canonical
+// form); a dir that already contains file pins → { covers: N }. Nothing else.
+function parentOfArtifactPath(v) {
+  const li = v.lastIndexOf("/");
+  if (li > 0) return v.slice(0, li);
+  return v.startsWith("/") ? "/" : ".";
+}
+function pinCoverage(artifacts, item) {
+  const arts = (artifacts || []).filter((a) => a && typeof a.value === "string");
+  if (item.type === "file") {
+    const parent = parentOfArtifactPath(item.value);
+    return arts.some((a) => a.type === "dir" && a.value === parent) ? { coveredBy: parent } : {};
+  }
+  if (item.type === "dir") {
+    const n = arts.filter((a) => a.type === "file" && parentOfArtifactPath(a.value) === item.value).length;
+    return n ? { covers: n } : {};
+  }
+  return {};
+}
 
 // Remove one artifact atomically (same per-agent lock as append). Body { index,
 // value }: the pair must still match server-side — a mismatch means the array
@@ -3369,15 +3392,75 @@ function migrateFolderPinsOn(s) {
     a.type = "dir";
     fixed++;
   }
+  // A folder pinned as a file beside its own folder pin is now the same pin
+  // twice — merge them (first wins, missing label/open filled from the other).
+  if (fixed) { const d = dedupeArtifacts(s.artifacts); if (d.dropped) s.artifacts = d.out; }
   return fixed;
+}
+// De-duplicate on type + value, first entry wins; a `label` or `open` the
+// survivor lacks is taken from the dropped twin so nothing the user set is lost.
+function dedupeArtifacts(arr) {
+  const seen = new Map();
+  const out = [];
+  let dropped = 0;
+  for (const a of arr) {
+    const key = a && typeof a === "object" && typeof a.value === "string" ? `${a.type ?? "file"}:${a.value}` : JSON.stringify(a);
+    const first = seen.get(key);
+    if (first) {
+      dropped++;
+      if (first.label === undefined && a.label !== undefined) first.label = a.label;
+      if (first.open === undefined && a.open !== undefined) first.open = a.open;
+      continue;
+    }
+    seen.set(key, a);
+    out.push(a);
+  }
+  return { out, dropped };
+}
+// Records written before canonical storage (1530faf, 2026-07-23) hold absolute
+// paths for files under the workspace, and a folder pinned twice in two
+// spellings; the panel keys its grouping on the stored form, so such a record
+// drew one folder twice (prod 2026-10-09). At boot and on restore every file/dir
+// artifact value goes through canonicalArtifactPath — the same rule as a fresh
+// pin, the agent's cwd as the fallback base — and the array is de-duplicated on
+// type + canonical value, first entry wins, its missing label/open taken from the
+// twin; a record
+// without `type` is stamped file/url. Idempotent:
+// a canonical record changes nothing and is not saved. Mutates in place; the
+// caller saves. Returns { rewritten, dropped }.
+function canonicalizeArtifactsOn(s) {
+  if (!Array.isArray(s.artifacts)) return { rewritten: 0, dropped: 0 };
+  let cwd = null;
+  try { cwd = resolveAgentCwd(s); } catch (e) { warnOnce(`artifact-canon-cwd:${s.id}`, `[agents] ${s.id}: artifact canonicalisation falls back to the workspace root — cwd could not be resolved (${e.message})`); }
+  let rewritten = 0;
+  for (const a of s.artifacts) {
+    if (!a || typeof a !== "object") continue;
+    // A record from before `type` existed is a file pin (or a url by its value):
+    // stamp it so the panel's dir claim, the folder migration and pinCoverage —
+    // all of which test the type exactly — see it.
+    if (!a.type && typeof a.value === "string") { a.type = /^https?:/.test(a.value) ? "url" : "file"; rewritten++; }
+    const type = a.type ?? "file";
+    if ((type === "file" || type === "dir") && typeof a.value === "string" && a.value && !/^https?:/.test(a.value)) {
+      let canon = a.value;
+      try { canon = canonicalArtifactPath(a.value, cwd); } catch (e) { warnOnce(`artifact-canon:${s.id}`, `[agents] ${s.id}: an artifact path could not be canonicalised and is kept as stored (${e.message}) — the panel may draw its folder twice`); }
+      if (canon !== a.value) { a.value = canon; rewritten++; }
+    }
+  }
+  // Keyed on type + value: file:X and dir:X are two pins here (migrateFolderPinsOn
+  // merges them when X is a directory).
+  const { out, dropped } = dedupeArtifacts(s.artifacts);
+  if (dropped) s.artifacts = out;
+  return { rewritten, dropped };
 }
 function migrateFolderPins() {
   let fixed = 0;
   for (const s of sessions.values()) {
+    const c = canonicalizeArtifactsOn(s);
     const n = migrateFolderPinsOn(s);
-    if (!n) continue;
+    if (c.rewritten || c.dropped) console.log(`[agents] ${s.id}: artifact paths canonicalised (${c.rewritten} rewritten, ${c.dropped} duplicate(s) dropped)`);
+    if (!n && !c.rewritten && !c.dropped) continue;
     fixed += n;
-    try { saveAgent(s); } catch (e) { console.error(`[agents] ${s.id}: could not save the folder-pin migration (${e.message})`); }
+    try { saveAgent(s); } catch (e) { console.error(`[agents] ${s.id}: could not save the artifact migration (${e.message})`); }
   }
   if (fixed) console.log(`[agents] ${fixed} folder(s) pinned as files became folder listings`);
 }

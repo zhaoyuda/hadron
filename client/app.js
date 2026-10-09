@@ -1319,6 +1319,42 @@ function handleDrop(draggedId, targetId, insertBefore, targetGroupKey) {
 }
 
 // ═══ CONTEXT PANEL (Zone C) ═══
+// Titles for the file panel's folder groups. Each entry { key, path, label }
+// starts as its label or last path segment; entries that share a title get
+// parent segments appended from the end — one more each round — until they
+// differ or run out: `retro — A`, `retro — B`, `retro — x/A`; a user label that
+// collides keeps its basename (`retro — alpha`). Returns key → title.
+function groupTitles(entries) {
+  const segsOf = (p) => String(p || "").split("/").filter(Boolean);
+  const byTitle = new Map();
+  entries.forEach((e) => {
+    const base = e.label || segsOf(e.path).pop() || e.path || "";
+    if (!byTitle.has(base)) byTitle.set(base, []);
+    byTitle.get(base).push(e);
+  });
+  const out = new Map();
+  byTitle.forEach((list, base) => {
+    if (list.length === 1) { out.set(list[0].key, base); return; }
+    // The tail is the path minus the segment already shown as the title; a user
+    // label that differs from the basename keeps the basename (that is what
+    // separates `alpha` labelled "retro" from `retro` itself).
+    const tails = list.map((e) => { const s = segsOf(e.path); return s[s.length - 1] === base ? s.slice(0, -1) : s; });
+    const depth = list.map(() => 1);
+    const sfx = (i) => tails[i].slice(Math.max(0, tails[i].length - depth[i])).join("/");
+    // Grow only the entries that still collide, each by one segment, until every
+    // suffix is distinct or the colliding ones have no more path to show.
+    for (;;) {
+      const counts = new Map();
+      list.forEach((_, i) => counts.set(sfx(i), (counts.get(sfx(i)) || 0) + 1));
+      let grew = false;
+      list.forEach((_, i) => { if (counts.get(sfx(i)) > 1 && depth[i] < tails[i].length) { depth[i]++; grew = true; } });
+      if (!grew) break;
+    }
+    list.forEach((e, i) => { const s = sfx(i); out.set(e.key, s ? `${base} — ${s}` : base); });
+  });
+  return out;
+}
+
 function renderRightPanel() {
   const el = document.getElementById("right");
   const activeSession = sessions.find((s) => s.id === activeSessionId);
@@ -1649,61 +1685,26 @@ function buildArtifactsSection(activeSession) {
   // Collapsed by default (artifact `open: true` flips the default; the user's toggle
   // persists in collapsedArtFolders). When EXPANDED, children come from the browse
   // API on the deck cadence (dirArtChildren in artifacts.js caches + refreshes);
-  // collapsed groups cost zero fetches. A file artifact directly under an expanded
-  // dir renders once — inside the group — so it's claimed away from the classic
-  // display-grouping below.
-  const claimed = new Set(); // artifact indexes rendered inside an expanded dir group
+  // collapsed groups cost zero fetches. A file artifact directly under a dir
+  // artifact belongs to that group whether it is open or collapsed — claimed away
+  // from the classic display-grouping below, so the folder is never drawn twice
+  // (prod 2026-10-09: `retros` collapsed + a second `retros` holding the pinned
+  // files). Collapsed, the header counts them (`retros · 2📌`).
+  const claimed = new Set(); // artifact indexes that render inside a dir group
+  const dirArts = []; // { idx, art, dirPath, inside: [{ art, idx, filename }] }
   artifacts.forEach((a, idx) => {
     if (a.type !== "dir") return;
     const dirPath = a.value || "";
-    const open = dirArtIsOpen(activeSession.id, a);
-    const dirName = a.label || dirPath.split("/").pop() || dirPath;
-    // File artifacts living directly under this dir (non-recursive).
+    // File artifacts living directly under this dir (non-recursive), matched on
+    // the full parent path — both sides are the resolved absolute form.
     const inside = [];
     artifacts.forEach((fa, fi) => {
-      if (fa.type !== "file" || !fa.value) return;
+      if ((fa.type ?? "file") !== "file" || !fa.value) return;
       const li = fa.value.lastIndexOf("/");
       if (li > 0 && fa.value.slice(0, li) === dirPath) inside.push({ art: fa, idx: fi, filename: fa.value.slice(li + 1) });
     });
-
-    let bodyHtml = "";
-    let badge = "";
-    if (open) {
-      inside.forEach(({ idx: fi }) => claimed.add(fi));
-      const entry = dirArtChildren(activeSession.id, dirPath);
-      if (entry.entries) {
-        const fileCount = entry.entries.filter((c) => c.type === "file").length;
-        badge = `<span class="af-count">${fileCount}</span>`;
-        const artByPath = new Map(inside.map((x) => [x.filename, x]));
-        entry.entries.forEach((child) => {
-          if (child.type === "dir") {
-            // v1: subdirs are inert rows with a count — no recursion.
-            bodyHtml += `<div class="af af-dir-sub"><span class="af-i">${folderIcon(false, 15)}</span><span class="af-label">${esc(child.name)}</span><span class="af-count">${child.count ?? ""}</span></div>`;
-            return;
-          }
-          const hit = artByPath.get(child.name);
-          if (hit) {
-            // Also an individual artifact → render as the artifact row (once).
-            bodyHtml += `<div class="af" data-art-idx="${hit.idx}"><span class="af-i">${fileIcon(child.name, 15)}</span><span class="af-label">${esc(hit.art.label || child.name)}</span><span class="af-rm" data-art-rm="${hit.idx}" title="Remove">×</span></div>`;
-          } else {
-            // Plain child file → ephemeral `file:` tab on click, no artifact created.
-            bodyHtml += `<div class="af af-file-eph" data-file-path="${esc(dirPath + "/" + child.name)}"><span class="af-i">${fileIcon(child.name, 15)}</span><span class="af-label">${esc(child.name)}</span></div>`;
-          }
-        });
-        if (!entry.entries.length) bodyHtml += `<div class="af-dir-empty">empty</div>`;
-      } else {
-        // Listing not here yet (first fetch in flight, or failed) — still show the
-        // file artifacts we already know live in this dir, plus a status line.
-        inside.forEach(({ art: fa, idx: fi, filename }) => {
-          bodyHtml += `<div class="af" data-art-idx="${fi}"><span class="af-i">${fileIcon(filename, 15)}</span><span class="af-label">${esc(fa.label || filename)}</span><span class="af-rm" data-art-rm="${fi}" title="Remove">×</span></div>`;
-        });
-        bodyHtml += `<div class="af-dir-empty">${entry.error ? "could not list folder" : "loading…"}</div>`;
-      }
-    }
-
-    html += `<div class="af-group af-dirart${open ? " open" : ""}" data-af-dirart="${esc(dirPath)}">`;
-    html += `<div class="af-group-hdr"><span class="af-arrow">&#9654;</span><span class="af-dir-icon">${folderIcon(open, 15)}</span> <span class="af-label">${esc(dirName)}</span>${badge}<span class="af-rm" data-art-rm="${idx}" title="Remove folder (files untouched)">×</span></div>`;
-    html += `<div class="af-group-body">${bodyHtml}</div></div>`;
+    inside.forEach(({ idx: fi }) => claimed.add(fi));
+    dirArts.push({ idx, art: a, dirPath, inside });
   });
 
   // ── Classic display-grouping of individually added files ──
@@ -1719,18 +1720,75 @@ function buildArtifactsSection(activeSession) {
     if (!groups.has(dir)) groups.set(dir, []);
     groups.get(dir).push({ art: a, idx: i, filename });
   });
+  groups.forEach((items, dir) => {
+    // Single file in dir — show flat, not grouped
+    if (items.length === 1) { topLevel.push(items[0]); groups.delete(dir); }
+  });
+
+  // Group titles — dir artifacts and display groups titled together: a folder's
+  // name (a user label wins), and when two collide, path segments are added
+  // from the end until they differ: `retro — A`, `retro — B`, `retro — x/A`.
+  // The full path is always the header's tooltip.
+  const titles = groupTitles([
+    ...dirArts.map((d) => ({ key: `dirart:${d.idx}`, path: d.dirPath, label: d.art.label })),
+    ...[...groups.keys()].map((dir) => ({ key: `dir:${dir}`, path: dir })),
+  ]);
+
+  dirArts.forEach(({ idx, art: a, dirPath, inside }) => {
+    const open = dirArtIsOpen(activeSession.id, a);
+    const dirName = titles.get(`dirart:${idx}`);
+    const pinRow = ({ art: fa, idx: fi, filename }) =>
+      `<div class="af af-pinned-in-dir" data-art-idx="${fi}"><span class="af-i">${fileIcon(filename, 15)}</span><span class="af-label">${esc(fa.label || filename)}</span><span class="af-pin-mark" title="Pinned on its own">📌</span><span class="af-rm" data-art-rm="${fi}" title="Remove">×</span></div>`;
+
+    let bodyHtml = "";
+    let badge = "";
+    if (open) {
+      const entry = dirArtChildren(activeSession.id, dirPath);
+      if (entry.entries) {
+        const fileCount = entry.entries.filter((c) => c.type === "file").length;
+        badge = `<span class="af-count">${fileCount}</span>`;
+        const artByPath = new Map(inside.map((x) => [x.filename, x]));
+        entry.entries.forEach((child) => {
+          if (child.type === "dir") {
+            // v1: subdirs are inert rows with a count — no recursion.
+            bodyHtml += `<div class="af af-dir-sub"><span class="af-i">${folderIcon(false, 15)}</span><span class="af-label">${esc(child.name)}</span><span class="af-count">${child.count ?? ""}</span></div>`;
+            return;
+          }
+          const hit = artByPath.get(child.name);
+          if (hit) {
+            // Also an individual artifact → render as the artifact row (once).
+            artByPath.delete(child.name);
+            bodyHtml += pinRow(hit);
+          } else {
+            // Plain child file → ephemeral `file:` tab on click, no artifact created.
+            bodyHtml += `<div class="af af-file-eph" data-file-path="${esc(dirPath + "/" + child.name)}"><span class="af-i">${fileIcon(child.name, 15)}</span><span class="af-label">${esc(child.name)}</span></div>`;
+          }
+        });
+        // A pin whose file is gone from the listing (deleted, renamed) is still a
+        // pin — shown here, never hidden, so it can be opened (missing) or removed.
+        artByPath.forEach((x) => { bodyHtml += pinRow(x); });
+        if (!entry.entries.length && !artByPath.size) bodyHtml += `<div class="af-dir-empty">empty</div>`;
+      } else {
+        // Listing not here yet (first fetch in flight, or failed) — still show the
+        // file artifacts we already know live in this dir, plus a status line.
+        inside.forEach((x) => { bodyHtml += pinRow(x); });
+        bodyHtml += `<div class="af-dir-empty">${entry.error ? "could not list folder" : "loading…"}</div>`;
+      }
+    } else if (inside.length) {
+      badge = `<span class="af-count af-pin-count" title="${inside.length} pinned file${inside.length === 1 ? "" : "s"} inside — expand to see them">${inside.length}📌</span>`;
+    }
+
+    html += `<div class="af-group af-dirart${open ? " open" : ""}" data-af-dirart="${esc(dirPath)}">`;
+    html += `<div class="af-group-hdr" title="${esc(dirPath)}"><span class="af-arrow">&#9654;</span><span class="af-dir-icon">${folderIcon(open, 15)}</span> <span class="af-label">${esc(dirName)}</span>${badge}<span class="af-rm" data-art-rm="${idx}" title="Remove folder (files untouched)">×</span></div>`;
+    html += `<div class="af-group-body">${bodyHtml}</div></div>`;
+  });
 
   // Render directory groups
   groups.forEach((items, dir) => {
-    const dirName = dir.split("/").pop() || dir;
-    if (items.length === 1) {
-      // Single file in dir — show flat, not grouped
-      topLevel.push(items[0]);
-      return;
-    }
+    const dirName = titles.get(`dir:${dir}`);
     const collapsed = (collapsedArtFolders[activeSession.id] || new Set()).has(dir);
     html += `<div class="af-group${collapsed ? "" : " open"}" data-af-dir="${esc(dir)}">`;
-    html += `<div class="af-group-hdr"><span class="af-arrow">&#9654;</span><span class="af-dir-icon">${folderIcon(!collapsed, 15)}</span> ${esc(dirName)}</div>`;
+    html += `<div class="af-group-hdr" title="${esc(dir)}"><span class="af-arrow">&#9654;</span><span class="af-dir-icon">${folderIcon(!collapsed, 15)}</span> ${esc(dirName)}</div>`;
     html += `<div class="af-group-body">`;
     items.forEach(({ art, idx, filename }) => {
       const icon = fileIcon(filename, 15);

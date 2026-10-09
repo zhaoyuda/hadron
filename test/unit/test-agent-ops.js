@@ -266,6 +266,20 @@ async function main() {
     ok(none !== null && none.status === 1 && /usage: hadron artifacts unpin/.test(none.stderr), "unpin with no path → usage, exit 1");
     const bare = hadronFails(["artifacts", "unpin", "decks/deck-v0.10.md", "--agent"]);
     ok(bare !== null && bare.status === 1 && /--agent needs a value/.test(bare.stderr) && readAgentFile(C).artifacts.length === 1, "--agent without a value → exit 1, nothing removed");
+    // A pin that overlaps a folder pin is told, never refused: the panel draws the
+    // file inside the folder's group (one group, never two).
+    hadron(["artifacts", "pin", "decks/notes.md", "--agent", C]);
+    const dirPin = hadron(["artifacts", "pin", "decks", "--agent", C]);
+    ok(/pinned 1 file\(s\) on Ops Gamma: decks\n/.test(dirPin) && /note: 2 pinned files are inside decks and will show in it/.test(dirPin), `pinning a folder that holds file pins says so (${JSON.stringify(dirPin.trim())})`);
+    ok(readAgentFile(C).artifacts.some((a) => a.type === "dir" && a.value === "decks"), "…stored as the folder listing");
+    const covered = hadron(["artifacts", "pin", "decks/notes.md", "--agent", C]);
+    ok(/pinned 1 file\(s\)/.test(covered) && /note: decks\/notes\.md is already inside pinned folder decks\/ — shown there as a highlighted row/.test(covered), `pinning a file under a pinned folder says where it shows (${JSON.stringify(covered.trim())})`);
+    const covRes = await (await req("POST", `/api/sessions/${C}/artifacts`, { type: "file", value: join(WS, "decks", "deck-v0.8.md") })).json();
+    ok(covRes.coveredBy === "decks" && covRes.artifacts.length === 4, "API: coveredBy carries the stored (workspace-relative) folder path");
+    const topRes = await (await req("POST", `/api/sessions/${C}/artifacts`, { type: "file", value: join(WS, "plain-top.md") })).json();
+    ok(topRes.coveredBy === undefined && topRes.covers === undefined, "a pin outside every pinned folder carries neither field");
+    hadron(["artifacts", "unpin", "decks", "decks/notes.md", "decks/deck-v0.8.md", join(WS, "plain-top.md"), "--agent", C]);
+    ok(readAgentFile(C).artifacts.length === 1, "harness: back to the single pin");
     // Ambiguous --agent: resolved before anything is touched.
     await req("PATCH", `/api/sessions/${A}`, { name: "Twin" });
     await req("PATCH", `/api/sessions/${C}`, { name: "Twin" });
@@ -570,6 +584,22 @@ async function main() {
   {
     await req("PATCH", `/api/sessions/${A}`, { pinned: true, parked: true });
     const ackAtBefore = readAgentFile(A).ackAt;
+    // A record from before canonical storage (absolute paths under the workspace,
+    // the same file pinned twice in two spellings, a folder pinned absolute): the
+    // boot pass rewrites and de-duplicates it once — prod 2026-10-09 drew such a
+    // folder twice in the panel.
+    writeFileSync(agentFile("legacy"), JSON.stringify({ id: "legacy", name: "Legacy", group: "Workers", state: "idle", artifacts: [
+      { type: "file", value: join(WS, "decks", "deck-v0.10.md") },
+      { type: "file", value: "decks/deck-v0.10.md", label: "dup" },
+      { type: "dir", value: join(WS, "decks") },
+      { type: "file", value: "decks/notes.md" },
+      { type: "url", value: "https://example.com/x" },
+      { value: join(WS, "decks", "old.md") },
+      { value: "https://example.com/old" },
+      { type: "file", value: "rooms", label: "as-file" },
+      { type: "dir", value: "rooms", open: true },
+    ] }, null, 2));
+    mkdirSync(join(WS, "rooms"), { recursive: true });
     server.kill("SIGKILL");
     server = spawn("node", [join(REPO, "server", "index.js"), WS], {
       env: { ...process.env, PORT: String(PORT), HADRON_HOST: "127.0.0.1" },
@@ -589,6 +619,14 @@ async function main() {
     ok(live?.state === "idle", "restart still resets state to idle (loader contract intact)");
     ok(live?.attentionRev === 4 && live?.ackRev === 3,
       `attentionRev/ackRev survive the restart (${live?.attentionRev}/${live?.ackRev}) — an unread agent stays unread across a service restart`);
+    const legacy = readAgentFile("legacy").artifacts;
+    ok(legacy.map((a) => `${a.type}:${a.value}`).join(",") === "file:decks/deck-v0.10.md,dir:decks,file:decks/notes.md,url:https://example.com/x,file:decks/old.md,url:https://example.com/old,dir:rooms",
+      `boot canonicalised the legacy record: workspace-relative, the duplicate dropped (first wins), the url untouched, typeless entries stamped file/url, a folder pinned as file + as dir merged into one listing (${legacy.map((a) => `${a.type}:${a.value}`).join(",")})`);
+    ok(legacy[6].label === "as-file" && legacy[6].open === true, "the merged folder pin keeps the first entry's label and takes `open` from the dropped twin");
+    const bootLog = readFileSync(join(WS, ".hadron", "server.log"), "utf-8");
+    ok((bootLog.match(/\[agents\] legacy: artifact paths canonicalised \(5 rewritten, 1 duplicate\(s\) dropped\)/g) || []).length === 1, "one log line names the agent and what changed");
+    ok((bootLog.match(/artifact paths canonicalised/g) || []).length === 1, "canonical records are not reported (idempotent pass)");
+    await req("DELETE", `/api/sessions/legacy?force=true`);
   }
 
   console.log("\n[archive kills shell sub-sessions; orphan adopt restores a record instead of blanking it]");

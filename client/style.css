@@ -931,6 +931,8 @@ html, body {
   background: rgba(110,118,129,.2); border-radius: 8px; padding: 0 6px;
 }
 .af-group-hdr .af-count { margin-left: 4px; }
+.af-pin-mark { font-size: 9px; opacity: .6; margin-left: 4px; flex-shrink: 0; }
+.af-pinned-in-dir .af-label { color: var(--text); }
 .af-dir-sub { opacity: .45; cursor: default; }
 .af-dir-sub:hover { background: none; }
 .af-dir-empty { padding: 4px 10px 6px 28px; font-size: 10px; color: var(--text3); font-style: italic; }

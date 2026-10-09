@@ -23,7 +23,7 @@ Review the printed list. If it grabbed something you didn't mean to share, that'
 hadron artifacts pin report.md analysis/summary.csv
 ```
 
-Paths are workspace-relative (or absolute). Duplicates are ignored automatically. Pinning a folder pins a live listing of it (the user expands it in the panel and opens files from there); a folder outside the workspace is refused.
+Paths are workspace-relative (or absolute). Duplicates are ignored automatically. Pinning a folder pins a live listing of it (the user expands it in the panel and opens files from there); a folder outside the workspace is refused. A file pinned inside a pinned folder is shown inside that folder's group (the command says so: `note: … already inside pinned folder retros/`); pinning a folder that already holds file pins says how many — neither is refused, nothing is drawn twice.
 
 Keep artifact **labels concise** — a few words at most. The file type is already shown by an icon in the tab, and long labels get truncated in the tab bar, so a short, scannable name reads best.
 

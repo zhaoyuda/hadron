@@ -641,8 +641,17 @@ async function main() {
           if (!paths.length) die("no high-relevance files found to auto-add");
         }
         if (!paths.length) die("usage: hadron artifacts pin [--auto | <path...>] [--agent <name|id>]");
-        for (const p of paths) await api("POST", `/api/sessions/${me.id}/artifacts`, { type: "file", value: p });
+        // The server says when a pin overlaps a folder pin (the panel draws the
+        // file inside the folder's group, never a second group): told as notes
+        // after the summary line, nothing refused.
+        const notes = [];
+        for (const p of paths) {
+          const out = await api("POST", `/api/sessions/${me.id}/artifacts`, { type: "file", value: p });
+          if (out && typeof out.coveredBy === "string") notes.push(`note: ${p} is already inside pinned folder ${out.coveredBy}/ — shown there as a highlighted row`);
+          if (out && typeof out.covers === "number") notes.push(`note: ${out.covers} pinned file${out.covers === 1 ? " is" : "s are"} inside ${p} and will show in it`);
+        }
         console.log(`pinned ${paths.length} file(s) on ${me.name || me.id}: ${paths.join(", ")}`);
+        for (const n of notes) console.log(n);
         break;
       }
       die("usage: hadron artifacts <ls|pin|unpin> [--agent <name|id>]");
