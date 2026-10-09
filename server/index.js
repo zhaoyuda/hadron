@@ -11,7 +11,7 @@ import { connect as netConnect } from "net";
 import { networkInterfaces, hostname, tmpdir, homedir } from "os";
 import { URL } from "url";
 import { randomBytes, createHash } from "crypto";
-import { StateDetector, isShellCmd, POLL_INTERVAL_MS, raiseAttention, setProbeObserver } from "./state-detector.js";
+import { StateDetector, isShellCmd, POLL_INTERVAL_MS, raiseAttention, ackByTurn, setProbeObserver } from "./state-detector.js";
 import { probeClaudeCaps, RuntimeTracker, performResume, BOOT, isClaudeCmd, decideResume, verifyAdoption, UUID_RE, PINNED_CONFIDENCE, sessionFileExists, claudeProjectDir } from "./resume.js";
 import { randomUUID } from "crypto";
 import { loadAgents, loadAgent, saveAgent, saveAgentLocked, archiveAgent, deleteAgent, initWorkspace, getWorkspaceDir, appendAgentField, removeAgentArtifact, isSelfWrite } from "./agent-store.js";
@@ -1606,6 +1606,7 @@ app.patch("/api/sessions/:id", async (req, res) => {
     if (bad) return res.status(400).json({ error: `coreDismissed must be an array of up to ${CORE_DISMISSED_MAX} path strings` });
   }
   const { state, blockReason, name, task } = req.body;
+  let acked = false;
   if (state !== undefined) {
     const prevState = session.state;
     session.state = state;
@@ -1613,10 +1614,11 @@ app.patch("/api/sessions/:id", async (req, res) => {
     const detector = monitors.get(id);
     if (detector) detector.resetCooldown();
     // A manual state change counts like a detected one: entering done/blocked
-    // is one attention event (idempotent for a same-state PATCH).
+    // is one attention event (idempotent for a same-state PATCH); entering
+    // working acks whatever was outstanding (a new turn = answered).
     if (prevState !== state && (state === "done" || state === "blocked")) raiseAttention(session, undefined, state);
+    else if (prevState !== state && state === "working") acked = ackByTurn(session) || acked;
   }
-  let acked = false;
   if (ackRev !== undefined) {
     const next = Math.min(ackRev, session.attentionRev || 0);
     if (next > (session.ackRev || 0)) { session.ackRev = next; session.ackAt = new Date().toISOString(); acked = true; }

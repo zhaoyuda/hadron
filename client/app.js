@@ -270,8 +270,9 @@ function lastTouchedAt(s) {
     .map((t) => (t ? Date.parse(t) : NaN)).filter(Number.isFinite);
   return ts.length ? Math.max(...ts) : NaN;
 }
+const staleAfterMs = () => (Object.hasOwn(STALE_AFTER_MS, deckStaleAfter) ? STALE_AFTER_MS[deckStaleAfter] : STALE_AFTER_MS["3d"]);
 function staleByAge(s) {
-  const after = Object.hasOwn(STALE_AFTER_MS, deckStaleAfter) ? STALE_AFTER_MS[deckStaleAfter] : STALE_AFTER_MS["3d"];
+  const after = staleAfterMs();
   if (after === Infinity || s.state === "working") return false;
   const t = lastTouchedAt(s);
   return Number.isFinite(t) && Date.now() - t > after;
@@ -299,8 +300,22 @@ function getStaleSection() {
 // ═══ TRIAGE (attention / ack) ═══
 // Mail model: `state` is what the pane is doing (detector-owned, never edited
 // from here); attentionRev/ackRev say whether the operator has seen the last
-// time it needed them. A card "needs me" while attentionRev > ackRev.
-const needsMe = (s) => (s.attentionRev || 0) > (s.ackRev || 0);
+// time it needed them. A card "needs me" while attentionRev > ackRev — and
+// the raise is younger than the stale window (View → Fold Stale After; Never =
+// forever). An agent answered from a channel Hadron cannot see (the phone app)
+// is never acked here, so an old raise stops shouting the way an untouched
+// card stops showing: it counts for nothing, folds like any quiet card, and
+// the tooltip reads "last needed you Nd". The server still carries the unread
+// rev, so looking at it (ackTick) acks it like any other. A raise with no
+// timestamp fails toward lit.
+const unacked = (s) => (s.attentionRev || 0) > (s.ackRev || 0);
+function needsMe(s) {
+  if (!unacked(s)) return false;
+  const after = staleAfterMs();
+  if (after === Infinity) return true;
+  const t = s.attentionAt ? Date.parse(s.attentionAt) : NaN;
+  return !Number.isFinite(t) || Date.now() - t <= after;
+}
 const needsMeList = () => sessions.filter(needsMe);
 
 function getDeckSections({ filtered = true } = {}) {
@@ -1829,7 +1844,7 @@ function timestampsLine(s) {
   const wait = timeAgo(s.attentionAt);
   if (wait) parts.push(needsMe(s) ? `waiting for you ${wait}` : `last needed you ${wait}`);
   const seen = timeAgo(s.ackAt);
-  if (seen) parts.push(`you last looked ${seen}`);
+  if (seen) parts.push(`you last looked or answered ${seen}`);
   if (s.parked) parts.push("parked");
   return parts.join(" · ");
 }
@@ -2421,7 +2436,7 @@ function ackTick() {
   if (!looking) { viewing = null; return; }
   if (!viewing || viewing.id !== s.id) { viewing = { id: s.id, since: Date.now() }; return; }
   if (Date.now() - viewing.since < ACK_DWELL_MS) return;
-  if (needsMe(s)) ackAttention(s, s.attentionRev);
+  if (unacked(s)) ackAttention(s, s.attentionRev); // aged-out raises are acked too — looking is looking
 }
 setInterval(ackTick, 250);
 

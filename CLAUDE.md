@@ -151,7 +151,11 @@ npm test
 #                            integer (400 otherwise), clamped to attentionRev, never moves back, leaves state
 #                            alone; {state, ackRev} in one request cannot swallow its own bump; both revs
 #                            persist and survive the restart block while state resets to idle; an accepted ack
-#                            stamps ackAt ("you last looked", persisted, an ignored ack does not restamp it); test-pane-resolution also pins the
+#                            stamps ackAt ("you last looked or answered", persisted, an ignored ack does not restamp it); entering `working` ACKS
+#                            the outstanding raise (ackByTurn: ackRev = attentionRev + ackAt, persisted — a new turn means the operator
+#                            answered, from the dashboard, the pane, or claude's phone app, prod 2026-10-08: remote-driven agents stayed
+#                            "needs me" for days) and the next done raises past it, working with nothing outstanding is a no-op; test-pane-resolution
+#                            pins the same on the detector path incl. a first post-boot verdict of working on an unread agent; it also pins the
 #                            context meter's sticky rule at the tmux boundary (agent-process pane with the footer → contextPct,
 #                            a shell foreground keeps the reading while working and drops it otherwise, read before _applySnap); it
 #                            covers the boot rule: a first post-boot verdict equal to the persisted attentionState is a
@@ -467,7 +471,7 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #   + test/e2e/m18-comment-rail.js (comment rail: cards permanently visible at ≥560px previews (width-adaptive 190-260px — split panes qualify), aligned with highlights; rail composer + in-rail edit/delete; mark↔card two-way linking; orphan + doc sections; annRailBusy edit guard; split-layout context derivation; <560px falls back to the P0 hover card)
 #   + test/e2e/m19-artifacts-ux.js (artifacts add/remove UX: Browse popover survives folder clicks (pointerdown close model) + keyboard nav + hidden-files toggle; atomic add with canonical de-dupe; URL validation + escaped labels; remove with 409 drift recovery; dir artifacts — live folder groups where new on-disk files appear automatically; ephemeral file: tabs; add concurrency; viewport clamp)
 #   + test/e2e/m20-agent-ops.js  (agent ops: context-menu Pin → "📌 Pinned" section first in BOTH deck modes, card moved not duplicated, survives 3s refresh + reload; `hadron pin <name>`; `hadron close <name>` → tmux dead + JSON archived + ls --archived + restore, with the dashboard left ON the closed agent: its WS is refused (4404), no reconnect loop, record not blanked/resurrected; in-pane `hadron message` sender attribution + --raw; ambiguous names exit 1, nothing delivered)
-#   + test/e2e/m21-needs-me.js   (triage: cards light on unseen done/blocked with a "N need me" counter; a 1-s dwell on the agent's terminal in a focused window acks it — card goes quiet, ackRev persisted, and the client never PATCHes `state`; an unread agent stays lit when its state moves on; Alt+N jumps to the next unread and wraps; a re-raise on the active agent is acked as the rev moves; "Only Agents That Need Me" keeps the active card and survives a reload; the palette lists all agents (no 8-row cap) with a "needs me" hint)
+#   + test/e2e/m21-needs-me.js   (triage: cards light on unseen done/blocked with a "N need me" counter; a 1-s dwell on the agent's terminal in a focused window acks it — card goes quiet, ackRev persisted, and the client never PATCHes `state`; an unread agent stays lit when its state moves on; Alt+N jumps to the next unread and wraps; a re-raise on the active agent is acked as the rev moves; "Only Agents That Need Me" keeps the active card and survives a reload; the palette lists all agents (no 8-row cap) with a "needs me" hint; an unread agent whose pane goes to `working` (PATCH twin) goes quiet with no client PATCH — the server acked the turn — and the next done lights it again)
 #   + test/e2e/m22-stale-fold.js (cards + stale fold: a seeded agent whose three timestamps are days old folds into a
 #                                 collapsed "Stale · N" section rendered last (harness `seed(ws)` hook writes it before boot);
 #                                 fresh or timestamp-less agents stay visible; the header toggles the fold and the open state
@@ -476,7 +480,9 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                                 fold + ⏸ + `parked:true` on disk with tmux alive and nothing archived; PATCH state done
 #                                 pulls the parked card out lit and acking folds it again; Unpark restores; View → Fold
 #                                 Stale After "Never" removes the age fold, persists, "1 day" folds again, an unknown value
-#                                 falls back to 3 days; the tooltip spells out the timestamps)
+#                                 falls back to 3 days; the tooltip spells out the timestamps; a seeded UNREAD raise 5 days old (the
+#                                 phone-app case: attentionRev 2, ackRev 0) counts for nothing at 3 d — folded, counter hidden, tooltip
+#                                 "last needed you 5d" — lights and counts again under Never ("waiting for you 5d"), ages out again at 1 d)
 #   + test/e2e/m23-context-badge.js (context badge: seeded transcripts (CLAUDE_CONFIG_DIR relocated) → "64%" plain,
 #                                 "85%" red (level "hot": 10k before auto-compact on 200k), "30%" for 300k on a
 #                                 "[1m]" model and 950k of 1M is "95%" but only amber (colour is headroom in tokens,

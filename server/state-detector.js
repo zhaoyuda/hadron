@@ -655,6 +655,8 @@ export function detectState(rawLines, opts = {}) {
     return { state: null, promptVisible: true, substatus: shellSub };
   }
   if (shellSub) {
+    // A shell still running under claude is a turn in progress: this verdict
+    // acks the outstanding raise in _setState like any other `working`.
     return { state: "working", substatus: shellSub };
   }
   return { state: "inconclusive", substatus: null };
@@ -806,6 +808,20 @@ export function raiseAttention(session, persist, state) {
   if (typeof persist === "function") persist(session);
 }
 export const needsAttention = (s) => (s.attentionRev || 0) > (s.ackRev || 0);
+
+// A new turn is an answer. Entering `working` while attention is outstanding
+// acks it (ackRev = attentionRev, ackAt = now): the operator replied from
+// somewhere — the dashboard, the pane, or a channel Hadron cannot see (claude's
+// remote / phone app: prod 2026-10-08, agents driven from the phone stayed
+// "needs me" for days). The next done/blocked raises again. Shared by the
+// detector and the manual state PATCH, like raiseAttention.
+export function ackByTurn(session, persist) {
+  if (!needsAttention(session)) return false;
+  session.ackRev = session.attentionRev;
+  session.ackAt = new Date().toISOString();
+  if (typeof persist === "function") persist(session);
+  return true;
+}
 
 export class StateDetector {
   constructor(tmuxSessionName, session, { poll = true } = {}) {
@@ -1042,6 +1058,8 @@ export class StateDetector {
     this._verdictSeen = true;
     if ((state === "done" || state === "blocked") && !(firstVerdict && state === this.session.attentionState)) {
       raiseAttention(this.session, this.onAttention, state);
+    } else if (state === "working") {
+      ackByTurn(this.session, this.onAttention); // a new turn = the operator answered (from any channel)
     }
 
     if (state === "blocked" && blockReason) {

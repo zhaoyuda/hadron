@@ -42,6 +42,10 @@ const env = await bootWorkspace({
     write("fresh", { attentionRev: 1, ackRev: 1, attentionAt: iso(6 * DAY), ackAt: iso(3600e3) });
     // No timestamps at all → never stale (unknown fails toward visible).
     write("blank", {});
+    // Raised 5 days ago and never acked — an agent answered from a channel
+    // Hadron cannot see (claude's phone app). An unread raise older than the
+    // stale window counts for nothing and folds like any quiet card.
+    write("remote", { attentionRev: 2, ackRev: 0, attentionAt: iso(5 * DAY) });
   },
 });
 let browser;
@@ -94,8 +98,11 @@ try {
   await until(async () => (await stale().count()) === 1);
   r.ok((await stale().count()) === 1, "a Stale section exists");
   r.ok(await page.evaluate(() => { const g = [...document.querySelectorAll("#deck .deck-group, .deck-group")]; return g[g.length - 1]?.classList.contains("deck-group-stale"); }), "…and it is the LAST section of the deck");
-  r.ok((await staleLabel()) === "▸ Stale · 1", `collapsed header with count (${await staleLabel()})`);
+  r.ok((await staleLabel()) === "▸ Stale · 2", `collapsed header with count (${await staleLabel()})`);
   r.ok(!(await visible("old")), "old (last touched 5 d ago): folded — card not rendered while collapsed");
+  r.ok(!(await visible("remote")), "remote (unread raise 5 d old, never acked): folded too — an aged-out raise is not exempt");
+  r.ok(await page.evaluate(() => { const s = sessions.find((x) => x.id === "remote"); return s.attentionRev === 2 && !s.ackRev && !needsMe(s) && !needsMeList().length; }), "…the client still sees rev 2 > ack 0 but it needs nobody (aged out) — count 0");
+  r.ok(await page.locator("#needs-me").isHidden(), "…counter hidden");
   r.ok((await visible("fresh")) && !(await inStale("fresh")), "fresh (looked at 1 h ago): visible in its group");
   r.ok((await visible("blank")) && !(await inStale("blank")), "blank (no timestamps): visible — unknown is not stale");
   r.ok((await visible("ant")) && (await visible("bee")), "new agents visible");
@@ -107,10 +114,12 @@ try {
   await stale().locator(".deck-group-label").click();
   r.ok(await until(() => visible("old")), "click on the header opens the fold — old's card renders");
   r.ok(await inStale("old"), "…inside the Stale section");
-  r.ok((await staleLabel()) === "▾ Stale · 1", "header flips to ▾");
+  r.ok((await staleLabel()) === "▾ Stale · 2", "header flips to ▾");
+  r.ok((await inStale("remote")) && !(await card("remote").evaluate((el) => el.classList.contains("dk-needs"))), "remote renders inside the fold, not lit");
+  r.ok(/last needed you 5d/.test((await card("remote").getAttribute("title")) || ""), `remote's tooltip reads "last needed you 5d" (${JSON.stringify(await card("remote").getAttribute("title"))})`);
   r.ok((await order()).includes("old"), "an open fold's cards are in the Alt+N order");
   const tip = await card("old").getAttribute("title");
-  r.ok(/last needed you 6d/.test(tip || "") && /you last looked 5d/.test(tip || ""), `tooltip spells out the timestamps (${JSON.stringify(tip)})`);
+  r.ok(/last needed you 6d/.test(tip || "") && /you last looked or answered 5d/.test(tip || ""), `tooltip spells out the timestamps (${JSON.stringify(tip)})`);
   await wait(3500);
   r.ok(await visible("old"), "fold stays open across the 3-s deck refresh");
   await page.reload({ waitUntil: "domcontentloaded" });
@@ -122,14 +131,14 @@ try {
   // ── 3. the active agent never folds ──
   await card("old").click();
   r.ok(await until(async () => (await visible("old")) && !(await inStale("old"))), "switching to old pulls it out of the fold (active never folds)");
-  r.ok((await stale().count()) === 0, "…and the now-empty Stale section is gone");
+  r.ok((await staleLabel()) === "▾ Stale · 1" && (await inStale("remote")), `…the Stale section keeps only remote (${await staleLabel()})`);
   await card("ant").click();
   r.ok(await until(() => inStale("old")), "switching away folds it again");
 
   // ── 4. park via context menu ──
   r.ok(/^Park BEE/.test(await ctx("bee", "park")), "context menu offers Park for an unparked card");
   r.ok(await until(() => inStale("bee")), "Park → bee moves into the Stale section");
-  r.ok((await staleLabel()) === "▾ Stale · 2 (1 parked)", `header counts parked (${await staleLabel()})`);
+  r.ok((await staleLabel()) === "▾ Stale · 3 (1 parked)", `header counts parked (${await staleLabel()})`);
   r.ok((await card("bee").locator(".dk-parked").count()) === 1, "⏸ marker on the parked card");
   r.ok(await until(() => { try { return agentJson("bee").parked === true; } catch { return false; } }), "parked:true persisted to disk");
   r.ok(!agentJson("bee").archived && tmuxAlive("bee"), "parking did not archive or kill anything");
@@ -150,7 +159,7 @@ try {
   r.ok(/^Unpark BEE/.test(await ctx("bee", "park")), "context menu offers Unpark for a parked card");
   r.ok(await until(async () => (await visible("bee")) && !(await inStale("bee"))), "Unpark → bee is back in its group");
   r.ok(await until(() => { try { return !("parked" in agentJson("bee")); } catch { return false; } }), "parked absent on disk after unpark");
-  r.ok((await staleLabel()) === "▾ Stale · 1", "header back to 1");
+  r.ok((await staleLabel()) === "▾ Stale · 2", "header back to 2");
 
   // ── 7. View → Fold Stale After: Never / 1 day ──
   await page.locator("#menu-view").click();
@@ -159,6 +168,9 @@ try {
   await page.locator('.menu-dropdown-item[data-action="set-stale-after"][data-stale-after="never"]').click();
   r.ok(await until(async () => (await visible("old")) && !(await inStale("old"))), "Never → the age fold is gone (old back in its group)");
   r.ok((await stale().count()) === 0, "…no Stale section left");
+  r.ok(await until(async () => (await visible("remote")) && !(await inStale("remote")) && (await card("remote").evaluate((el) => el.classList.contains("dk-needs")))), "Never → remote's 5-day-old raise counts again: back in its group, lit");
+  r.ok(await until(async () => (await page.locator("#needs-me").textContent()).includes("1 needs me")), "…counter says 1 needs me");
+  r.ok(/waiting for you 5d/.test((await card("remote").getAttribute("title")) || ""), "…tooltip reads \"waiting for you 5d\"");
   await api("PATCH", "/api/sessions/bee", { parked: true });
   r.ok(await until(() => inStale("bee")), "…but a parked card still folds under Never");
   r.ok((await staleLabel()) === "▾ Stale · 1 (1 parked)", `header shows only the parked one (${await staleLabel()})`);
@@ -169,6 +181,7 @@ try {
   r.ok((await page.evaluate(() => deckStaleAfter)) === "never", "threshold survives a reload");
   await page.evaluate(() => handleMenuAction("set-stale-after", { dataset: { staleAfter: "1d" } }));
   r.ok(await until(() => inStale("old")), "1 day → old folds again");
+  r.ok(await until(async () => (await inStale("remote")) && (await page.locator("#needs-me").isHidden())), "1 day → remote ages out again: folded, counter hidden");
   r.ok(!(await inStale("fresh")) && (await visible("fresh")), "fresh (1 h) still not stale at 1 day");
   await page.evaluate(() => handleMenuAction("set-stale-after", { dataset: { staleAfter: "bogus" } }));
   r.ok((await page.evaluate(() => deckStaleAfter)) === "3d", "an unknown threshold falls back to 3 days");

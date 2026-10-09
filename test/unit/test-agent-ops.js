@@ -439,7 +439,7 @@ async function main() {
     ok(r.status === 200 && s.ackRev === 1, `ackRev 99 clamps to attentionRev (ackRev ${s.ackRev})`);
     ok(readAgentFile(A).ackRev === 1, "ackRev persisted to disk");
     ok(typeof s.ackAt === "string" && Date.parse(s.ackAt) > Date.parse(s.attentionAt) - 1 && Date.now() - Date.parse(s.ackAt) < 10000,
-      "the ack stamps ackAt (\"you last looked\" — the card's third timestamp)");
+      "the ack stamps ackAt (\"you last looked or answered\" — the card's third timestamp)");
     ok(readAgentFile(A).ackAt === s.ackAt, "ackAt persisted alongside ackRev");
     r = await req("PATCH", `/api/sessions/${A}`, { ackRev: 0 });
     s = await get();
@@ -451,8 +451,20 @@ async function main() {
     await req("PATCH", `/api/sessions/${A}`, { state: "blocked", blockReason: "permission" });
     s = await get();
     ok(s.attentionRev === 2 && s.ackRev === 1, "done→blocked is a new entry: attentionRev 2 > ackRev 1 (needs me again)");
-    // Working / idle never raise attention.
+    // Working / idle never raise attention — and entering working ACKS what is
+    // outstanding: a new turn means the operator answered, from the dashboard,
+    // the pane, or a channel Hadron cannot see (claude's phone app).
+    const ackAtBefore = s.ackAt;
     await req("PATCH", `/api/sessions/${A}`, { state: "working" });
+    s = await get();
+    ok(s.attentionRev === 2 && s.ackRev === 2, "blocked→working: the new turn acks the outstanding raise (ackRev 2 = attentionRev)");
+    ok(typeof s.ackAt === "string" && s.ackAt !== ackAtBefore, "…and restamps ackAt (answered = looked)");
+    ok(readAgentFile(A).ackRev === 2 && readAgentFile(A).ackAt === s.ackAt, "…persisted");
+    const ackAtTurn = s.ackAt;
+    await req("PATCH", `/api/sessions/${A}`, { state: "idle" });
+    await req("PATCH", `/api/sessions/${A}`, { state: "working" });
+    s = await get();
+    ok(s.attentionRev === 2 && s.ackRev === 2 && s.ackAt === ackAtTurn, "working with nothing outstanding is a no-op (ackAt not restamped)");
     await req("PATCH", `/api/sessions/${A}`, { state: "idle" });
     s = await get();
     ok(s.attentionRev === 2, "working/idle do not raise attention");

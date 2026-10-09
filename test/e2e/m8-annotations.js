@@ -193,8 +193,18 @@ try {
       !document.querySelector(`mark.ann-mark[data-ann-id="${id}"]`);
   }, draftC.id, { timeout: 10000 }).then(() => true).catch(() => false);
   r.ok(orphanShown, "drawer shows the red orphaned chip; no mark highlights the wrong place");
-  r.ok((await page.locator(`mark.ann-mark[data-ann-id="${draftA.id}"]`).count()) === 1,
-    "the still-matched comment keeps its (only) highlight after the rewrite");
+  const markCountA = await page.locator(`mark.ann-mark[data-ann-id="${draftA.id}"]`).count();
+  if (markCountA !== 1) {
+    const dbg = await page.evaluate((idA) => {
+      const pv = document.querySelector(".md-preview");
+      return { marks: [...document.querySelectorAll("mark.ann-mark")].map((m) => [m.dataset.annId, m.textContent.slice(0, 30)]),
+        sig: pv?.dataset.annSig?.slice(0, 300), painted: pv?.dataset.annPainted, pinned: typeof annCardPinned !== "undefined" ? annCardPinned : "?",
+        cur: (annData?.current || []).map((c) => [c.id === idA ? "A" : c.id.slice(0, 6), c.anchorStatus, c.state]),
+        text: pv?.textContent.slice(0, 200), sessions: sessions.map((x) => [x.id, x.state, x.attentionRev, x.ackRev]) };
+    }, draftA.id);
+    console.log("DEBUG-M8", JSON.stringify(dbg));
+  }
+  r.ok(markCountA === 1, `the still-matched comment keeps its (only) highlight after the rewrite (${markCountA})`);
 } catch (e) {
   r.fail(`unexpected error: ${e.message}`);
 } finally {
