@@ -41,7 +41,8 @@ let deckFilter = "all"; // "all" | "needs" (only agents that need me, plus the a
 let deckStaleAfter = "3d"; // "1d" | "3d" | "7d" | "never" — fold quiet agents after this long
 const QUOTA_SHOW_FROM = [0, 30, 50]; // View → Quota: a window shows once this much of it is used
 let quotaShowFrom = 30;
-let deckStaleOpen = false; // the Stale section is collapsed unless the operator opened it
+let deckShowStale = false; // View → Show Stale Agents: every group's stale row stays open
+let deckStaleOpen = new Set(); // group keys whose stale row the operator opened (persisted)
 let currentTheme = "default"; // "default", "exploration"
 let notifyLevel = "all"; // "all" (sound+banner+flash), "banner" (banner+flash), "off"
 // System (OS-level) notifications on top of the level above: fire only while
@@ -259,11 +260,14 @@ function getPinnedSection() {
 // activity (claude's own record), when it last raised "needs me" (attentionAt)
 // and when the operator last looked (ackAt). The newest of them is "last
 // touched"; an agent untouched for deckStaleAfter that is not working, not
-// pinned, not needing me and not on screen folds into a collapsed Stale
-// section at the bottom of the deck — moved there, never archived, never
-// killed. `parked` is the manual version of the same fold (context menu /
-// `hadron park`). Either way, needing me pulls the card back out: attention
-// wins over quiet. Unknown timestamps fail toward visible.
+// pinned, not needing me and not on screen folds into its own group's stale
+// row — a "▸ N stale" line at the bottom of the group that opens in place
+// (dimmed cards under the live ones); never archived, never killed, never
+// moved out of its group. `parked` is the manual version of the same fold
+// (context menu / `hadron park`). Either way, needing me pulls the card back
+// out: attention wins over quiet. Unknown timestamps fail toward visible.
+// View → Show Stale Agents (deckShowStale) opens every row; a click on one
+// row opens that group (deckStaleOpen, remembered per group).
 const STALE_AFTER_MS = { "1d": 86400e3, "3d": 3 * 86400e3, "7d": 7 * 86400e3, never: Infinity };
 function lastTouchedAt(s) {
   const ts = [s.transcript?.lastActivityAt, s.attentionAt, s.ackAt]
@@ -281,19 +285,23 @@ function isFolded(s) {
   if (s.pinned || needsMe(s) || s.id === activeSessionId) return false;
   return !!s.parked || staleByAge(s);
 }
-function getStaleSection() {
-  const items = sessions.filter(isFolded);
-  if (!items.length) return null;
-  // Most recently touched first; agents with no timestamp at all sink.
-  items.sort((a, b) => {
+// Most recently touched first; agents with no timestamp at all sink.
+function sortStale(items) {
+  return items.sort((a, b) => {
     const ta = lastTouchedAt(a), tb = lastTouchedAt(b);
     if (Number.isFinite(ta) !== Number.isFinite(tb)) return Number.isFinite(ta) ? -1 : 1;
     if (ta !== tb) return tb - ta;
     return a.id.localeCompare(b.id);
   });
-  const parked = items.filter((s) => s.parked).length;
-  return { label: `Stale · ${items.length}${parked ? ` (${parked} parked)` : ""}`, staleSection: true, items, collapsed: !deckStaleOpen };
 }
+// Keyed by layout so a group literally named `status:idle` and the Idle bucket never share a memory.
+const staleKey = (g) => (g.status ? `status:${g.status}` : `group:${g.label.toLowerCase()}`);
+const staleOpen = (g) => deckShowStale || deckStaleOpen.has(staleKey(g));
+// Every key either layout can produce right now (saveUIState prunes to these).
+const liveStaleKeys = () => {
+  try { return new Set([...getSessionGroups(), ...getStatusBuckets()].map(staleKey)); } catch { return deckStaleOpen; }
+};
+const staleLabel = (g) => { const parked = g.stale.filter((s) => s.parked).length; return `${g.stale.length} stale${parked ? ` (${parked} parked)` : ""}`; };
 
 // Rendering/nav layer: either semantic groups or status buckets. Persistence and
 // group-list bookkeeping keep using getSessionGroups() (always the group axis).
@@ -331,23 +339,25 @@ function getDeckSections({ filtered = true } = {}) {
     if (pinnedSection) { pinnedSection = { ...pinnedSection, items: pinnedSection.items.filter(keep) }; if (!pinnedSection.items.length) pinnedSection = null; }
   }
   // The "needs me" filter already hides every quiet agent, so the fold has
-  // nothing to add there; otherwise stale/parked cards move (not copy) to it.
-  const staleSection = filtering ? null : getStaleSection();
-  if (pinnedSection || staleSection) {
-    base = base.map((g) => ({ ...g, items: g.items.filter((s) => !s.pinned && !isFolded(s)) }));
-  }
+  // nothing to add there; otherwise each group's stale/parked cards move
+  // (not copy) under its own "N stale" row.
+  base = base.map((g) => ({
+    ...g,
+    items: g.items.filter((s) => !s.pinned && (filtering || !isFolded(s))),
+    stale: filtering ? [] : sortStale(g.items.filter((s) => !s.pinned && isFolded(s))),
+  }));
   // Status buckets never render empty; group sections keep rendering empty
   // (they own the add/delete affordances) — unless the deck is filtered.
-  if (statusMode || filtering) base = base.filter((g) => g.items.length > 0);
-  return [...(pinnedSection ? [pinnedSection] : []), ...base, ...(staleSection ? [staleSection] : [])];
+  if (statusMode || filtering) base = base.filter((g) => g.items.length > 0 || g.stale.length > 0);
+  return [...(pinnedSection ? [pinnedSection] : []), ...base];
 }
 
 // Deck order. Filtered by default so Alt+1..9 / Alt+H/L index what is on
-// screen (a collapsed Stale section's cards are not); `{ filtered: false }` is
-// the full fleet (the palette must reach a quiet agent while the "needs me"
+// screen (a closed stale row's cards are not); `{ filtered: false }` is the
+// full fleet (the palette must reach a quiet agent while the "needs me"
 // filter or the fold hides it from the deck).
 function getDisplayOrder({ filtered = true } = {}) {
-  return getDeckSections({ filtered }).flatMap((g) => (filtered && g.staleSection && g.collapsed) ? [] : g.items);
+  return getDeckSections({ filtered }).flatMap((g) => [...g.items, ...((g.stale && (!filtered || staleOpen(g))) ? g.stale : [])]);
 }
 
 function syncGroupList() {
@@ -936,22 +946,6 @@ function renderDeck() {
       html += `</div></div>`;
       return;
     }
-    // The stale fold: a click on the header opens/closes it; cards render only
-    // while open (a collapsed fold takes no Alt+N slots — see getDisplayOrder).
-    if (g.staleSection) {
-      html += `<div class="deck-group deck-group-stale">`;
-      html += `<div class="deck-group-label" data-stale-toggle title="${g.collapsed ? "Show" : "Hide"} agents untouched for ${esc(deckStaleAfter === "never" ? "…" : deckStaleAfter)} or parked (nothing here is archived)">${g.collapsed ? "▸" : "▾"} ${esc(g.label)}</div>`;
-      if (!g.collapsed) {
-        html += `<div class="deck-cards">`;
-        g.items.forEach((s) => {
-          idx++;
-          html += mkDeckCard(s, idx, false);
-        });
-        html += `</div>`;
-      }
-      html += `</div>`;
-      return;
-    }
     // In status mode the header is a state label (not editable / not a drop target);
     // omit data-group-name so the rename/contextmenu handlers don't bind to it.
     const labelAttrs = statusMode
@@ -974,12 +968,29 @@ function renderDeck() {
       // Empty, non-protected group → offer a visible delete button (no right-click
       // needed). A group whose only members are pinned (moved to the pinned
       // section) is NOT empty — deleteGroup would no-op on it anyway.
-      const hasPinnedMember = sessions.some((s) => (s.pinned || isFolded(s)) && (s.group || "Workers").toLowerCase() === groupKey);
-      if (g.items.length === 0 && !hasPinnedMember && gc.expandable !== false) {
-        html += `<div class="dk-del dk-add-sm" title="Delete empty group "${esc(g.label)}"" data-del-group="${esc(g.label)}">×</div>`;
+      const hasPinnedMember = sessions.some((s) => s.pinned && (s.group || "Workers").toLowerCase() === groupKey);
+      if (g.items.length === 0 && g.stale.length === 0 && !hasPinnedMember && gc.expandable !== false) {
+        html += `<div class="dk-del dk-add-sm" title="Delete empty group &quot;${esc(g.label)}&quot;" data-del-group="${esc(g.label)}">×</div>`;
       }
     }
-    html += `</div></div>`;
+    html += `</div>`;
+    // The group's stale row: a click opens/closes it in place; the folded cards
+    // render dimmed under the live ones only while open (a closed row takes no
+    // Alt+N slots — see getDisplayOrder). View → Show Stale Agents opens all.
+    if (g.stale.length) {
+      const open = staleOpen(g);
+      const key = staleKey(g);
+      html += `<div class="deck-stale-row" data-stale-group="${esc(key)}" title="${open ? "Hide" : "Show"} ${deckStaleAfter === "never" ? "parked agents" : `agents untouched for ${esc(deckStaleAfter)} or parked`} (still running, nothing archived)${deckShowStale ? " — View → Show Stale Agents keeps them open" : ""}">${open ? "▾" : "▸"} ${esc(staleLabel(g))}</div>`;
+      if (open) {
+        html += `<div class="deck-cards deck-stale-cards">`;
+        g.stale.forEach((s) => {
+          idx++;
+          html += mkDeckCard(s, idx, false);
+        });
+        html += `</div>`;
+      }
+    }
+    html += `</div>`;
   });
 
   if (!statusMode) {
@@ -997,8 +1008,18 @@ function renderDeck() {
   el.querySelectorAll(".dk[data-sid]").forEach((card) => {
     card.addEventListener("click", () => switchSession(card.dataset.sid));
   });
-  const staleToggle = el.querySelector("[data-stale-toggle]");
-  if (staleToggle) staleToggle.addEventListener("click", () => { deckStaleOpen = !deckStaleOpen; renderDeck(); saveUIState(); });
+  el.querySelectorAll(".deck-stale-row[data-stale-group]").forEach((row) => row.addEventListener("click", () => {
+    const key = row.dataset.staleGroup;
+    // With Show Stale Agents on, a row click closes just this group by turning
+    // the global off and remembering every OTHER open row — one click, one row.
+    if (deckShowStale) {
+      deckShowStale = false;
+      for (const g of getDeckSections()) if (g.stale && g.stale.length && staleKey(g) !== key) deckStaleOpen.add(staleKey(g));
+      deckStaleOpen.delete(key);
+    } else if (deckStaleOpen.has(key)) deckStaleOpen.delete(key);
+    else deckStaleOpen.add(key);
+    renderDeck(); saveUIState();
+  }));
 
   // ── Drag and drop (group axis only; status buckets aren't reorderable) ──
   if (!statusMode) initDeckDragAndDrop(el);
@@ -1129,7 +1150,7 @@ function mkDeckCard(s, idx, allowDrag = true) {
   if (cpLine && (state === "idle" || state === "done")) sub = `<span class="dk-cp">${esc(cpLine)}</span>${age ? ` · ${age}` : ""}`;
 
   const draggable = allowDrag ? ` draggable="true"` : "";
-  const pin = (s.pinned ? `<span class="dk-pin" title="Pinned">📌</span>` : "") + (s.parked ? `<span class="dk-pin dk-parked" title="Parked — folded away until you unpark it (still running)">⏸</span>` : "")
+  const pin = (s.pinned ? `<span class="dk-pin" title="Pinned">📌</span>` : "") + (s.parked ? `<span class="dk-pin dk-parked" title="${s.pinned ? "Parked — folds into the stale row once unpinned (still running)" : "Parked — folded into the stale row until you unpark it (still running)"}">⏸</span>` : "")
     // The record file was unreadable at boot and this is the placeholder the
     // server wrote in its place — the agent is back (tmux kept), its
     // name/task/artifacts/notes are not. Shown until the agent is closed.
@@ -1158,10 +1179,10 @@ function initDeckDragAndDrop(el) {
     });
   });
 
-  // Dragover and drop on deck cards. The Pinned and Stale sections are
-  // display-only (no data-group, so handleDrop would refuse) — skip them so
-  // they never paint a drop indicator they cannot honour.
-  const dndCards = [...el.querySelectorAll(".dk[data-sid]")].filter((c) => !c.closest(".deck-group-pinned, .deck-group-stale"));
+  // Dragover and drop on deck cards. The Pinned section and the stale rows
+  // are display-only — skip them so they never paint a drop indicator they
+  // cannot honour.
+  const dndCards = [...el.querySelectorAll(".dk[data-sid]")].filter((c) => !c.closest(".deck-group-pinned, .deck-stale-cards"));
   dndCards.forEach((card) => {
     card.addEventListener("dragover", (e) => {
       e.preventDefault();
@@ -1195,7 +1216,7 @@ function initDeckDragAndDrop(el) {
   });
 
   // Dragover and drop on deck-cards containers (for dropping at end of group)
-  const dndContainers = [...el.querySelectorAll(".deck-cards")].filter((c) => !c.closest(".deck-group-pinned, .deck-group-stale"));
+  const dndContainers = [...el.querySelectorAll(".deck-cards")].filter((c) => !c.closest(".deck-group-pinned") && !c.classList.contains("deck-stale-cards"));
   dndContainers.forEach((container) => {
     container.addEventListener("dragover", (e) => {
       // Only handle if dragging over the container itself or the add button, not over a card
@@ -2310,7 +2331,7 @@ function showCtxMenu(e, sessionId) {
   menu.innerHTML = `
     <div class="cm-item" data-action="focus" data-sid="${sessionId}">Focus ${esc(s.name.toUpperCase())}</div>
     <div class="cm-item" data-action="pin" data-sid="${sessionId}">${s.pinned ? "Unpin" : "Pin"} ${esc(s.name.toUpperCase())}</div>
-    <div class="cm-item" data-action="park" data-sid="${sessionId}" title="${s.parked ? "Bring it back to its group" : "Fold it into the Stale section — keeps running, never archived"}">${s.parked ? "Unpark" : "Park"} ${esc(s.name.toUpperCase())}</div>
+    <div class="cm-item" data-action="park" data-sid="${sessionId}" title="${s.parked ? "Bring it back out of the stale row" : "Fold it into its group's stale row — keeps running, never archived"}">${s.parked ? "Unpark" : "Park"} ${esc(s.name.toUpperCase())}</div>
     ${canClose ? `<div class="cm-sep"></div><div class="cm-item danger" data-action="close" data-sid="${sessionId}">Close ${esc(s.name.toUpperCase())}</div>` : ""}
   `;
   menu.style.display = "block";
@@ -2683,6 +2704,7 @@ function initKeyboard() {
 
 function cycleAgent(direction) {
   const ordered = getDisplayOrder();
+  if (!ordered.length) return;
   const curIdx = ordered.findIndex((s) => s.id === activeSessionId);
   const next = (curIdx + direction + ordered.length) % ordered.length;
   switchSession(ordered[next].id);
@@ -3016,6 +3038,7 @@ async function showMenu(menuId, anchorEl) {
       menuItem("Agent Sorting", "", { submenu: sortSub }),
       menuItem("Only Agents That Need Me", "toggle-needs-filter", { checked: deckFilter === "needs" }),
       menuItem("Fold Stale After", "", { submenu: staleSub }),
+      menuItem("Show Stale Agents", "toggle-show-stale", { checked: deckShowStale }),
       menuItem("Show Quota", "", { submenu: quotaSub }),
       menuItem("Theme", "", { submenu: themeSub }),
       menuItem("Editor", "", { submenu: editorSub }),
@@ -3091,6 +3114,10 @@ async function handleMenuAction(action, item) {
     setDeckFilter(deckFilter === "needs" ? "all" : "needs");
   } else if (action === "set-stale-after") {
     deckStaleAfter = Object.hasOwn(STALE_AFTER_MS, item.dataset.staleAfter) ? item.dataset.staleAfter : "3d";
+    renderDeck();
+    saveUIState();
+  } else if (action === "toggle-show-stale") {
+    deckShowStale = !deckShowStale;
     renderDeck();
     saveUIState();
   } else if (action === "set-quota-from") {

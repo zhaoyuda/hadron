@@ -500,10 +500,14 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #   + test/e2e/m19-artifacts-ux.js (artifacts add/remove UX: Browse popover survives folder clicks (pointerdown close model) + keyboard nav + hidden-files toggle; atomic add with canonical de-dupe; URL validation + escaped labels; remove with 409 drift recovery; dir artifacts — live folder groups where new on-disk files appear automatically; ephemeral file: tabs; add concurrency; viewport clamp)
 #   + test/e2e/m20-agent-ops.js  (agent ops: context-menu Pin → "📌 Pinned" section first in BOTH deck modes, card moved not duplicated, survives 3s refresh + reload; `hadron pin <name>`; `hadron close <name>` → tmux dead + JSON archived + ls --archived + restore, with the dashboard left ON the closed agent: its WS is refused (4404), no reconnect loop, record not blanked/resurrected; in-pane `hadron message` sender attribution + --raw; ambiguous names exit 1, nothing delivered)
 #   + test/e2e/m21-needs-me.js   (triage: cards light on unseen done/blocked with a "N need me" counter; a 1-s dwell on the agent's terminal in a focused window acks it — card goes quiet, ackRev persisted, and the client never PATCHes `state`; an unread agent stays lit when its state moves on; Alt+N jumps to the next unread and wraps; a re-raise on the active agent is acked as the rev moves; "Only Agents That Need Me" keeps the active card and survives a reload; the palette lists all agents (no 8-row cap) with a "needs me" hint; an unread agent whose pane goes to `working` (PATCH twin) goes quiet with no client PATCH — the server acked the turn — and the next done lights it again)
-#   + test/e2e/m22-stale-fold.js (cards + stale fold: a seeded agent whose three timestamps are days old folds into a
-#                                 collapsed "Stale · N" section rendered last (harness `seed(ws)` hook writes it before boot);
-#                                 fresh or timestamp-less agents stay visible; the header toggles the fold and the open state
-#                                 survives the 3-s refresh + a reload; a collapsed fold takes no Alt+N slot while the
+#   + test/e2e/m22-stale-fold.js (cards + stale fold: a seeded agent whose three timestamps are days old folds under its
+#                                 OWN group's "▸ N stale" row — the last line of the group, opened in place with the cards
+#                                 dimmed under the live ones, no global Stale section (harness `seed(ws)` hook writes it before
+#                                 boot); fresh or timestamp-less agents stay visible; a row click toggles that group and the
+#                                 open state (deckStaleOpen = Set of group keys, "status:<state>" in the status layout, which
+#                                 folds per bucket too) survives the 3-s refresh + a reload; View → "Show Stale Agents"
+#                                 (deckShowStale) opens every row, persists, and a row click while it is on closes just that
+#                                 row and turns it off; a closed row takes no Alt+N slot while the
 #                                 palette's full order still reaches it; the active agent never folds; context-menu Park →
 #                                 fold + ⏸ + `parked:true` on disk with tmux alive and nothing archived; PATCH state done
 #                                 pulls the parked card out lit and acking folds it again; Unpark restores; View → Fold

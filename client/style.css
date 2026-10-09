@@ -161,11 +161,19 @@ html, body {
 .deck-group-status .deck-group-label { cursor: default; }
 /* Pinned section: display-only header (no rename/drop affordances). */
 .deck-group-pinned .deck-group-label { cursor: default; color: var(--yellow, #d29922); }
-/* Stale fold: the header is the toggle; folded cards read quieter. */
-.deck-group-stale .deck-group-label { cursor: pointer; color: var(--text3); }
-.deck-group-stale .deck-group-label:hover { color: var(--text2); }
-.deck-group-stale .dk { opacity: .75; }
-.deck-group-stale .dk:hover, .deck-group-stale .dk.active { opacity: 1; }
+/* Stale row: one line at the bottom of a group, the toggle for its folded cards; folded cards read quieter. */
+.deck-stale-row {
+  font-size: 10px;
+  color: var(--text3);
+  text-align: center;
+  cursor: pointer;
+  user-select: none;
+  margin-top: -6px;
+  padding: 0 2px 6px;
+}
+.deck-stale-row:hover { color: var(--text2); }
+.deck-stale-cards .dk { opacity: .7; }
+.deck-stale-cards .dk:hover, .deck-stale-cards .dk.active { opacity: 1; }
 .dk .dk-parked { color: var(--text3); }
 .dk .dk-recovered { color: #d29922; }
 .deck-group-edit {
@@ -2077,6 +2085,10 @@ html, body {
   font-size: 20px;
   text-shadow: 1px 0 0 #3a2810;
 }
+
+/* The stale row is the fold's only affordance: on the planking --text3 is ~2:1, so it takes the sign colour. */
+[data-theme="exploration"] .deck-stale-row { color: #c4a060; text-shadow: 1px 1px 0 #1a1208; }
+[data-theme="exploration"] .deck-stale-row:hover { color: #e0c080; }
 
 /* ── Group labels as carved wood signs ── */
 [data-theme="exploration"] .deck-group-label {

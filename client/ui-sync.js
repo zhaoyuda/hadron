@@ -54,7 +54,10 @@ function saveUIState() {
     deckGroupBy,
     deckFilter,
     deckStaleAfter,
-    deckStaleOpen,
+    // Only keys a current group produces: a renamed or deleted group's key
+    // would otherwise live in localStorage forever and pre-open a later namesake.
+    deckStaleOpen: [...deckStaleOpen].filter((k) => liveStaleKeys().has(k)),
+    deckShowStale,
     quotaShowFrom,
     currentTheme,
     notifyLevel,
@@ -128,7 +131,10 @@ function restoreUIState() {
     if (state.deckGroupBy) deckGroupBy = state.deckGroupBy;
     if (state.deckFilter === "needs" || state.deckFilter === "all") deckFilter = state.deckFilter;
     if (typeof STALE_AFTER_MS === "object" && typeof state.deckStaleAfter === "string" && Object.hasOwn(STALE_AFTER_MS, state.deckStaleAfter)) deckStaleAfter = state.deckStaleAfter;
-    if (typeof state.deckStaleOpen === "boolean") deckStaleOpen = state.deckStaleOpen;
+    // deckStaleOpen was a boolean before the per-group rows (one Stale section);
+    // an old value is dropped, not read as a group key.
+    if (Array.isArray(state.deckStaleOpen)) deckStaleOpen = new Set(state.deckStaleOpen.filter((k) => typeof k === "string" && k.length <= 200));
+    if (typeof state.deckShowStale === "boolean") deckShowStale = state.deckShowStale;
     if (Array.isArray(QUOTA_SHOW_FROM) && QUOTA_SHOW_FROM.includes(state.quotaShowFrom)) quotaShowFrom = state.quotaShowFrom;
     if (state.currentTheme) currentTheme = state.currentTheme;
     if (state.notifyLevel) notifyLevel = state.notifyLevel;

@@ -553,7 +553,7 @@ async function main() {
       const agent = await resolveTargetOrSelf(positional[0]);
       const parked = cmd === "park";
       await api("PATCH", `/api/sessions/${agent.id}`, { parked });
-      console.log(`${parked ? "parked" : "unparked"} ${agent.name} (${agent.id})${parked ? " — folded into the deck's Stale section; tmux and claude keep running" : ""}`);
+      console.log(`${parked ? "parked" : "unparked"} ${agent.name} (${agent.id})${parked ? (agent.pinned ? " — pinned, so it stays under 📌 Pinned and folds once unpinned; tmux and claude keep running" : " — folded into its group's stale row on the deck; tmux and claude keep running") : ""}`);
       break;
     }
     case "close": {
@@ -1185,7 +1185,7 @@ Commands:
        (custom launchers are defined in .hadron/config.json "launchers" — see docs/CONFIGURATION.md)
   hadron pin [name|id]                     pin an agent to the deck's 📌 Pinned section (no arg = self)
   hadron unpin [name|id]                   unpin (no arg = self)
-  hadron park [name|id]                    fold an agent into the deck's Stale section (nothing is killed
+  hadron park [name|id]                    fold an agent into its group's stale row (nothing is killed
                                            or archived; it comes back when it next needs you) (no arg = self)
   hadron unpark [name|id]                  unfold (no arg = self)
   hadron close [name|id ...]               archive agent(s): tmux dies, JSON kept (no arg = self;
