@@ -103,6 +103,34 @@ try {
     (await page.locator("#artifact-container .md-preview").innerText().catch(() => "")).includes("md-v2")),
     "markdown artifact silently auto-reloads on disk change (early write included)");
 
+  // ── the silent reload keeps the reader's place ──
+  // A long file the agent keeps appending to: scrolled partway → the same
+  // offset after the rewrite; scrolled to the bottom → still at the bottom of
+  // the longer file (following the tail). Before, every re-render landed at 0.
+  const longMd = (n, tail) => "# long\n\n" + Array.from({ length: n }, (_, i) => `paragraph ${i + 1} — lorem ipsum dolor sit amet, consectetur adipiscing elit.`).join("\n\n") + `\n\n${tail}\n`;
+  writeFileSync(mdPath, longMd(120, "TAIL-1"));
+  r.ok(await until(async () => (await page.locator("#artifact-container .md-preview").innerText().catch(() => "")).includes("TAIL-1")), "long markdown painted");
+  const pane = () => page.locator("#artifact-container .artifact-persistent");
+  const scrollInfo = () => pane().evaluate((el) => ({ top: el.scrollTop, max: el.scrollHeight - el.clientHeight }));
+  const first = await scrollInfo();
+  r.ok(first.max > 600, `harness: the pane scrolls (max ${first.max})`);
+  await pane().evaluate((el) => { el.scrollTop = 400; });
+  await wait(300);
+  writeFileSync(mdPath, longMd(120, "TAIL-2"));
+  r.ok(await until(async () => (await page.locator("#artifact-container .md-preview").innerText().catch(() => "")).includes("TAIL-2")), "rewrite reloaded (TAIL-2 on screen)");
+  await wait(200);
+  const afterMid = await scrollInfo();
+  r.ok(Math.abs(afterMid.top - 400) <= 2, `scrolled partway stays where it was after the silent reload (scrollTop ${afterMid.top}, was 400)`);
+  await pane().evaluate((el) => { el.scrollTop = el.scrollHeight; });
+  await wait(300);
+  writeFileSync(mdPath, longMd(160, "TAIL-3"));
+  r.ok(await until(async () => (await page.locator("#artifact-container .md-preview").innerText().catch(() => "")).includes("TAIL-3")), "a longer rewrite reloaded (TAIL-3 on screen)");
+  await wait(200);
+  const afterEnd = await scrollInfo();
+  r.ok(afterEnd.max > afterMid.max && afterEnd.max - afterEnd.top <= 2, `a reader at the bottom follows the tail of the longer file (scrollTop ${afterEnd.top} of ${afterEnd.max})`);
+  writeFileSync(mdPath, "# md-v2");
+  r.ok(await until(async () => (await page.locator("#artifact-container .md-preview").innerText().catch(() => "")).includes("md-v2")), "harness: short file back");
+
   // ── split mode: HTML pane is watched too ──
   await page.evaluate(() => cycleLayout()); // tabs → vsplit; both artifacts become panes
   const paneFrame = page.frameLocator('.split-pane[data-html-path] iframe[data-html-iframe="1"]');

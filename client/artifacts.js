@@ -18,6 +18,58 @@
 
 
 // ═══ ARTIFACT CACHE + PANES ═══
+// Scroll memory across a silent re-render (the mtime poller, or a tab switch
+// that finds the file changed): the artifact element is thrown away and built
+// again, which lands the reader back at the top of a file the agent is still
+// writing (prod 2026-10-08: "it keeps yanking me back up"). Remember where the
+// pane and any scrolled descendant (a CSV table) were, restore after the new
+// content is in; a reader at the bottom stays at the bottom as the file grows.
+const artifactScrollMemo = new Map(); // cache key -> { top, left, atBottom, inner: [{ path, top, left }] }
+function rememberArtifactScroll(key, el) {
+  if (!el || !el.isConnected) return;
+  const inner = [];
+  for (const d of el.querySelectorAll("*")) {
+    if (!(d.scrollTop > 0 || d.scrollLeft > 0)) continue;
+    // Identify the descendant by its class path so the rebuilt DOM can be matched.
+    const path = [];
+    for (let n = d; n && n !== el; n = n.parentElement) {
+      const cls = (n.getAttribute("class") || "").trim();
+      path.unshift(cls ? `.${cls.split(/\s+/).join(".")}` : n.tagName.toLowerCase());
+    }
+    const sel = path.join(" > ");
+    // Several blocks can share one class path (two code fences): keep the index.
+    let idx = 0;
+    try { idx = Array.prototype.indexOf.call(el.querySelectorAll(sel), d); } catch {}
+    inner.push({ path: sel, idx: Math.max(0, idx), top: d.scrollTop, left: d.scrollLeft });
+  }
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 2;
+  if (!(el.scrollTop > 0 || el.scrollLeft > 0 || inner.length)) { artifactScrollMemo.delete(key); return; }
+  artifactScrollMemo.set(key, { top: el.scrollTop, left: el.scrollLeft, atBottom, inner });
+}
+function restoreArtifactScroll(key, el) {
+  const m = artifactScrollMemo.get(key);
+  if (!m) return;
+  artifactScrollMemo.delete(key);
+  if (!el || !el.isConnected) return;
+  const apply = () => {
+    if (!el.isConnected) return;
+    el.scrollTop = m.atBottom ? el.scrollHeight : m.top;
+    el.scrollLeft = m.left;
+    for (const i of m.inner) {
+      let d = null;
+      try { d = el.querySelectorAll(i.path)[i.idx || 0] || null; } catch {}
+      if (d) { d.scrollTop = i.top; d.scrollLeft = i.left; }
+    }
+  };
+  apply();
+  // Layout can still move after the first paint (images, late fonts): apply
+  // once more on the next frame and after every image in the view loads.
+  requestAnimationFrame(apply);
+  for (const img of el.querySelectorAll("img")) {
+    if (!img.complete) img.addEventListener("load", apply, { once: true });
+  }
+}
+
 // Persistent artifact cache: "sessionId:tabId" -> { el, mtime, hasIframe }
 // These elements live hidden in #artifact-pool and get moved into view when needed
 const artifactCache = new Map();
@@ -96,7 +148,8 @@ async function showArtifactInContainer(container, session, tabId) {
         }
       } catch {}
     }
-    // Stale — evict and re-render
+    // Stale — evict and re-render (where the reader was comes along)
+    rememberArtifactScroll(key, cached.el);
     if (cached.el.parentNode) cached.el.parentNode.removeChild(cached.el);
     artifactCache.delete(key);
   }
@@ -130,6 +183,8 @@ async function showArtifactInContainer(container, session, tabId) {
     // mtime counts as "appeared" — never re-render into the same failure.
     entry.missing = !hasIframe && mtime == null;
     entry.missingMtime = missingMtime;
+    if (mtime != null && !hasIframe) restoreArtifactScroll(key, artEl); // content is in: put the reader back
+    else artifactScrollMemo.delete(key);
   });
 }
 
@@ -214,6 +269,7 @@ function reloadCurrentArtifact() {
   }
   // Close vim if open on the cached element
   if (cached?.el) closeVimEditor(cached.el);
+  if (cached?.el) rememberArtifactScroll(key, cached.el);
   if (cached?.el?.parentNode) cached.el.parentNode.removeChild(cached.el);
   artifactCache.delete(key);
   const container = document.getElementById("artifact-container");

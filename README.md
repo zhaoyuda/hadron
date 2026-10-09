@@ -183,7 +183,7 @@ Cost: one `tmux list-panes -a` per second reads the foreground command, alt-scre
 
 ### Live Artifacts
 
-File-based artifacts (`.py`, `.sql`, `.md`, `.csv`, etc.) are monitored for changes via mtime polling. When a file is modified on disk — by another agent, vim, or any editor — the artifact view auto-reloads within 3 seconds.
+File-based artifacts (`.py`, `.sql`, `.md`, `.csv`, etc.) are monitored for changes via mtime polling. When a file is modified on disk — by another agent, vim, or any editor — the artifact view auto-reloads within 3 seconds, keeping your scroll position (at the bottom of a file the agent is still writing, it follows the tail).
 
 Marimo notebooks run with `--watch`, so cell edits on disk are picked up by the running marimo server automatically.
 

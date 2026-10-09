@@ -459,7 +459,11 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #   + test/e2e/m9-artifact-reload.js (mtime poller baseline + HTML update pill, tab & split; a tab opened before the
 #                                    file exists paints it when it appears; live jupyter iframes get the pill +
 #                                    cache-busted proxy reload (marimo --watch reloads itself); a directory-as-file
-#                                    artifact is not re-rendered every poll — proxies route-stubbed, no kernels needed)
+#                                    artifact is not re-rendered every poll — proxies route-stubbed, no kernels needed; the
+#                                    silent md/csv reload keeps the reader's place (prod 2026-10-08: every rewrite by the
+#                                    agent yanked the preview back to the top): scrolled partway → same scrollTop after the
+#                                    rewrite, scrolled to the bottom → bottom of the longer file (rememberArtifactScroll /
+#                                    restoreArtifactScroll around the cache eviction in artifacts.js))
 #   + test/e2e/m10-clipboard.js  (OSC 52 from pane → browser clipboard; read-request ignored)
 #   + test/e2e/m11-terminal-paths.js (clickable terminal path → resolve vs pane cwd → open as current agent's artifact)
 #   + test/e2e/m12-artifact-folders.js (artifact folder collapse persists across the 3s deck refresh)
