@@ -32,7 +32,7 @@ let openTabsPerSession = {}; // { sessionId: Set of tab ids }
 let layoutMode = "tabs"; // "tabs", "vsplit", "hsplit"
 let perSessionTab = {}; // { sessionId: activeTab }
 let perSessionLayout = {}; // { sessionId: layoutMode }
-let collapsedArtFolders = {}; // { sessionId: Set of collapsed artifact-folder dirs } — survives the 3s re-render
+let collapsedArtFolders = {}; // { sessionId: Set of artifact-folder dirs toggled AWAY from their default } — folder groups default open (member = collapsed), Changed/Core default closed (member = opened); survives the 3s re-render
 let workspaceGroups = null; // persisted group order from config, or null if not loaded
 let groupConfig = {}; // per-group attributes like { expandable: false }
 let deckSortMode = "state"; // "state", "manual", "name"
@@ -1342,11 +1342,14 @@ function renderRightPanel() {
       const isOpen = group.classList.toggle("open");
       const dirIcon = hdr.querySelector(".af-dir-icon");
       if (dirIcon) dirIcon.innerHTML = folderIcon(isOpen, 15);
-      // Remember the collapse so the 3s deck refresh doesn't re-open it.
+      // Remember the toggle so the 3s deck refresh doesn't undo it: the set
+      // holds the deviation from the group's default (open for folders,
+      // closed for Changed / Core).
       const dir = group.dataset.afDir;
       if (dir) {
         const set = (collapsedArtFolders[activeSession.id] ||= new Set());
-        if (isOpen) set.delete(dir); else set.add(dir);
+        const closedByDefault = group.dataset.afDefault === "closed";
+        if (isOpen === closedByDefault) set.add(dir); else set.delete(dir);
       }
     });
   });
@@ -1446,6 +1449,8 @@ function renderRightPanel() {
 }
 
 // Sentinel key in collapsedArtFolders for the Changed section (never a real dir).
+// Changed and Core are collapsed by DEFAULT, so for these two keys membership
+// means "the user opened it" (the toggle handler inverts on data-af-default).
 const CHANGED_GROUP = "//changed";
 
 // "Changed · N": files this agent's claude session wrote (server `files`,
@@ -1473,8 +1478,8 @@ function buildCoreSection(activeSession) {
   const f = activeSession.files;
   if (!f || !Array.isArray(f.core) || !f.core.length) return "";
   const cwd = activeSession.cwd ? activeSession.cwd.replace(/\/+$/, "") + "/" : null;
-  const collapsed = (collapsedArtFolders[activeSession.id] || new Set()).has(CORE_GROUP);
-  let html = `<div class="af-group af-core${collapsed ? "" : " open"}" data-af-dir="${CORE_GROUP}">`;
+  const opened = (collapsedArtFolders[activeSession.id] || new Set()).has(CORE_GROUP);
+  let html = `<div class="af-group af-core${opened ? " open" : ""}" data-af-dir="${CORE_GROUP}" data-af-default="closed">`;
   html += `<div class="af-group-hdr" title="The files this session keeps coming back to, ranked by reads and writes in its transcript. Hover a row to pin it (moves to Pinned) or hide it."><span class="af-arrow">&#9654;</span> <span class="af-label">Core</span><span class="af-count">${f.core.length}${f.truncated || f.partial ? "+" : ""}</span>${coreDismissErr[activeSession.id] ? `<span class="af-core-err" title="${esc(coreDismissErr[activeSession.id])}">!</span>` : ""}</div>`;
   html += `<div class="af-group-body">`;
   f.core.forEach((e) => {
@@ -1594,8 +1599,8 @@ function buildChangedSection(activeSession) {
   if (!f || !Array.isArray(f.changed) || !f.changed.length) return "";
   const cwd = activeSession.cwd ? activeSession.cwd.replace(/\/+$/, "") + "/" : null;
   const others = otherWriters(activeSession);
-  const collapsed = (collapsedArtFolders[activeSession.id] || new Set()).has(CHANGED_GROUP);
-  let html = `<div class="af-group af-changed${collapsed ? "" : " open"}" data-af-dir="${CHANGED_GROUP}">`;
+  const opened = (collapsedArtFolders[activeSession.id] || new Set()).has(CHANGED_GROUP);
+  let html = `<div class="af-group af-changed${opened ? " open" : ""}" data-af-dir="${CHANGED_GROUP}" data-af-default="closed">`;
   html += `<div class="af-group-hdr"><span class="af-arrow">&#9654;</span> <span class="af-label">Changed</span><span class="af-count" title="${f.total} file${f.total === 1 ? "" : "s"} written this session${f.truncated ? " (at least — the list was capped)" : ""}${f.partial ? " (a record was too large to read — some writes may be missing)" : ""}${f.complete ? "" : " (still reading the transcript)"}">${f.total}${f.truncated || f.partial ? "+" : ""}${f.complete ? "" : "…"}</span></div>`;
   html += `<div class="af-group-body">`;
   f.changed.forEach((e) => {
@@ -1612,11 +1617,11 @@ function buildChangedSection(activeSession) {
 }
 
 function buildArtifactsSection(activeSession) {
-  // Changed (what the session wrote) → Core (what it keeps returning to) →
-  // Pinned (what the operator or the agent pinned: the artifacts).
-  let html = buildChangedSection(activeSession);
-  html += buildCoreSection(activeSession);
-  html += `<div class="rp-hdr" title="Files, folders and URLs pinned to this agent — by you here, or by the agent with \`hadron artifacts pin\`">Pinned</div>`;
+  // Pinned (what the operator or the agent pinned: the artifacts) on top —
+  // it is the curated list; Changed (what the session wrote) and Core (what
+  // it keeps returning to) follow, collapsed until opened, so a busy session's
+  // transcript never pushes the pins out of view.
+  let html = `<div class="rp-hdr" title="Files, folders and URLs pinned to this agent — by you here, or by the agent with \`hadron artifacts pin\`">Pinned</div>`;
   const artifacts = activeSession.artifacts || [];
 
   // ── Dir artifacts (type "dir"): live folder groups ──
@@ -1728,7 +1733,9 @@ function buildArtifactsSection(activeSession) {
   html += `<div class="af-add af-changes-btn" id="af-changes-btn" tabindex="0" title="What git sees in this agent's directory: changed files with +/− and a diff per file (read-only)">⎇ Changes</div>`;
 
 
-  // Related agents section
+  // Changed and Core (what the transcript says), collapsed by default, then Related
+  html += buildChangedSection(activeSession);
+  html += buildCoreSection(activeSession);
   html += `<div class="rp-hdr rp-hdr-related" style="margin-top:12px">Related</div>`;
   const related = activeSession.relatedAgents || [];
   related.forEach((rid) => {

@@ -157,12 +157,17 @@ try {
   writeFileSync(join(env.ws, "adir", "inside.md"), "# inside");
   const unreadable = join(env.ws, "unreadable.md");
   writeFileSync(unreadable, "secret"); chmodSync(unreadable, 0o000);
+  // 1×1 and 2×1 red PNGs (generated with zlib/struct; the width is the proof).
+  const PNG1 = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC", "base64");
+  const PNG2 = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAIAAAB7QOjdAAAADUlEQVR4nGP4z8AARAAI/gH/xp559wAAAABJRU5ErkJggg==", "base64");
+  const shot = join(env.ws, "shot.png");
+  writeFileSync(shot, PNG1);
   const m9 = (await (await fetch(`${env.baseUrl}/api/sessions`, { headers: authHeaders(env.token) })).json()).find((x) => x.id === "m9");
   await fetch(`${env.baseUrl}/api/sessions/m9`, {
     method: "PATCH", headers: authHeaders(env.token),
     body: JSON.stringify({ artifacts: [...m9.artifacts,
       { type: "file", value: "late.html" }, { type: "file", value: "late.md" },
-      { type: "file", value: "live.ipynb" }, { type: "file", value: "adir" }, { type: "file", value: "unreadable.md" }] }),
+      { type: "file", value: "live.ipynb" }, { type: "file", value: "adir" }, { type: "file", value: "unreadable.md" }, { type: "file", value: "shot.png" }] }),
   });
   const seeded = (await (await fetch(`${env.baseUrl}/api/sessions`, { headers: authHeaders(env.token) })).json()).find((x) => x.id === "m9").artifacts;
   r.ok(seeded.some((a) => a.type === "dir" && /adir$/.test(a.value)) && !seeded.some((a) => a.type === "file" && /adir$/.test(a.value)),
@@ -232,6 +237,30 @@ try {
   r.ok(await until(() => adirGroup.count()), "the folder shows as a folder group in the panel");
   if (!(await adirGroup.evaluate((el) => el.classList.contains("open")).catch(() => false))) await adirGroup.locator(".af-group-hdr").click();
   r.ok(await until(() => adirGroup.locator(".af", { hasText: "inside.md" }).count()), "…opened, it lists the files inside (the panel is the folder browser)");
+
+  // ── a png artifact is a picture, not the text editor's rendering of its
+  // bytes (prod 2026-10-09: "点了之后显示乱码"); a rewrite on disk reloads it
+  // silently with a fresh URL.
+  await page.locator(".af[data-art-idx]", { hasText: "shot.png" }).click();
+  const img = page.locator("#artifact-container img.artifact-image");
+  await img.waitFor({ timeout: 10000 });
+  r.ok(await until(() => img.evaluate((el) => el.complete && el.naturalWidth === 1)) && (await page.locator("#artifact-container .text-edit-area").count()) === 0,
+    "a png artifact renders as an image (1 px wide, no text editor)");
+  await wait(1000);
+  writeFileSync(shot, PNG2);
+  r.ok(await until(() => page.locator("#artifact-container img.artifact-image").evaluate((el) => el.complete && el.naturalWidth === 2).catch(() => false)),
+    "…rewritten on disk → the picture reloads within the poll (2 px wide now)");
+  // …and in split mode the image pane is watched like an HTML pane (silently).
+  await page.evaluate(() => cycleLayout()); // tabs → vsplit
+  const imgPane = page.locator(".split-pane[data-img-path] img.artifact-image");
+  await imgPane.first().waitFor({ timeout: 10000 });
+  r.ok(await until(() => imgPane.first().evaluate((el) => el.complete && el.naturalWidth === 2).catch(() => false)), "split pane paints the picture");
+  await wait(1500); // let the watch baseline settle
+  writeFileSync(shot, PNG1);
+  r.ok(await until(() => page.locator(".split-pane[data-img-path] img.artifact-image").first().evaluate((el) => el.complete && el.naturalWidth === 1).catch(() => false)), "…and repaints it when the file changes (1 px wide again), no pill");
+  r.ok((await page.locator(".split-pane[data-img-path] .artifact-update-pill").count()) === 0, "…no update pill on an image pane");
+  await page.evaluate(() => cycleLayout()); // vsplit → hsplit
+  await page.evaluate(() => cycleLayout()); // hsplit → tabs
 
   // ── a file artifact whose HEAD succeeds but GET fails (unreadable) must
   // not be re-rendered every poll: "missing" means "not there YET", and the

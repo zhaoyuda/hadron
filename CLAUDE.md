@@ -479,7 +479,11 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #   + test/e2e/m9-artifact-reload.js (mtime poller baseline + HTML update pill, tab & split; a tab opened before the
 #                                    file exists paints it when it appears; live jupyter iframes get the pill +
 #                                    cache-busted proxy reload (marimo --watch reloads itself); a directory-as-file
-#                                    artifact is not re-rendered every poll — proxies route-stubbed, no kernels needed; the
+#                                    artifact is not re-rendered every poll — proxies route-stubbed, no kernels needed; a png
+#                                    artifact is an <img> (renderImageArtifact — IMAGE_EXTS = the server's IMAGE_MIMES minus svg, which stays
+#                                    an editor file (markdown previews still get it served as an image), cache-busted by mtime, the poller's silent
+#                                    reload repaints it, split panes watched like HTML panes via data-img-path; before, the
+#                                    text editor painted the bytes as garbage); the
 #                                    silent md/csv reload keeps the reader's place (prod 2026-10-08: every rewrite by the
 #                                    agent yanked the preview back to the top): scrolled partway → same scrollTop after the
 #                                    rewrite, scrolled to the bottom → bottom of the longer file (rememberArtifactScroll /
@@ -538,9 +542,16 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                                 switches = fitted xterm minus the status-line rows)
 #   + test/e2e/m26-changed-files.js (file panel Changed / Core / Pinned: seeded transcripts (CLAUDE_CONFIG_DIR
 #                                 relocated) → CHANGED rows newest write first, relative to the agent's cwd, "2× 2m",
-#                                 a Read-only file absent, two agents in one cwd list their own; CORE ranks every
-#                                 touched file by 3·writes + reads (ties by recency, reads included), sits between
-#                                 Changed and Pinned; 📌 on a Core row → a file artifact under Pinned + the row leaves
+#                                 a Read-only file absent, two agents in one cwd list their own; the panel order is
+#                                 Pinned, Changed, Core, Related — Changed and Core start COLLAPSED (collapsedArtFolders
+#                                 holds the deviation from a group's default: data-af-default="closed"), a header click
+#                                 opens one and it stays open across the 3-s refresh; CORE ranks every touched file by
+#                                 3·writes + reads (ties by recency, reads included) and only INSIDE the workspace
+#                                 (namedUnderWorkspace in resolvedSession's coreSkip — lexical, realpath fallback memoised
+#                                 30 s, a ranking hint and NOT the insideWorkspace jail; a /tmp write is a Changed row, never
+#                                 core, prod 2026-10-09: a young agent's Core was all /tmp screenshots; wire-level proof in
+#                                 test-changes.js); 📌 on a Core row
+#                                 → a file artifact under Pinned + the row leaves
 #                                 Core (the server drops pinned files from core); × → `coreDismissed` on the record,
 #                                 hidden across the 3-s refresh, Changed still lists it; an Edit appended to a
 #                                 transcript re-ranks Core and puts the row on top of Changed, and a file both agents

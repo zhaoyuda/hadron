@@ -132,18 +132,30 @@ try {
   const group = page.locator(".af-changed");
   const rows = () => page.locator(".af-changed .af-changed-row .af-label").allTextContents();
   r.ok(await until(async () => (await rows()).join() === "src/app.js,notes.md,README.md"), `panel shows CHANGED rows newest first, relative to the agent's cwd (${(await rows()).join()})`);
+  // Pinned on top; Changed and Core below it, collapsed until opened (the
+  // transcript's lists never push the pins out of view).
+  r.ok(!(await group.evaluate((el) => el.classList.contains("open"))) && !(await page.locator(".af-core").evaluate((el) => el.classList.contains("open"))), "Changed and Core start collapsed");
+  r.ok(await group.locator(".af-group-hdr").isVisible() && (await group.locator(".af-changed-row").first().isVisible()) === false, "…header with the count visible, rows hidden");
+  const pinnedHdrY = async () => (await page.locator(".rp-hdr", { hasText: "Pinned" }).first().boundingBox()).y;
+  const relatedHdrY = async () => (await page.locator(".rp-hdr-related").boundingBox()).y;
+  r.ok((await pinnedHdrY()) < (await group.boundingBox()).y && (await group.boundingBox()).y < (await page.locator(".af-core").boundingBox()).y && (await page.locator(".af-core").boundingBox()).y < (await relatedHdrY()), "order: Pinned, then Changed, then Core, then Related");
+  await group.locator(".af-group-hdr").click();
+  await page.locator(".af-core .af-group-hdr").click();
+  r.ok(await group.locator(".af-changed-row").first().isVisible() && await page.locator(".af-core .af-core-row").first().isVisible(), "a header click opens each");
+  await wait(3500);
+  r.ok(await group.evaluate((el) => el.classList.contains("open")) && await page.locator(".af-core").evaluate((el) => el.classList.contains("open")), "…and both stay open across the 3-s refresh");
   r.ok((await group.locator(".af-count").textContent()).trim() === "3", `header count 3 (${(await group.locator(".af-count").textContent()).trim()})`);
   const subs = await page.locator(".af-changed .af-changed-row .af-sub").allTextContents();
   r.ok(subs[0].trim() === "2× 2m" && subs[2].trim() === "30m", `rows carry write count + age: "2× 2m", "30m" (${JSON.stringify(subs)})`);
   const pinnedHdr = page.locator(".rp-hdr", { hasText: "Pinned" });
-  r.ok((await pinnedHdr.count()) === 1 && (await page.locator(".rp-hdr", { hasText: "Artifacts" }).count()) === 0 && (await page.locator(".af-changed").boundingBox()).y < (await pinnedHdr.first().boundingBox()).y, "the group sits above the Pinned header (no Artifacts header any more)");
+  r.ok((await pinnedHdr.count()) === 1 && (await page.locator(".rp-hdr", { hasText: "Artifacts" }).count()) === 0, "the header reads Pinned (no Artifacts header any more)");
   r.ok((await page.locator("#af-add-btn").textContent()).trim() === "+ pin a file", `the add button says "+ pin a file" (${(await page.locator("#af-add-btn").textContent()).trim()})`);
 
   // ── Core: heat ranking, pin, dismiss ───────────────────────────────────
   const coreRows = () => page.locator(".af-core .af-core-row .af-label").allTextContents();
   r.ok(await until(async () => (await coreRows()).join() === "src/app.js,notes.md,README.md,src/util.js"), `CORE ranks by heat: app.js (2 writes) first, notes before README (tie → newer), the read-only util.js last (${(await coreRows()).join()})`);
   const coreGroup = page.locator(".af-core");
-  r.ok((await coreGroup.boundingBox()).y > (await group.boundingBox()).y && (await coreGroup.boundingBox()).y < (await pinnedHdr.first().boundingBox()).y, "…between Changed and Pinned");
+  r.ok((await coreGroup.boundingBox()).y > (await group.boundingBox()).y && (await coreGroup.boundingBox()).y > (await pinnedHdr.first().boundingBox()).y, "…below Changed, below Pinned");
   const coreSubs = await page.locator(".af-core .af-core-row .af-sub").allTextContents();
   r.ok(coreSubs[0].trim() === "2× 2m" && coreSubs[3].trim() === "1× 20m", `rows carry touch count + age (${JSON.stringify(coreSubs)})`);
   r.ok(alpha.core.length === 4 && alpha.core[0].reads === 0 && alpha.core[3].reads === 1 && alpha.core[3].writes === 0, `wire: files.core carries the ranked entries with reads (${JSON.stringify(alpha.core.map((e) => [rel(e.path), e.writes, e.reads]))})`);
@@ -175,9 +187,14 @@ try {
 
   // live update: a new edit lands on top — and beta wrote util.js too, so the
   // row says so.
-  appendFileSync(join(transcriptDir, `${SIDS.alpha}.jsonl`), tool("Edit", { file_path: join(ws, "src", "util.js"), old_string: "1", new_string: "3" }));
-  r.ok(await until(async () => (await rows())[0] === "src/util.js" && (await rows()).length === 4), `an Edit appended to the transcript puts util.js on top within poll + refresh (${(await rows()).join()})`);
-  r.ok(await until(async () => (await group.locator(".af-count").textContent()).trim() === "4"), "…count 4");
+  // …and a scratch file written under /tmp (a screenshot helper) is a fact
+  // for Changed but never Core: Core is the working set inside the workspace.
+  const scratch = join(tmpdir(), `m26-scratch-${process.pid}.png`);
+  appendFileSync(join(transcriptDir, `${SIDS.alpha}.jsonl`), tool("Write", { file_path: scratch, content: "x" }, at(45)) + tool("Edit", { file_path: join(ws, "src", "util.js"), old_string: "1", new_string: "3" }));
+  r.ok(await until(async () => (await rows())[0] === "src/util.js" && (await rows()).length === 5), `an Edit appended to the transcript puts util.js on top within poll + refresh (${(await rows()).join()})`);
+  r.ok(await until(async () => (await group.locator(".af-count").textContent()).trim() === "5"), "…count 5");
+  r.ok((await rows()).includes(scratch), `Changed lists the /tmp write (${(await rows()).join()})`);
+  r.ok(!(await coreRows()).includes(scratch) && (await filesOf("alpha")).changed.some((e) => e.path === scratch) && !(await filesOf("alpha")).core.some((e) => e.path === scratch), "…Core does not, on the panel and on the wire (a path outside the workspace is never core)");
   const alsoOf = (label) => page.locator(".af-changed .af-changed-row", { hasText: label }).locator(".af-also").allTextContents();
   r.ok(await until(async () => (await alsoOf("src/util.js")).join() === "also Beta"), `util.js, written by both agents, says "also Beta" (${(await alsoOf("src/util.js")).join()})`);
   r.ok((await alsoOf("notes.md")).length === 0, "a file only alpha wrote carries no hint");
@@ -187,7 +204,7 @@ try {
   await group.locator(".af-group-hdr").click();
   r.ok(!(await group.evaluate((el) => el.classList.contains("open"))), "header click collapses the group");
   await wait(3500);
-  r.ok(!(await page.locator(".af-changed").evaluate((el) => el.classList.contains("open"))) && (await page.locator(".af-changed .af-count").textContent()).trim() === "4", "…and it stays collapsed across the 3-s refresh, count still shown");
+  r.ok(!(await page.locator(".af-changed").evaluate((el) => el.classList.contains("open"))) && (await page.locator(".af-changed .af-count").textContent()).trim() === "5", "…and it stays collapsed across the 3-s refresh, count still shown");
   await page.locator(".af-changed .af-group-hdr").click();
   r.ok(await page.locator(".af-changed").evaluate((el) => el.classList.contains("open")), "…click again re-opens it");
 

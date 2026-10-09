@@ -305,8 +305,12 @@ function startArtifactMtimePolling() {
   // directly. Their iframe was just created from the current file — HEAD now to
   // record what's on screen as the baseline (404 → `missing`: the pane shows an
   // error until the file appears, then reloads silently).
-  htmlPaneWatches = Array.from(document.querySelectorAll(".split-pane[data-html-path]"))
-    .map((el) => ({ el, path: el.dataset.htmlPath, mtime: null, missing: false }));
+  htmlPaneWatches = [
+    ...Array.from(document.querySelectorAll(".split-pane[data-html-path]")).map((el) => ({ el, path: el.dataset.htmlPath, mtime: null, missing: false })),
+    // Image panes too: a picture has no state to lose, so a change repaints
+    // it silently instead of raising the pill.
+    ...Array.from(document.querySelectorAll(".split-pane[data-img-path]")).map((el) => ({ el, path: el.dataset.imgPath, mtime: null, missing: false, image: true })),
+  ];
   for (const w of htmlPaneWatches) {
     fetch(`/api/file?path=${encodeURIComponent(w.path)}`, { method: "HEAD" })
       .then((r) => { if (w.mtime !== null) return; if (r.ok) w.mtime = r.headers.get("X-File-Mtime"); else w.missing = true; })
@@ -358,7 +362,9 @@ function startArtifactMtimePolling() {
         const r = await fetch(`/api/file?path=${encodeURIComponent(w.path)}`, { method: "HEAD" });
         const mtime = r.headers.get("X-File-Mtime");
         if (!mtime) continue;
-        if (w.missing) {
+        if (w.image) {
+          if (w.missing || mtime !== w.mtime) renderImageArtifact(w.el, w.path, (m) => { w.mtime = m; w.missing = m == null; });
+        } else if (w.missing) {
           reloadHTMLPaneFromDisk(w.el, w.path, (m) => { w.mtime = m; w.missing = m == null; });
         } else if (mtime !== w.mtime) {
           showArtifactUpdatePill(w.el, () =>
@@ -447,6 +453,9 @@ function renderPaneContent(pane, tabId, session) {
     } else {
       if (isHTMLFile(art.value)) {
         renderHTMLArtifact(pane, art.value);
+      } else if (isImageFile(art.value)) {
+        pane.dataset.imgPath = art.value; // the mtime poller reloads it silently (startArtifactMtimePolling)
+        renderImageArtifact(pane, art.value);
       } else {
         pane.innerHTML = `<div class="artifact-file-loading">Loading...</div>`;
         fetch(`/api/file?path=${encodeURIComponent(art.value)}`)
@@ -474,6 +483,30 @@ function renderPaneContent(pane, tabId, session) {
 }
 
 // ═══ CSV TABLE VIEWER ═══
+
+// The extensions /api/file serves as bytes (server IMAGE_MIMES): shown as a
+// picture, never fed to the text editor (which painted a png as garbage).
+const IMAGE_EXTS = /\.(png|jpe?g|gif|webp|ico|bmp|avif)$/i;
+function isImageFile(filePath) { return IMAGE_EXTS.test(filePath || ""); }
+// Fetches the picture's mtime first so the poller has its baseline and a
+// disk change (the agent re-renders a chart) reloads it silently with a
+// fresh URL; a missing file shows the usual error until it appears.
+function renderImageArtifact(container, filePath, onMeta) {
+  container.innerHTML = `<div class="artifact-file-loading">Loading...</div>`;
+  headMtime(filePath).then((mtime) => {
+    if (mtime == null) {
+      container.innerHTML = `<div class="artifact-file-error">Could not load file: ${esc(filePath)}</div>`;
+      if (onMeta) onMeta(null, false, false, null);
+      return;
+    }
+    const name = filePath.split("/").pop();
+    container.innerHTML = `<div class="artifact-image-wrap"><img class="artifact-image" src="/api/file?path=${encodeURIComponent(filePath)}&v=${encodeURIComponent(mtime)}" alt="${esc(name)}" title="${esc(name)} — click to view at full size"></div>`;
+    const img = container.querySelector(".artifact-image");
+    img.addEventListener("click", () => img.classList.toggle("full"));
+    img.addEventListener("error", () => { container.innerHTML = `<div class="artifact-file-error">Could not load image: ${esc(filePath)}</div>`; });
+    if (onMeta) onMeta(mtime, false);
+  });
+}
 
 function isCSVFile(filePath) {
   if (!filePath) return false;
@@ -944,6 +977,9 @@ function renderArtifactView(container, artifact, onMeta) {
         // re-sets the iframe src instead of destroying the cache entry.
         if (onMeta) onMeta(mtime, false, true);
       });
+  } else if (isImageFile(artifact.value)) {
+    container.dataset.artValue = "";
+    renderImageArtifact(container, artifact.value, onMeta);
   } else {
     container.dataset.artValue = "";
     container.innerHTML = `<div class="artifact-file-loading">Loading...</div>`;

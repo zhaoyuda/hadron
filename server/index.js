@@ -1171,7 +1171,11 @@ function resolvedSession(s, { authenticated = false } = {}) {
   let fw = null;
   if (authenticated && files) {
     const hidden = coreHidden(s);
-    fw = filesWire(files, { coreSkip: (p) => hidden.has(sessionFilePath(s, p)) });
+    // Core is the session's working set INSIDE the workspace: scratch files
+    // under /tmp (a screenshot script, its pngs) are written once and never
+    // the agent's core, however young the session (prod 2026-10-09: a fresh
+    // agent's Core was all /tmp). Changed stays factual and lists them.
+    fw = filesWire(files, { coreSkip: (p) => { const abs = sessionFilePath(s, p); return hidden.has(abs) || !namedUnderWorkspace(abs); } });
   }
   return {
     ...rest,
@@ -1960,6 +1964,31 @@ function validateAndCanonicalizeArtifact(entry, agentCwd, { stored = null } = {}
   return { item };
 }
 
+// Does the path READ as part of the workspace? A ranking hint for the Core
+// list, not a jail: the path as claude named it, or its real path when it
+// exists (a workspace reached through a symlinked parent), counts; a deleted
+// file keeps its verdict; a symlink inside the workspace that points outside
+// still counts. Lexical first, so the common case costs no stat; the realpath
+// fallback for everything else (/tmp screenshots, 500 of them per agent on
+// every 3-s list) is memoised per path and forgotten every 30 s (containment
+// only changes when a symlink does). The dir-artifact jail is
+// insideWorkspace below — realpath-only, false for a missing path — and must
+// stay that way.
+let workspaceReal = null;
+const namedUnderCache = new Map();
+setInterval(() => namedUnderCache.clear(), 30000).unref();
+function namedUnderWorkspace(abs) {
+  if (workspaceReal === null) { try { workspaceReal = realpathSync(WORKSPACE); } catch { workspaceReal = WORKSPACE; } }
+  const under = (p, root) => p === root || p.startsWith(root.replace(/\/+$/, "") + "/");
+  if (under(abs, WORKSPACE) || under(abs, workspaceReal)) return true;
+  let v = namedUnderCache.get(abs);
+  if (v === undefined) {
+    try { v = under(realpathSync(abs), workspaceReal); } catch { v = false; }
+    if (namedUnderCache.size < 20000) namedUnderCache.set(abs, v);
+  }
+  return v;
+}
+
 function insideWorkspace(abs) {
   try {
     const canonical = realpathSync(abs), root = realpathSync(WORKSPACE);
@@ -2121,7 +2150,11 @@ app.head("/api/file", (req, res) => {
 
 // Images need their real mime (and bytes, not utf-8) so markdown previews can
 // reference them through this endpoint (relative <img src> in .md files).
-const IMAGE_MIMES = { svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", ico: "image/x-icon" };
+// Served as bytes with an image type (an <img> in a markdown preview, the
+// image viewer). The viewer's IMAGE_EXTS in client/artifacts.js is this list
+// minus svg: an svg artifact is an authored text file and opens in the editor,
+// while an svg referenced from markdown is still served as a picture.
+const IMAGE_MIMES = { svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", ico: "image/x-icon", bmp: "image/bmp", avif: "image/avif" };
 
 app.get("/api/file", (req, res) => {
   const filePath = resolveFilePath(req.query.path);
