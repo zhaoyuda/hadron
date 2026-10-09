@@ -252,6 +252,12 @@ export function appendAgentField(id, field, item) {
 // that index no longer matches → { conflict: true }, nothing changes, caller 409s.
 // `matches(stored, given)` lets the caller compare canonical forms (clients see
 // resolved paths while the file stores workspace-relative ones).
+// `index` null/undefined = remove by value alone (the CLI's `artifacts unpin`,
+// which never rendered an index): the one artifact `matches` goes, none →
+// { missing: true }, more than one DISTINCT stored value matching (a relative
+// name pinned both at the workspace root and under the agent's cwd) →
+// { ambiguous: [values] } and nothing changes — decided here, under the lock,
+// on the array on disk, so a pin landing meanwhile cannot slip past the check.
 export function removeAgentArtifact(id, index, value, matches = (a, b) => a === b) {
   return withAgentLock(id, () => {
     let data;
@@ -261,6 +267,13 @@ export function removeAgentArtifact(id, index, value, matches = (a, b) => a === 
       return null;
     }
     const arr = Array.isArray(data.artifacts) ? data.artifacts : [];
+    if (index == null) {
+      const hits = arr.map((a, i) => (a && matches(a.value, value) ? i : -1)).filter((i) => i >= 0);
+      if (!hits.length) return { missing: true };
+      const distinct = [...new Set(hits.map((i) => arr[i].value))];
+      if (distinct.length > 1) return { ambiguous: distinct };
+      index = hits[0];
+    }
     const at = arr[index];
     if (!at || !matches(at.value, value)) return { conflict: true };
     arr.splice(index, 1);

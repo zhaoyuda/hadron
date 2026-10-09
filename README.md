@@ -126,6 +126,11 @@ hadron send <id> "keys"                  # low-level: type raw keys into a pane
 hadron park [name|id] | unpark           # fold an agent into the deck's Stale section (it keeps
                                          #   running; never archives) / bring it back
 hadron artifacts pin <path...>           # pin files to the current agent's panel (alias: add)
+hadron artifacts unpin <path...>         # remove them by the path that pinned them, or the
+                                         #   absolute path `ls` prints (alias: rm; a deleted file
+                                         #   still unpins; a relative path naming two pins → 409)
+hadron artifacts ls|pin|unpin --agent <name|id>
+                                         # another agent's panel from outside its pane
 hadron notes [show|set|append]           # per-agent durable notes
 hadron checkpoint [show|clear]           # the agent's own handoff: --goal / --next / --blocked
                                          #   [-- output files…]; shown on the card while idle/done

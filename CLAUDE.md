@@ -135,6 +135,26 @@ npm test
 #                            token-bearing list only
 #                            (parking leaves tmux running and never sets archived; both survive the restart block),
 #                            archive/restore lifecycle over HTTP, CLI pin/unpin/park/unpark/close/restore/ls --archived;
+#                            a folder pinned as type file (`hadron artifacts pin <dir>`) is stored as a dir artifact — the live
+#                            folder listing — on every write path (validateAndCanonicalizeArtifact), outside the workspace 400
+#                            "… is a folder outside the workspace" (prod 2026-10-09: an agent pinned a folder, the tab errored);
+#                            a whole-array PATCH revalidates with { stored } (the record's current values) — a STORED file pin
+#                            whose path became a folder outside the workspace stays the file pin it was (never a 400 blocking the
+#                            other entries), inside it becomes the listing, an entry NOT on the record gets the fresh-pin rule (the
+#                            PATCH is no way around what POST refuses); ambiguity is decided in removeAgentArtifact under the lock
+#                            ({ ambiguous: [values] } → 409); migrateFolderPinsOn also runs on restore of an archived record; `hadron artifacts unpin <path...>` (alias rm) removes a pinned file by the path that
+#                            pinned it — DELETE /api/sessions/:id/artifacts with { value } alone (index undefined; index: null is
+#                            a bad index → 400) matches every canonical form the path could have been stored under WITHOUT an
+#                            existence gate (canonicalCandidates: workspace base + the agent's cwd base — a deleted file still
+#                            unpins, test-artifacts "deleted-file case"), two different pinned artifacts under the two bases →
+#                            409 naming both and the absolute path `ls` prints, nothing pinned → 404; the index+value form is unchanged;
+#                            the CLI prints each removal as it lands, a duplicated path is removed once and reported once,
+#                            `--auto --agent` scores the target's cwd; at boot migrateFolderPins turns every in-workspace
+#                            folder still pinned as a file on an active record into a dir artifact and saves it once
+#                            (test-artifacts "[boot: …]"; outside the workspace left alone);
+#                            a miss exits 1 after the hits in the same call are removed; `--agent <name|id>` on artifacts
+#                            pin/unpin/ls acts on that agent's panel from outside its pane (name→id resolution, ambiguous → exit 1
+#                            with nothing touched, no value → exit 1), without it outside a pane the verb exits 1;
 #                            `hadron ls --all` walks HADRON_HOME/servers (default ~/.hadron/servers — each server writes
 #                            {workspace, port, pid} at boot, removes it on clean exit, prunes dead-pid siblings at boot;
 #                            the CLI lists only live hadron-server pids, --json marks the rest stale, no token needed)

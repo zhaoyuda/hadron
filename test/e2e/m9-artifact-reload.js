@@ -30,9 +30,10 @@
  *     whatever is on disk, so a src swap is observable as new content.
  *     marimo is launched with --watch and reloads its own cells (verified
  *     against marimo 0.23), so it gets no pill.
- *  5. A file artifact that HEADs fine but can't be read (a directory —
- *     `hadron artifacts add <dir>` posts type "file") must not re-render on
- *     every poll: the mtime seen at the failed render is the baseline.
+ *  5. A file artifact that HEADs fine but can't be read (mode 000; a folder
+ *     pinned as a file becomes a dir artifact at the server) must not
+ *     re-render on every poll: the mtime seen at the failed render is the
+ *     baseline. Pinning a folder as a file lands as the live folder listing.
  *
  * Technique: browser (Playwright) — the truths are iframe src swaps, pill
  * rendering, and poller timing, none visible to script-level checks.
@@ -40,7 +41,7 @@
  * Run: node test/e2e/m9-artifact-reload.js
  */
 import { chromium } from "playwright";
-import { writeFileSync, mkdirSync } from "fs";
+import { writeFileSync, mkdirSync, chmodSync } from "fs";
 import { join } from "path";
 import { bootWorkspace, authHeaders, reporter, screenshotDir } from "./harness.js";
 
@@ -153,13 +154,19 @@ try {
   const nbJson = (n) => JSON.stringify({ cells: [{ cell_type: "code", source: [`x = ${n}`], outputs: [], execution_count: null, metadata: {} }], metadata: {}, nbformat: 4, nbformat_minor: 5 });
   writeFileSync(nbPath, nbJson(1));
   mkdirSync(join(env.ws, "adir"));
+  writeFileSync(join(env.ws, "adir", "inside.md"), "# inside");
+  const unreadable = join(env.ws, "unreadable.md");
+  writeFileSync(unreadable, "secret"); chmodSync(unreadable, 0o000);
   const m9 = (await (await fetch(`${env.baseUrl}/api/sessions`, { headers: authHeaders(env.token) })).json()).find((x) => x.id === "m9");
   await fetch(`${env.baseUrl}/api/sessions/m9`, {
     method: "PATCH", headers: authHeaders(env.token),
     body: JSON.stringify({ artifacts: [...m9.artifacts,
       { type: "file", value: "late.html" }, { type: "file", value: "late.md" },
-      { type: "file", value: "live.ipynb" }, { type: "file", value: "adir" }] }),
+      { type: "file", value: "live.ipynb" }, { type: "file", value: "adir" }, { type: "file", value: "unreadable.md" }] }),
   });
+  const seeded = (await (await fetch(`${env.baseUrl}/api/sessions`, { headers: authHeaders(env.token) })).json()).find((x) => x.id === "m9").artifacts;
+  r.ok(seeded.some((a) => a.type === "dir" && /adir$/.test(a.value)) && !seeded.some((a) => a.type === "file" && /adir$/.test(a.value)),
+    "a folder pinned as type file lands as a dir artifact (live folder listing), not a broken file tab");
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.locator('.dk[data-sid="m9"]').click();
 
@@ -218,17 +225,30 @@ try {
   const nbSrc3 = await page.locator("#artifact-container iframe.jupyter-live").getAttribute("src");
   r.ok(nbSrc3.startsWith(nbSrc1) && (nbSrc3.match(/_=/g) || []).length === 1, "…without stacking cache-busters on the URL");
 
-  // ── a file artifact whose HEAD succeeds but GET fails (a directory) must
+  // ── the folder artifact opens in the panel: its files are listed, a click
+  // paints one (the "open the folder" ask — the listing is the browser-side
+  // Finder; Hadron's server is often on another machine).
+  const adirGroup = page.locator('#right .af-group[data-af-dirart$="adir"]');
+  r.ok(await until(() => adirGroup.count()), "the folder shows as a folder group in the panel");
+  if (!(await adirGroup.evaluate((el) => el.classList.contains("open")).catch(() => false))) await adirGroup.locator(".af-group-hdr").click();
+  r.ok(await until(() => adirGroup.locator(".af", { hasText: "inside.md" }).count()), "…opened, it lists the files inside (the panel is the folder browser)");
+
+  // ── a file artifact whose HEAD succeeds but GET fails (unreadable) must
   // not be re-rendered every poll: "missing" means "not there YET", and the
   // mtime seen at the failed render is the baseline for "appeared".
-  const getCount = { n: 0 };
-  page.on("request", (req) => { if (req.method() === "GET" && /\/api\/file\?path=[^&]*adir/.test(req.url())) getCount.n++; });
-  await page.locator(".af[data-art-idx]", { hasText: "adir" }).click();
-  await page.locator("#artifact-container .artifact-file-error").waitFor({ timeout: 10000 });
-  const after1 = getCount.n;
-  await wait(7500); // > 2 poller ticks
-  r.ok(getCount.n === after1 && after1 >= 1,
-    `directory-as-file artifact: rendered once and left alone (GETs: ${after1} then ${getCount.n} after 7.5s; was: re-rendered every 3s forever)`);
+  if (process.getuid?.() === 0) {
+    console.log("  - skip (running as root — mode 000 is readable, cannot stage an unreadable file): unreadable file artifact rendered once and left alone");
+  } else {
+    const getCount = { n: 0, statuses: [] };
+    page.on("response", (res) => { if (res.request().method() === "GET" && /\/api\/file\?path=[^&]*unreadable/.test(res.url())) { getCount.n++; getCount.statuses.push(res.status()); } });
+    await page.locator(".af[data-art-idx]", { hasText: "unreadable.md" }).click();
+    await page.locator("#artifact-container .artifact-file-error").waitFor({ timeout: 10000 });
+    r.ok(getCount.statuses[0] === 404, `harness: the GET of the mode-000 file failed (status ${getCount.statuses[0]})`);
+    const after1 = getCount.n;
+    await wait(7500); // > 2 poller ticks
+    r.ok(getCount.n === after1 && after1 >= 1,
+      `unreadable file artifact: rendered once and left alone (GETs: ${after1} then ${getCount.n} after 7.5s; was: re-rendered every 3s forever)`);
+  }
 } catch (e) {
   r.fail(`unexpected error: ${e.message}`);
 } finally {

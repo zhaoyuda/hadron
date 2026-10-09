@@ -233,6 +233,65 @@ async function main() {
     await req("PATCH", `/api/sessions/${C}`, { name: "Ops Gamma" });
   }
 
+  console.log("\n[CLI: artifacts pin/unpin/ls --agent — another agent's panel from outside its pane]");
+  {
+    // The helper runs with TMUX unset: without --agent the verb has no self to act on.
+    const noSelf = hadronFails(["artifacts", "ls"]);
+    ok(noSelf !== null && noSelf.status === 1 && /Not inside a tmux pane/.test(noSelf.stderr), "artifacts ls outside a pane without --agent → exit 1, names the reason");
+    mkdirSync(join(WS, "decks"), { recursive: true });
+    writeFileSync(join(WS, "decks", "deck-v0.8.md"), "old");
+    writeFileSync(join(WS, "decks", "deck-v0.10.md"), "new");
+    writeFileSync(join(WS, "decks", "notes.md"), "n");
+    const pinOut = hadron(["artifacts", "pin", "decks/deck-v0.8.md", "decks/notes.md", "--agent", "ops gamma"]);
+    ok(/pinned 2 file\(s\) on Ops Gamma/.test(pinOut), "pin --agent <name> pins on the named agent and says so");
+    ok(readAgentFile(C).artifacts.map((a) => a.value).join(",") === "decks/deck-v0.8.md,decks/notes.md", "…persisted on its record, workspace-relative");
+    ok(!(readAgentFile(A).artifacts || []).length, "…and not on another agent");
+    hadron(["artifacts", "pin", join(WS, "decks", "deck-v0.10.md"), "--agent", C]);
+    const ls = hadron(["artifacts", "ls", "--agent", "ops gamma"]);
+    ok(ls.trim().split("\n").length === 3 && /deck-v0\.8\.md/.test(ls) && /deck-v0\.10\.md/.test(ls), `ls --agent lists the three pinned files (${JSON.stringify(ls.trim())})`);
+    // The versioned-deck case: unpin the stale one by the path that pinned it; the
+    // shared-prefix sibling stays.
+    const un = hadron(["artifacts", "unpin", "decks/deck-v0.8.md", "--agent", "ops gamma"]);
+    ok(/unpinned from Ops Gamma: decks\/deck-v0\.8\.md/.test(un), "unpin --agent reports the removal");
+    ok(readAgentFile(C).artifacts.map((a) => a.value).join(",") === "decks/notes.md,decks/deck-v0.10.md", "the stale version is gone, deck-v0.10 and notes stay");
+    // rm is the alias; the absolute form unpins a relative pin; a miss exits 1 AFTER the hits are removed.
+    const mixed = hadronFails(["artifacts", "rm", join(WS, "decks", "notes.md"), "decks/never-pinned.md", "--agent", C]);
+    ok(mixed !== null && mixed.status === 1 && /not pinned on Ops Gamma: decks\/never-pinned\.md/.test(mixed.stderr), "rm with a path that is not pinned → exit 1 naming it");
+    ok(readAgentFile(C).artifacts.map((a) => a.value).join(",") === "decks/deck-v0.10.md", "…the pinned path in the same call was still removed (absolute form of a relative pin)");
+    // A path given twice asks once: removed, reported once, exit 0 (the command achieved what it asked).
+    hadron(["artifacts", "pin", "decks/notes.md", "--agent", C]);
+    const twice = hadron(["artifacts", "unpin", "decks/notes.md", "decks/notes.md", "--agent", C]);
+    ok((twice.match(/unpinned from Ops Gamma: decks\/notes\.md/g) || []).length === 1 && readAgentFile(C).artifacts.map((a) => a.value).join(",") === "decks/deck-v0.10.md", "a duplicated path: unpinned once, reported once, exit 0");
+    const none = hadronFails(["artifacts", "unpin", "--agent", C]);
+    ok(none !== null && none.status === 1 && /usage: hadron artifacts unpin/.test(none.stderr), "unpin with no path → usage, exit 1");
+    const bare = hadronFails(["artifacts", "unpin", "decks/deck-v0.10.md", "--agent"]);
+    ok(bare !== null && bare.status === 1 && /--agent needs a value/.test(bare.stderr) && readAgentFile(C).artifacts.length === 1, "--agent without a value → exit 1, nothing removed");
+    // Ambiguous --agent: resolved before anything is touched.
+    await req("PATCH", `/api/sessions/${A}`, { name: "Twin" });
+    await req("PATCH", `/api/sessions/${C}`, { name: "Twin" });
+    const amb = hadronFails(["artifacts", "unpin", "decks/deck-v0.10.md", "--agent", "twin"]);
+    ok(amb !== null && amb.status === 1 && amb.stderr.includes(A) && amb.stderr.includes(C), "ambiguous --agent → exit 1 listing both");
+    ok(readAgentFile(C).artifacts.length === 1, "…nothing unpinned on ambiguity");
+    await req("PATCH", `/api/sessions/${A}`, { name: "Ops Alpha" });
+    await req("PATCH", `/api/sessions/${C}`, { name: "Ops Gamma" });
+    const unknown = hadronFails(["artifacts", "ls", "--agent", "no-such-agent"]);
+    ok(unknown !== null && unknown.status === 1 && /no agent matches/.test(unknown.stderr), "unknown --agent → exit 1");
+    const typo = hadronFails(["artifacts", "ls", "--agnet", C]);
+    ok(typo !== null && typo.status === 1 && /unknown option: --agnet/.test(typo.stderr), "a misspelt flag is rejected up front");
+    hadron(["artifacts", "unpin", "decks/deck-v0.10.md", "--agent", C]);
+    ok(!(readAgentFile(C).artifacts || []).length, "harness: Ops Gamma's panel emptied again");
+    // --auto with --agent scores the TARGET's cwd (the workspace root here): a
+    // deliverable named after the target is found and pinned on it.
+    writeFileSync(join(WS, `${C}-report.md`), "# report");
+    const auto = hadron(["artifacts", "pin", "--auto", "--agent", "ops gamma"]);
+    ok(/pinned \d+ file\(s\) on Ops Gamma/.test(auto) && readAgentFile(C).artifacts.some((a) => a.value === `${C}-report.md`), `pin --auto --agent suggests from the target's cwd and pins there (${auto.trim().split("\n")[0]})`);
+    ok(!(readAgentFile(A).artifacts || []).some((a) => a.value === `${C}-report.md`), "…and not on another agent");
+    for (const a of readAgentFile(C).artifacts) hadron(["artifacts", "unpin", a.value, "--agent", C]);
+    rmSync(join(WS, `${C}-report.md`), { force: true });
+    const help = hadron(["artifacts", "--help"]);
+    ok(/hadron artifacts unpin <path\.\.\.>/.test(help) && /--agent <name\|id>/.test(help), "usage documents unpin and --agent");
+  }
+
   console.log("\n[CLI: close / ls --archived / restore]");
   {
     const out = hadron(["close", "Ops Gamma"]);
