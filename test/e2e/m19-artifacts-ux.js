@@ -339,6 +339,54 @@ try {
   r.ok(cwdArts.some((v) => v.endsWith("subws/dup.md")) && !cwdArts.includes("dup.md"),
     `suggest-select stored the cwd copy, not the root one (got: ${JSON.stringify(cwdArts)})`);
 
+  // ── 12. Two pinned folders named alike + a file pinned inside each: one group
+  // per folder, titles disambiguated, each file once, inside its own group,
+  // open or collapsed (prod 2026-10-09: PINNED drew `retros` twice) ──
+  for (const side of ["A", "B"]) {
+    mkdirSync(join(env.ws, side, "retro"), { recursive: true });
+    writeFileSync(join(env.ws, side, "retro", `${side.toLowerCase()}.md`), `# ${side}`);
+  }
+  await page.locator('.dk[data-sid="m19"]').click();
+  await page.locator("#af-add-btn").waitFor({ state: "visible", timeout: 5000 });
+  await api("POST", "/api/sessions/m19/artifacts", { type: "dir", value: "A/retro" });
+  const covA = await (await api("POST", "/api/sessions/m19/artifacts", { type: "file", value: "A/retro/a.md" })).json();
+  r.ok(covA.coveredBy === "A/retro", `pinning a file under a pinned folder answers coveredBy (${covA.coveredBy})`);
+  await api("POST", "/api/sessions/m19/artifacts", { type: "file", value: "B/retro/b.md" });
+  const covB = await (await api("POST", "/api/sessions/m19/artifacts", { type: "dir", value: "B/retro" })).json();
+  r.ok(covB.covers === 1, `pinning a folder that holds a file pin answers covers (${covB.covers})`);
+  const grpA = page.locator('#right .af-group[data-af-dirart$="/A/retro"]');
+  const grpB = page.locator('#right .af-group[data-af-dirart$="/B/retro"]');
+  await until(async () => (await grpA.count()) === 1 && (await grpB.count()) === 1, 6000);
+  const titleOf = (g) => g.locator(".af-group-hdr .af-label").first().innerText();
+  const countOf = (name) => page.locator("#right .af-label", { hasText: new RegExp(`^${name.replace(/\./g, "\\.")}$`) }).count();
+  r.ok((await titleOf(grpA)) === "retro — A" && (await titleOf(grpB)) === "retro — B", `titles differ by their parent segment (${await titleOf(grpA)} / ${await titleOf(grpB)})`);
+  r.ok((await grpA.locator(".af-group-hdr").getAttribute("title")).endsWith("/A/retro"), "the header tooltip is the full path");
+  r.ok(await page.locator('#right .af-group[data-af-dir$="/retro"]').count() === 0, "no extra display group for the pinned files (earlier sections' groups aside)");
+  r.ok(await countOf("a.md") === 0 && await countOf("b.md") === 0, "collapsed: neither file is drawn anywhere else");
+  r.ok((await grpA.locator(".af-pin-count").innerText()) === "1📌" && (await grpB.locator(".af-pin-count").innerText()) === "1📌", "collapsed headers count the pinned files inside");
+  await grpA.locator(".af-group-hdr").click();
+  await until(() => grpA.locator('.af[data-art-idx]', { hasText: "a.md" }).count().then((c) => c === 1));
+  r.ok(await countOf("a.md") === 1 && await grpA.locator('.af-pinned-in-dir', { hasText: "a.md" }).count() === 1, "open: a.md once, inside its own group, as a pinned row");
+  r.ok(await countOf("b.md") === 0 && !(await grpB.evaluate((el) => el.classList.contains("open"))), "the other group is unchanged (still collapsed)");
+  await grpB.locator(".af-group-hdr").click();
+  await until(() => grpB.locator('.af[data-art-idx]', { hasText: "b.md" }).count().then((c) => c === 1));
+  r.ok(await countOf("a.md") === 1 && await countOf("b.md") === 1, "both open: each file exactly once");
+  await grpA.locator(".af-group-hdr").click();
+  await until(async () => !(await grpA.evaluate((el) => el.classList.contains("open"))));
+  r.ok(await countOf("a.md") === 0 && await countOf("b.md") === 1 && (await grpA.locator(".af-pin-count").innerText()) === "1📌", "collapsing one leaves the other open and intact");
+  await shot("twin-folders");
+  // groupTitles is the pure half: per-entry suffix growth (only the colliding
+  // entries grow), a user label that collides keeps its basename, identical
+  // paths stop at the full path instead of looping.
+  const gt = await page.evaluate(() => Object.fromEntries(groupTitles([
+    { key: 1, path: "/w/x/A/retro" }, { key: 2, path: "/w/y/A/retro" }, { key: 3, path: "/w/B/retro" },
+    { key: 4, path: "/w/alpha", label: "retro" }, { key: 5, path: "/w/retro" },
+    { key: 6, path: "/w/same" }, { key: 7, path: "/w/same" },
+  ])));
+  r.ok(gt[1] === "retro — x/A" && gt[2] === "retro — y/A" && gt[3] === "retro — B", `only the colliding entries grow their suffix (${gt[1]} / ${gt[2]} / ${gt[3]})`);
+  r.ok(gt[4] === "retro — alpha" && gt[5] === "retro — w", `a colliding user label is told apart by its basename (${gt[4]} / ${gt[5]})`);
+  r.ok(gt[6] === "same — w" && gt[7] === "same — w", `identical paths stop at the full path (${gt[6]})`);
+
   r.ok(pageErrors.length === 0, `zero page errors (${pageErrors.join("; ") || "none"})`);
 } catch (e) {
   r.fail(`unexpected error: ${e.message}`);

@@ -30,9 +30,10 @@
  *     whatever is on disk, so a src swap is observable as new content.
  *     marimo is launched with --watch and reloads its own cells (verified
  *     against marimo 0.23), so it gets no pill.
- *  5. A file artifact that HEADs fine but can't be read (a directory —
- *     `hadron artifacts add <dir>` posts type "file") must not re-render on
- *     every poll: the mtime seen at the failed render is the baseline.
+ *  5. A file artifact that HEADs fine but can't be read (mode 000; a folder
+ *     pinned as a file becomes a dir artifact at the server) must not
+ *     re-render on every poll: the mtime seen at the failed render is the
+ *     baseline. Pinning a folder as a file lands as the live folder listing.
  *
  * Technique: browser (Playwright) — the truths are iframe src swaps, pill
  * rendering, and poller timing, none visible to script-level checks.
@@ -40,7 +41,7 @@
  * Run: node test/e2e/m9-artifact-reload.js
  */
 import { chromium } from "playwright";
-import { writeFileSync, mkdirSync } from "fs";
+import { writeFileSync, mkdirSync, chmodSync } from "fs";
 import { join } from "path";
 import { bootWorkspace, authHeaders, reporter, screenshotDir } from "./harness.js";
 
@@ -103,6 +104,34 @@ try {
     (await page.locator("#artifact-container .md-preview").innerText().catch(() => "")).includes("md-v2")),
     "markdown artifact silently auto-reloads on disk change (early write included)");
 
+  // ── the silent reload keeps the reader's place ──
+  // A long file the agent keeps appending to: scrolled partway → the same
+  // offset after the rewrite; scrolled to the bottom → still at the bottom of
+  // the longer file (following the tail). Before, every re-render landed at 0.
+  const longMd = (n, tail) => "# long\n\n" + Array.from({ length: n }, (_, i) => `paragraph ${i + 1} — lorem ipsum dolor sit amet, consectetur adipiscing elit.`).join("\n\n") + `\n\n${tail}\n`;
+  writeFileSync(mdPath, longMd(120, "TAIL-1"));
+  r.ok(await until(async () => (await page.locator("#artifact-container .md-preview").innerText().catch(() => "")).includes("TAIL-1")), "long markdown painted");
+  const pane = () => page.locator("#artifact-container .artifact-persistent");
+  const scrollInfo = () => pane().evaluate((el) => ({ top: el.scrollTop, max: el.scrollHeight - el.clientHeight }));
+  const first = await scrollInfo();
+  r.ok(first.max > 600, `harness: the pane scrolls (max ${first.max})`);
+  await pane().evaluate((el) => { el.scrollTop = 400; });
+  await wait(300);
+  writeFileSync(mdPath, longMd(120, "TAIL-2"));
+  r.ok(await until(async () => (await page.locator("#artifact-container .md-preview").innerText().catch(() => "")).includes("TAIL-2")), "rewrite reloaded (TAIL-2 on screen)");
+  await wait(200);
+  const afterMid = await scrollInfo();
+  r.ok(Math.abs(afterMid.top - 400) <= 2, `scrolled partway stays where it was after the silent reload (scrollTop ${afterMid.top}, was 400)`);
+  await pane().evaluate((el) => { el.scrollTop = el.scrollHeight; });
+  await wait(300);
+  writeFileSync(mdPath, longMd(160, "TAIL-3"));
+  r.ok(await until(async () => (await page.locator("#artifact-container .md-preview").innerText().catch(() => "")).includes("TAIL-3")), "a longer rewrite reloaded (TAIL-3 on screen)");
+  await wait(200);
+  const afterEnd = await scrollInfo();
+  r.ok(afterEnd.max > afterMid.max && afterEnd.max - afterEnd.top <= 2, `a reader at the bottom follows the tail of the longer file (scrollTop ${afterEnd.top} of ${afterEnd.max})`);
+  writeFileSync(mdPath, "# md-v2");
+  r.ok(await until(async () => (await page.locator("#artifact-container .md-preview").innerText().catch(() => "")).includes("md-v2")), "harness: short file back");
+
   // ── split mode: HTML pane is watched too ──
   await page.evaluate(() => cycleLayout()); // tabs → vsplit; both artifacts become panes
   const paneFrame = page.frameLocator('.split-pane[data-html-path] iframe[data-html-iframe="1"]');
@@ -125,13 +154,24 @@ try {
   const nbJson = (n) => JSON.stringify({ cells: [{ cell_type: "code", source: [`x = ${n}`], outputs: [], execution_count: null, metadata: {} }], metadata: {}, nbformat: 4, nbformat_minor: 5 });
   writeFileSync(nbPath, nbJson(1));
   mkdirSync(join(env.ws, "adir"));
+  writeFileSync(join(env.ws, "adir", "inside.md"), "# inside");
+  const unreadable = join(env.ws, "unreadable.md");
+  writeFileSync(unreadable, "secret"); chmodSync(unreadable, 0o000);
+  // 1×1 and 2×1 red PNGs (generated with zlib/struct; the width is the proof).
+  const PNG1 = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC", "base64");
+  const PNG2 = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAIAAAB7QOjdAAAADUlEQVR4nGP4z8AARAAI/gH/xp559wAAAABJRU5ErkJggg==", "base64");
+  const shot = join(env.ws, "shot.png");
+  writeFileSync(shot, PNG1);
   const m9 = (await (await fetch(`${env.baseUrl}/api/sessions`, { headers: authHeaders(env.token) })).json()).find((x) => x.id === "m9");
   await fetch(`${env.baseUrl}/api/sessions/m9`, {
     method: "PATCH", headers: authHeaders(env.token),
     body: JSON.stringify({ artifacts: [...m9.artifacts,
       { type: "file", value: "late.html" }, { type: "file", value: "late.md" },
-      { type: "file", value: "live.ipynb" }, { type: "file", value: "adir" }] }),
+      { type: "file", value: "live.ipynb" }, { type: "file", value: "adir" }, { type: "file", value: "unreadable.md" }, { type: "file", value: "shot.png" }] }),
   });
+  const seeded = (await (await fetch(`${env.baseUrl}/api/sessions`, { headers: authHeaders(env.token) })).json()).find((x) => x.id === "m9").artifacts;
+  r.ok(seeded.some((a) => a.type === "dir" && /adir$/.test(a.value)) && !seeded.some((a) => a.type === "file" && /adir$/.test(a.value)),
+    "a folder pinned as type file lands as a dir artifact (live folder listing), not a broken file tab");
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.locator('.dk[data-sid="m9"]').click();
 
@@ -190,17 +230,54 @@ try {
   const nbSrc3 = await page.locator("#artifact-container iframe.jupyter-live").getAttribute("src");
   r.ok(nbSrc3.startsWith(nbSrc1) && (nbSrc3.match(/_=/g) || []).length === 1, "…without stacking cache-busters on the URL");
 
-  // ── a file artifact whose HEAD succeeds but GET fails (a directory) must
+  // ── the folder artifact opens in the panel: its files are listed, a click
+  // paints one (the "open the folder" ask — the listing is the browser-side
+  // Finder; Hadron's server is often on another machine).
+  const adirGroup = page.locator('#right .af-group[data-af-dirart$="adir"]');
+  r.ok(await until(() => adirGroup.count()), "the folder shows as a folder group in the panel");
+  if (!(await adirGroup.evaluate((el) => el.classList.contains("open")).catch(() => false))) await adirGroup.locator(".af-group-hdr").click();
+  r.ok(await until(() => adirGroup.locator(".af", { hasText: "inside.md" }).count()), "…opened, it lists the files inside (the panel is the folder browser)");
+
+  // ── a png artifact is a picture, not the text editor's rendering of its
+  // bytes (prod 2026-10-09: "点了之后显示乱码"); a rewrite on disk reloads it
+  // silently with a fresh URL.
+  await page.locator(".af[data-art-idx]", { hasText: "shot.png" }).click();
+  const img = page.locator("#artifact-container img.artifact-image");
+  await img.waitFor({ timeout: 10000 });
+  r.ok(await until(() => img.evaluate((el) => el.complete && el.naturalWidth === 1)) && (await page.locator("#artifact-container .text-edit-area").count()) === 0,
+    "a png artifact renders as an image (1 px wide, no text editor)");
+  await wait(1000);
+  writeFileSync(shot, PNG2);
+  r.ok(await until(() => page.locator("#artifact-container img.artifact-image").evaluate((el) => el.complete && el.naturalWidth === 2).catch(() => false)),
+    "…rewritten on disk → the picture reloads within the poll (2 px wide now)");
+  // …and in split mode the image pane is watched like an HTML pane (silently).
+  await page.evaluate(() => cycleLayout()); // tabs → vsplit
+  const imgPane = page.locator(".split-pane[data-img-path] img.artifact-image");
+  await imgPane.first().waitFor({ timeout: 10000 });
+  r.ok(await until(() => imgPane.first().evaluate((el) => el.complete && el.naturalWidth === 2).catch(() => false)), "split pane paints the picture");
+  await wait(1500); // let the watch baseline settle
+  writeFileSync(shot, PNG1);
+  r.ok(await until(() => page.locator(".split-pane[data-img-path] img.artifact-image").first().evaluate((el) => el.complete && el.naturalWidth === 1).catch(() => false)), "…and repaints it when the file changes (1 px wide again), no pill");
+  r.ok((await page.locator(".split-pane[data-img-path] .artifact-update-pill").count()) === 0, "…no update pill on an image pane");
+  await page.evaluate(() => cycleLayout()); // vsplit → hsplit
+  await page.evaluate(() => cycleLayout()); // hsplit → tabs
+
+  // ── a file artifact whose HEAD succeeds but GET fails (unreadable) must
   // not be re-rendered every poll: "missing" means "not there YET", and the
   // mtime seen at the failed render is the baseline for "appeared".
-  const getCount = { n: 0 };
-  page.on("request", (req) => { if (req.method() === "GET" && /\/api\/file\?path=[^&]*adir/.test(req.url())) getCount.n++; });
-  await page.locator(".af[data-art-idx]", { hasText: "adir" }).click();
-  await page.locator("#artifact-container .artifact-file-error").waitFor({ timeout: 10000 });
-  const after1 = getCount.n;
-  await wait(7500); // > 2 poller ticks
-  r.ok(getCount.n === after1 && after1 >= 1,
-    `directory-as-file artifact: rendered once and left alone (GETs: ${after1} then ${getCount.n} after 7.5s; was: re-rendered every 3s forever)`);
+  if (process.getuid?.() === 0) {
+    console.log("  - skip (running as root — mode 000 is readable, cannot stage an unreadable file): unreadable file artifact rendered once and left alone");
+  } else {
+    const getCount = { n: 0, statuses: [] };
+    page.on("response", (res) => { if (res.request().method() === "GET" && /\/api\/file\?path=[^&]*unreadable/.test(res.url())) { getCount.n++; getCount.statuses.push(res.status()); } });
+    await page.locator(".af[data-art-idx]", { hasText: "unreadable.md" }).click();
+    await page.locator("#artifact-container .artifact-file-error").waitFor({ timeout: 10000 });
+    r.ok(getCount.statuses[0] === 404, `harness: the GET of the mode-000 file failed (status ${getCount.statuses[0]})`);
+    const after1 = getCount.n;
+    await wait(7500); // > 2 poller ticks
+    r.ok(getCount.n === after1 && after1 >= 1,
+      `unreadable file artifact: rendered once and left alone (GETs: ${after1} then ${getCount.n} after 7.5s; was: re-rendered every 3s forever)`);
+  }
 } catch (e) {
   r.fail(`unexpected error: ${e.message}`);
 } finally {

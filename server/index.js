@@ -11,7 +11,7 @@ import { connect as netConnect } from "net";
 import { networkInterfaces, hostname, tmpdir, homedir } from "os";
 import { URL } from "url";
 import { randomBytes, createHash } from "crypto";
-import { StateDetector, isShellCmd, POLL_INTERVAL_MS, raiseAttention, setProbeObserver } from "./state-detector.js";
+import { StateDetector, isShellCmd, POLL_INTERVAL_MS, raiseAttention, ackByTurn, setProbeObserver } from "./state-detector.js";
 import { probeClaudeCaps, RuntimeTracker, performResume, BOOT, isClaudeCmd, decideResume, verifyAdoption, UUID_RE, PINNED_CONFIDENCE, sessionFileExists, claudeProjectDir } from "./resume.js";
 import { randomUUID } from "crypto";
 import { loadAgents, loadAgent, saveAgent, saveAgentLocked, archiveAgent, deleteAgent, initWorkspace, getWorkspaceDir, appendAgentField, removeAgentArtifact, isSelfWrite } from "./agent-store.js";
@@ -1171,7 +1171,11 @@ function resolvedSession(s, { authenticated = false } = {}) {
   let fw = null;
   if (authenticated && files) {
     const hidden = coreHidden(s);
-    fw = filesWire(files, { coreSkip: (p) => hidden.has(sessionFilePath(s, p)) });
+    // Core is the session's working set INSIDE the workspace: scratch files
+    // under /tmp (a screenshot script, its pngs) are written once and never
+    // the agent's core, however young the session (prod 2026-10-09: a fresh
+    // agent's Core was all /tmp). Changed stays factual and lists them.
+    fw = filesWire(files, { coreSkip: (p) => { const abs = sessionFilePath(s, p); return hidden.has(abs) || !namedUnderWorkspace(abs); } });
   }
   return {
     ...rest,
@@ -1234,6 +1238,8 @@ app.post("/api/sessions/:id/restore", (req, res) => {
   delete agent.archivedAt;
   agent.state = "idle";
   agent.tmuxSession = tmuxSessionName(id);
+  canonicalizeArtifactsOn(agent); // an archived record missed the boot-time passes
+  migrateFolderPinsOn(agent);
   sessions.set(id, agent);
   saveAgent(agent);
   startMonitorSafe(id);
@@ -1567,8 +1573,9 @@ app.patch("/api/sessions/:id", async (req, res) => {
   if (req.body.artifacts !== undefined) {
     if (!Array.isArray(req.body.artifacts)) return res.status(400).json({ error: "artifacts must be an array" });
     patchedArtifacts = [];
+    const storedValues = new Set((session.artifacts || []).map((x) => x && x.value));
     for (const a of req.body.artifacts) {
-      const out = validateAndCanonicalizeArtifact(a, session.cwd);
+      const out = validateAndCanonicalizeArtifact(a, session.cwd, { stored: storedValues });
       if (out.error) return res.status(400).json({ error: `artifacts[${patchedArtifacts.length}]: ${out.error}` });
       patchedArtifacts.push(out.item);
     }
@@ -1606,6 +1613,7 @@ app.patch("/api/sessions/:id", async (req, res) => {
     if (bad) return res.status(400).json({ error: `coreDismissed must be an array of up to ${CORE_DISMISSED_MAX} path strings` });
   }
   const { state, blockReason, name, task } = req.body;
+  let acked = false;
   if (state !== undefined) {
     const prevState = session.state;
     session.state = state;
@@ -1613,10 +1621,11 @@ app.patch("/api/sessions/:id", async (req, res) => {
     const detector = monitors.get(id);
     if (detector) detector.resetCooldown();
     // A manual state change counts like a detected one: entering done/blocked
-    // is one attention event (idempotent for a same-state PATCH).
+    // is one attention event (idempotent for a same-state PATCH); entering
+    // working acks whatever was outstanding (a new turn = answered).
     if (prevState !== state && (state === "done" || state === "blocked")) raiseAttention(session, undefined, state);
+    else if (prevState !== state && state === "working") acked = ackByTurn(session) || acked;
   }
-  let acked = false;
   if (ackRev !== undefined) {
     const next = Math.min(ackRev, session.attentionRev || 0);
     if (next > (session.ackRev || 0)) { session.ackRev = next; session.ackAt = new Date().toISOString(); acked = true; }
@@ -1858,6 +1867,20 @@ function canonicalRealpath(abs) {
   }
 }
 
+// Every canonical form a user-typed artifact path could have been stored under,
+// independent of whether the file still exists (unpin needs the deleted-file
+// case): a url as is; an absolute or ~ path once; a relative path against the
+// workspace and, when it differs, against the agent's cwd.
+function canonicalCandidates(value, agentCwd) {
+  if (/^https?:/.test(value) || value.startsWith("/") || value.startsWith("~")) return [canonicalArtifactPath(value)];
+  const out = [canonicalArtifactPath(resolve(WORKSPACE, value))];
+  if (agentCwd) {
+    const viaCwd = canonicalArtifactPath(resolve(agentCwd, value));
+    if (!out.includes(viaCwd)) out.push(viaCwd);
+  }
+  return out;
+}
+
 // ONE canonical stored form for file/dir artifact paths, applied unconditionally at
 // write time: workspace-relative when the path lives under the workspace root,
 // absolute otherwise — with "under" decided CANONICALLY (realpath), so a file
@@ -1889,7 +1912,13 @@ function canonicalArtifactPath(value, agentCwd) {
 // the append endpoint, the whole-array PATCH, and the session-create seed all go
 // through here, so none of them is a validation bypass. Returns { item } or
 // { error }.
-function validateAndCanonicalizeArtifact(entry, agentCwd) {
+// `stored`: the canonical values already on the record (the whole-array PATCH
+// re-runs every entry) — a file pin IN that set whose path has since become a
+// folder OUTSIDE the workspace is left as the file pin it was (never a 400 that
+// blocks the other entries); inside, it becomes the folder listing like a fresh
+// pin would. An entry NOT on the record is a new pin and gets the fresh-pin
+// rule — the PATCH is no way around what POST refuses.
+function validateAndCanonicalizeArtifact(entry, agentCwd, { stored = null } = {}) {
   if (!entry || typeof entry !== "object") return { error: "artifact must be an object" };
   const { type = "file", value, label } = entry;
   if (!value || typeof value !== "string") return { error: "value (string) required" };
@@ -1901,7 +1930,20 @@ function validateAndCanonicalizeArtifact(entry, agentCwd) {
   }
   const item = { type, value };
   if (type !== "url") item.value = canonicalArtifactPath(value, agentCwd);
-  if (type === "dir") {
+  // A "file" that is really a folder (`hadron artifacts pin <dir>`, the CLI
+  // posts type file) renders as a broken tab; pin it as the live folder
+  // listing it should have been. Outside the workspace the dir jail below
+  // refuses it, with a message that says it is a folder.
+  if (type === "file") {
+    let isDir = false;
+    try { isDir = statSync(resolveFilePath(item.value)).isDirectory(); } catch {}
+    if (isDir && stored && stored.has(item.value) && !insideWorkspace(resolveFilePath(item.value))) {
+      if (label) item.label = label;
+      return { item };
+    }
+    if (isDir) item.type = "dir";
+  }
+  if (item.type === "dir") {
     // A dir artifact is a live listing of a real directory INSIDE the workspace jail
     // (agent cwds are validated inside it too). Canonical containment on the real
     // path — same symlink-safe check as /api/files/browse.
@@ -1912,7 +1954,7 @@ function validateAndCanonicalizeArtifact(entry, agentCwd) {
     let root;
     try { root = realpathSync(WORKSPACE); } catch { return { error: "workspace root unavailable" }; }
     if (canonical !== root && !canonical.startsWith(root + "/")) {
-      return { error: "dir artifact must be inside the workspace" };
+      return { error: type === "file" ? `${value} is a folder outside the workspace — a folder artifact must be inside it` : "dir artifact must be inside the workspace" };
     }
     try {
       if (!statSync(canonical).isDirectory()) return { error: "dir artifact must point to a directory" };
@@ -1921,6 +1963,38 @@ function validateAndCanonicalizeArtifact(entry, agentCwd) {
   }
   if (label) item.label = label;
   return { item };
+}
+
+// Does the path READ as part of the workspace? A ranking hint for the Core
+// list, not a jail: the path as claude named it, or its real path when it
+// exists (a workspace reached through a symlinked parent), counts; a deleted
+// file keeps its verdict; a symlink inside the workspace that points outside
+// still counts. Lexical first, so the common case costs no stat; the realpath
+// fallback for everything else (/tmp screenshots, 500 of them per agent on
+// every 3-s list) is memoised per path and forgotten every 30 s (containment
+// only changes when a symlink does). The dir-artifact jail is
+// insideWorkspace below — realpath-only, false for a missing path — and must
+// stay that way.
+let workspaceReal = null;
+const namedUnderCache = new Map();
+setInterval(() => namedUnderCache.clear(), 30000).unref();
+function namedUnderWorkspace(abs) {
+  if (workspaceReal === null) { try { workspaceReal = realpathSync(WORKSPACE); } catch { workspaceReal = WORKSPACE; } }
+  const under = (p, root) => p === root || p.startsWith(root.replace(/\/+$/, "") + "/");
+  if (under(abs, WORKSPACE) || under(abs, workspaceReal)) return true;
+  let v = namedUnderCache.get(abs);
+  if (v === undefined) {
+    try { v = under(realpathSync(abs), workspaceReal); } catch { v = false; }
+    if (namedUnderCache.size < 20000) namedUnderCache.set(abs, v);
+  }
+  return v;
+}
+
+function insideWorkspace(abs) {
+  try {
+    const canonical = realpathSync(abs), root = realpathSync(WORKSPACE);
+    return canonical === root || canonical.startsWith(root + "/");
+  } catch { return false; }
 }
 
 function isValidHttpUrl(value) {
@@ -1940,25 +2014,67 @@ app.post("/api/sessions/:id/artifacts", async (req, res) => {
   if (out.error) return res.status(400).json({ error: out.error });
   const updated = await appendAgentField(id, "artifacts", out.item);
   if (updated) sessions.get(id).artifacts = updated.artifacts;
-  res.json(resolvedSession(sessions.get(id)));
+  res.json({ ...resolvedSession(sessions.get(id)), ...pinCoverage(sessions.get(id).artifacts, out.item) });
 });
+
+// What the panel will do with a pin that overlaps a folder pin, told to the
+// caller (the CLI prints it as a note): a file whose parent is a pinned dir
+// renders inside that group → { coveredBy: "<dir>" } (the stored, canonical
+// form); a dir that already contains file pins → { covers: N }. Nothing else.
+function parentOfArtifactPath(v) {
+  const li = v.lastIndexOf("/");
+  if (li > 0) return v.slice(0, li);
+  return v.startsWith("/") ? "/" : ".";
+}
+function pinCoverage(artifacts, item) {
+  const arts = (artifacts || []).filter((a) => a && typeof a.value === "string");
+  if (item.type === "file") {
+    const parent = parentOfArtifactPath(item.value);
+    return arts.some((a) => a.type === "dir" && a.value === parent) ? { coveredBy: parent } : {};
+  }
+  if (item.type === "dir") {
+    const n = arts.filter((a) => a.type === "file" && parentOfArtifactPath(a.value) === item.value).length;
+    return n ? { covers: n } : {};
+  }
+  return {};
+}
 
 // Remove one artifact atomically (same per-agent lock as append). Body { index,
 // value }: the pair must still match server-side — a mismatch means the array
 // drifted since the client rendered (a concurrent CLI append / another tab's
-// remove) → 409, the client refetches and re-renders. Never touches real files.
+// remove) → 409, the client refetches and re-renders. Body { value } alone
+// (`hadron artifacts unpin`, which rendered nothing): the value is put through
+// the same canonicalisation as a pin (workspace-relative, then the agent's cwd,
+// symlinks resolved) and the artifact it names is removed — 404 when nothing is
+// pinned under that path. Never touches real files.
 app.delete("/api/sessions/:id/artifacts", async (req, res) => {
   const { id } = req.params;
   if (!isValidId(id)) return res.status(400).json({ error: "invalid id" });
   if (!sessions.has(id)) return res.status(404).json({ error: "session not found" });
   const { index, value } = req.body || {};
-  if (!Number.isInteger(index) || index < 0) return res.status(400).json({ error: "index (non-negative integer) required" });
+  const byValue = index === undefined;
+  if (!byValue && (!Number.isInteger(index) || index < 0)) return res.status(400).json({ error: "index (non-negative integer) required" });
   if (!value || typeof value !== "string") return res.status(400).json({ error: "value (string) required" });
   // The client sees resolved values, the file stores canonical ones — compare both raw
   // and resolved so either form matches its own artifact and nothing else.
-  const matches = (stored, given) => stored === given || resolveFilePath(stored) === resolveFilePath(given);
-  const out = await removeAgentArtifact(id, index, value, matches);
+  let matches = (stored, given) => stored === given || resolveFilePath(stored) === resolveFilePath(given);
+  if (byValue) {
+    // The path that pinned a file must unpin it after the file is gone (a
+    // stale pin is usually a deleted or renamed file), so the candidates are
+    // built WITHOUT the existence gate canonicalArtifactPath uses to pick a
+    // base: the workspace base and, when the agent's cwd differs, its cwd base.
+    // When the two bases name two DIFFERENT pinned artifacts the call is
+    // ambiguous → 409 naming both (removeAgentArtifact decides that under the
+    // lock, on the array on disk); the absolute path `ls` prints never is.
+    const cands = canonicalCandidates(value, resolveAgentCwd(sessions.get(id)));
+    const base = matches;
+    const matchesCand = (stored, c) => base(stored, c) || resolveFilePath(stored) === resolveFilePath(c);
+    matches = (stored, given) => base(stored, given) || cands.some((c) => matchesCand(stored, c));
+  }
+  const out = await removeAgentArtifact(id, byValue ? null : index, value, matches);
   if (!out) return res.status(404).json({ error: "agent file not found" });
+  if (out.missing) return res.status(404).json({ error: `no artifact pinned at ${value}` });
+  if (out.ambiguous) return res.status(409).json({ error: `${value} names two pinned artifacts (${out.ambiguous.join(" and ")}) — unpin by the absolute path hadron artifacts ls prints` });
   if (out.conflict) return res.status(409).json({ error: "artifact index/value mismatch — refetch and retry" });
   sessions.get(id).artifacts = out.data.artifacts;
   res.json({ ok: true, artifacts: resolvedSession(sessions.get(id)).artifacts });
@@ -2057,7 +2173,11 @@ app.head("/api/file", (req, res) => {
 
 // Images need their real mime (and bytes, not utf-8) so markdown previews can
 // reference them through this endpoint (relative <img src> in .md files).
-const IMAGE_MIMES = { svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", ico: "image/x-icon" };
+// Served as bytes with an image type (an <img> in a markdown preview, the
+// image viewer). The viewer's IMAGE_EXTS in client/artifacts.js is this list
+// minus svg: an svg artifact is an authored text file and opens in the editor,
+// while an svg referenced from markdown is still served as a picture.
+const IMAGE_MIMES = { svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", ico: "image/x-icon", bmp: "image/bmp", avif: "image/avif" };
 
 app.get("/api/file", (req, res) => {
   const filePath = resolveFilePath(req.query.path);
@@ -3245,10 +3365,105 @@ server.listen(PORT, HADRON_HOST, () => {
     activeCount++;
   }
   console.log(`Loaded ${activeCount} active agents, ${archivedCount} archived`);
+  migrateFolderPins();
   ensureDefaults();
   detectOrphanedTmuxSessions();
   bootMonitors().then(() => bootStage2(), (e) => { console.error(`[boot] ${e.message}`); bootStage2(); });
 });
+
+// Records written before folders pinned as `type: "file"` were coerced on the
+// write paths (prod 2026-10-09: an agent's `hadron artifacts pin retros` made an
+// inert row whose click tried to open a directory as a document) carry such pins
+// still; at boot each one inside the workspace becomes the folder listing a
+// fresh pin would make, and the record is saved once. Outside the workspace it
+// is left alone (a listing there is refused by the jail).
+// Mutates the record in place and returns how many pins changed; the caller
+// saves. Runs before any handler at boot (the listen callback completes before
+// a request is served) and on restore for an archived record — both places
+// hold the record exclusively, so the plain saveAgent there is not a race.
+function migrateFolderPinsOn(s) {
+  if (!Array.isArray(s.artifacts)) return 0;
+  let fixed = 0;
+  for (const a of s.artifacts) {
+    if (!a || a.type !== "file" || typeof a.value !== "string") continue;
+    let isDir = false;
+    try { isDir = statSync(resolveFilePath(a.value)).isDirectory(); } catch {}
+    if (!isDir || !insideWorkspace(resolveFilePath(a.value))) continue;
+    a.type = "dir";
+    fixed++;
+  }
+  // A folder pinned as a file beside its own folder pin is now the same pin
+  // twice — merge them (first wins, missing label/open filled from the other).
+  if (fixed) { const d = dedupeArtifacts(s.artifacts); if (d.dropped) s.artifacts = d.out; }
+  return fixed;
+}
+// De-duplicate on type + value, first entry wins; a `label` or `open` the
+// survivor lacks is taken from the dropped twin so nothing the user set is lost.
+function dedupeArtifacts(arr) {
+  const seen = new Map();
+  const out = [];
+  let dropped = 0;
+  for (const a of arr) {
+    const key = a && typeof a === "object" && typeof a.value === "string" ? `${a.type ?? "file"}:${a.value}` : JSON.stringify(a);
+    const first = seen.get(key);
+    if (first) {
+      dropped++;
+      if (first.label === undefined && a.label !== undefined) first.label = a.label;
+      if (first.open === undefined && a.open !== undefined) first.open = a.open;
+      continue;
+    }
+    seen.set(key, a);
+    out.push(a);
+  }
+  return { out, dropped };
+}
+// Records written before canonical storage (1530faf, 2026-07-23) hold absolute
+// paths for files under the workspace, and a folder pinned twice in two
+// spellings; the panel keys its grouping on the stored form, so such a record
+// drew one folder twice (prod 2026-10-09). At boot and on restore every file/dir
+// artifact value goes through canonicalArtifactPath — the same rule as a fresh
+// pin, the agent's cwd as the fallback base — and the array is de-duplicated on
+// type + canonical value, first entry wins, its missing label/open taken from the
+// twin; a record
+// without `type` is stamped file/url. Idempotent:
+// a canonical record changes nothing and is not saved. Mutates in place; the
+// caller saves. Returns { rewritten, dropped }.
+function canonicalizeArtifactsOn(s) {
+  if (!Array.isArray(s.artifacts)) return { rewritten: 0, dropped: 0 };
+  let cwd = null;
+  try { cwd = resolveAgentCwd(s); } catch (e) { warnOnce(`artifact-canon-cwd:${s.id}`, `[agents] ${s.id}: artifact canonicalisation falls back to the workspace root — cwd could not be resolved (${e.message})`); }
+  let rewritten = 0;
+  for (const a of s.artifacts) {
+    if (!a || typeof a !== "object") continue;
+    // A record from before `type` existed is a file pin (or a url by its value):
+    // stamp it so the panel's dir claim, the folder migration and pinCoverage —
+    // all of which test the type exactly — see it.
+    if (!a.type && typeof a.value === "string") { a.type = /^https?:/.test(a.value) ? "url" : "file"; rewritten++; }
+    const type = a.type ?? "file";
+    if ((type === "file" || type === "dir") && typeof a.value === "string" && a.value && !/^https?:/.test(a.value)) {
+      let canon = a.value;
+      try { canon = canonicalArtifactPath(a.value, cwd); } catch (e) { warnOnce(`artifact-canon:${s.id}`, `[agents] ${s.id}: an artifact path could not be canonicalised and is kept as stored (${e.message}) — the panel may draw its folder twice`); }
+      if (canon !== a.value) { a.value = canon; rewritten++; }
+    }
+  }
+  // Keyed on type + value: file:X and dir:X are two pins here (migrateFolderPinsOn
+  // merges them when X is a directory).
+  const { out, dropped } = dedupeArtifacts(s.artifacts);
+  if (dropped) s.artifacts = out;
+  return { rewritten, dropped };
+}
+function migrateFolderPins() {
+  let fixed = 0;
+  for (const s of sessions.values()) {
+    const c = canonicalizeArtifactsOn(s);
+    const n = migrateFolderPinsOn(s);
+    if (c.rewritten || c.dropped) console.log(`[agents] ${s.id}: artifact paths canonicalised (${c.rewritten} rewritten, ${c.dropped} duplicate(s) dropped)`);
+    if (!n && !c.rewritten && !c.dropped) continue;
+    fixed += n;
+    try { saveAgent(s); } catch (e) { console.error(`[agents] ${s.id}: could not save the artifact migration (${e.message})`); }
+  }
+  if (fixed) console.log(`[agents] ${fixed} folder(s) pinned as files became folder listings`);
+}
 
 // Boot, stage 1: one monitor per agent, sequentially, with the async ensure —
 // N agents × a slow tmux stays bounded per call and the port already serves

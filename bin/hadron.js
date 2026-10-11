@@ -93,7 +93,9 @@ function resetsIn(epochS) {
   return `in ${Math.floor(h / 24)}d ${h % 24}h`;
 }
 
-async function api(method, path, body) {
+// `tolerate`: statuses handed back as { status, error } instead of dying
+// (artifacts unpin collects its 404s per path).
+async function api(method, path, body, { tolerate = [] } = {}) {
   const headers = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (method !== "GET" && method !== "HEAD") {
@@ -111,6 +113,7 @@ async function api(method, path, body) {
   try { json = text ? JSON.parse(text) : null; } catch { json = text; }
   if (!res.ok) {
     const detail = json && json.error ? json.error : res.statusText;
+    if (tolerate.includes(res.status)) return { status: res.status, error: detail };
     die(`${method} ${path} → ${res.status}: ${detail}`);
   }
   return json;
@@ -222,7 +225,7 @@ const COMMAND_FLAGS = {
   pin: [], unpin: [], park: [], unpark: [], close: [], restore: [],
   adopt: ["session-id", "force"],
   orphans: ["json", "all"],
-  artifacts: ["auto"],
+  artifacts: ["auto", "agent"],
   kernels: ["json", "marimo", "jupyter"],
   notes: [],
   checkpoint: ["json", "goal", "next", "blocked", "hook", "install-hook", "uninstall-hook"],
@@ -550,7 +553,7 @@ async function main() {
       const agent = await resolveTargetOrSelf(positional[0]);
       const parked = cmd === "park";
       await api("PATCH", `/api/sessions/${agent.id}`, { parked });
-      console.log(`${parked ? "parked" : "unparked"} ${agent.name} (${agent.id})${parked ? " — folded into the deck's Stale section; tmux and claude keep running" : ""}`);
+      console.log(`${parked ? "parked" : "unparked"} ${agent.name} (${agent.id})${parked ? (agent.pinned ? " — pinned, so it stays under 📌 Pinned and folds once unpinned; tmux and claude keep running" : " — folded into its group's stale row on the deck; tmux and claude keep running") : ""}`);
       break;
     }
     case "close": {
@@ -596,9 +599,32 @@ async function main() {
     }
     case "artifacts": {
       const sub = positional[0];
-      const me = await whoami();
+      // --agent <name|id>: maintain ANOTHER agent's panel (a planner outside the
+      // pane). Without it the verb is about the agent whose pane this is.
+      if (flags.agent === true) die("--agent needs a value: hadron artifacts <ls|pin|unpin> --agent <name|id>");
+      const me = typeof flags.agent === "string" ? await resolveTarget(flags.agent) : await whoami();
       if (sub === "ls") {
         for (const x of me.artifacts || []) console.log(`${x.label ? x.label + "  " : ""}${x.value}`);
+        break;
+      }
+      if (sub === "unpin" || sub === "rm") {
+        // Paths go through the same canonicalisation as pin (workspace-relative,
+        // then the agent's cwd) on the server, so the form that pinned a file
+        // unpins it. Every path is tried; a miss is reported and exits 1 at the
+        // end, after the hits are removed — like rm.
+        const paths = [...new Set(positional.slice(1))]; // `unpin x x` asks once
+        if (!paths.length) die("usage: hadron artifacts unpin <path...> [--agent <name|id>]");
+        const missing = [], ambiguous = [];
+        for (const p of paths) {
+          // Each removal is printed as it lands, so a later failure (server
+          // gone, an ambiguous path) never hides what was already unpinned.
+          const out = await api("DELETE", `/api/sessions/${me.id}/artifacts`, { value: p }, { tolerate: [404, 409] });
+          if (out && out.status === 404) { missing.push(p); continue; }
+          if (out && out.status === 409) { ambiguous.push(out.error); continue; }
+          console.log(`unpinned from ${me.name || me.id}: ${p}`);
+        }
+        const problems = [...(missing.length ? [`not pinned on ${me.name || me.id}: ${missing.join(", ")}`] : []), ...ambiguous];
+        if (problems.length) die(problems.join("\n"));
         break;
       }
       if (sub === "add" || sub === "pin") { // "pin": the panel calls artifacts Pinned
@@ -614,12 +640,21 @@ async function main() {
             .map((f) => (base && !f.path.startsWith("/")) ? `${base}/${f.path}` : f.path);
           if (!paths.length) die("no high-relevance files found to auto-add");
         }
-        if (!paths.length) die("usage: hadron artifacts pin [--auto | <path...>]");
-        for (const p of paths) await api("POST", `/api/sessions/${me.id}/artifacts`, { type: "file", value: p });
-        console.log(`pinned ${paths.length} file(s): ${paths.join(", ")}`);
+        if (!paths.length) die("usage: hadron artifacts pin [--auto | <path...>] [--agent <name|id>]");
+        // The server says when a pin overlaps a folder pin (the panel draws the
+        // file inside the folder's group, never a second group): told as notes
+        // after the summary line, nothing refused.
+        const notes = [];
+        for (const p of paths) {
+          const out = await api("POST", `/api/sessions/${me.id}/artifacts`, { type: "file", value: p });
+          if (out && typeof out.coveredBy === "string") notes.push(`note: ${p} is already inside pinned folder ${out.coveredBy}/ — shown there as a highlighted row`);
+          if (out && typeof out.covers === "number") notes.push(`note: ${out.covers} pinned file${out.covers === 1 ? " is" : "s are"} inside ${p} and will show in it`);
+        }
+        console.log(`pinned ${paths.length} file(s) on ${me.name || me.id}: ${paths.join(", ")}`);
+        for (const n of notes) console.log(n);
         break;
       }
-      die("usage: hadron artifacts <ls|pin|add>");
+      die("usage: hadron artifacts <ls|pin|unpin> [--agent <name|id>]");
       break;
     }
     case "kernels": {
@@ -1159,7 +1194,7 @@ Commands:
        (custom launchers are defined in .hadron/config.json "launchers" — see docs/CONFIGURATION.md)
   hadron pin [name|id]                     pin an agent to the deck's 📌 Pinned section (no arg = self)
   hadron unpin [name|id]                   unpin (no arg = self)
-  hadron park [name|id]                    fold an agent into the deck's Stale section (nothing is killed
+  hadron park [name|id]                    fold an agent into its group's stale row (nothing is killed
                                            or archived; it comes back when it next needs you) (no arg = self)
   hadron unpark [name|id]                  unfold (no arg = self)
   hadron close [name|id ...]               archive agent(s): tmux dies, JSON kept (no arg = self;
@@ -1174,7 +1209,16 @@ Commands:
                                            one is on disk, else a blank one named by its id)
   hadron orphans kill <tmux|id> | --all    kill the orphan tmux session(s)
   hadron artifacts pin [--auto | <path...>] pin files to the current agent's panel (alias: add)
+  hadron artifacts unpin <path...>         remove pinned files — the path that pinned a file unpins
+                                           it, deleted or not, so does the absolute path that
+                                           ls prints (alias: rm; a path that is not pinned → exit 1,
+                                           the others are still removed; a relative name pinned
+                                           both at the workspace root and under the cwd is refused)
   hadron artifacts ls                      list the current agent's pinned files
+      … --agent <name|id>                  on pin / unpin / ls: another agent's panel instead of the
+                                           current pane's (a planner session maintaining a worker)
+                                           — relative paths resolve against the workspace, then
+                                           THAT agent's cwd, so pass absolute paths from elsewhere
   hadron notes [show|set "..."|append "..."]
   hadron checkpoint [show] [--json]        the current agent's handoff (goal / → next / ⚠ blocked / outputs)
   hadron checkpoint --goal "..." --next "..." [--blocked "..."] [-- <output files...>]

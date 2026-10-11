@@ -217,6 +217,16 @@ console.log("attention revision (no tmux needed)");
   ok(needsAttention(session) === false, "…and false once acked to the current rev");
   raiseAttention(session);
   ok(session.attentionRev === 3 && needsAttention(session), "raiseAttention() past an ack re-lights");
+  // Entering working acks the outstanding raise (ackByTurn): a new turn is an
+  // answer, whichever channel it came from (phone app included).
+  det._setState("working");
+  ok(session.ackRev === 3 && typeof session.ackAt === "string" && !needsAttention(session), "blocked→working with rev 3 unread → ackRev 3 + ackAt (answered = looked)");
+  ok(persisted.join(",") === "1,2,3", `…persisted through onAttention (${persisted.join(",")})`);
+  const ackAtTurn = session.ackAt;
+  det._setState("idle"); det._setState("working");
+  ok(session.ackRev === 3 && session.ackAt === ackAtTurn && persisted.length === 3, "working with nothing outstanding: no restamp, no persist");
+  det._setState("done");
+  ok(session.attentionRev === 4 && needsAttention(session), "…the next done raises past the turn ack (4 > 3)");
 
   // After a service restart the loader resets state to idle but keeps the revs
   // and the state that raised. The detector's first verdict re-recognising that
@@ -234,6 +244,9 @@ console.log("attention revision (no tmux needed)");
   const unread = { id: "boot3", state: "idle", attentionRev: 2, ackRev: 1, attentionState: "done" };
   new StateDetector("boot3", unread, { poll: false })._setState("done");
   ok(unread.attentionRev === 2 && needsAttention(unread), "an UNREAD agent stays unread (2 > 1) without a spurious extra raise");
+  const answered = { id: "boot4", state: "idle", attentionRev: 2, ackRev: 1, attentionState: "done" };
+  new StateDetector("boot4", answered, { poll: false })._setState("working");
+  ok(answered.attentionRev === 2 && answered.ackRev === 2 && !needsAttention(answered), "a first verdict of working on an unread agent acks it (the operator answered while the server was down)");
 }
 
 if (!haveTmux) {

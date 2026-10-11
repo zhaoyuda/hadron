@@ -77,6 +77,12 @@ async function main() {
   mkdirSync(join(WS, ".git"), { recursive: true });
   mkdirSync(join(WS, "node_modules", "pkg"), { recursive: true });
   symlinkSync("/etc", join(WS, "esc"));
+  // A record from before folders pinned as files were coerced: one in-workspace
+  // folder pin, one outside — proven below to be migrated / left alone at boot.
+  mkdirSync(join(WS, ".hadron", "agents"), { recursive: true });
+  mkdirSync(join(WS, "legacydir"), { recursive: true });
+  writeFileSync(join(WS, ".hadron", "agents", "legacy.json"), JSON.stringify({ id: "legacy", name: "Legacy", group: "Workers", launchCommand: "shell",
+    artifacts: [{ type: "file", value: "legacydir" }, { type: "file", value: "/etc" }, { type: "file", value: "plain.md" }], relatedAgents: [], notes: "" }));
 
   server = spawn("node", [join(__dirname, "..", "..", "server", "index.js"), WS], {
     env: { ...process.env, PORT: String(PORT), HADRON_HOST: "127.0.0.1" },
@@ -87,6 +93,23 @@ async function main() {
   TOKEN = readFileSync(join(WS, ".hadron", "token"), "utf-8").trim();
 
   await fetch(`${BASE}/api/sessions`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ name: "arty", launchCommand: "shell", cwd: "sub" }) });
+
+  console.log("\n[boot: folders pinned as files before the coercion become folder listings]");
+  {
+    const arts = agentJson("legacy").artifacts;
+    ok(arts.find((a) => a.value === "legacydir")?.type === "dir", "an in-workspace folder pinned as a file is a dir artifact after boot, saved on the record");
+    ok(arts.find((a) => a.value === "/etc")?.type === "file", "…a folder outside the workspace is left as it was");
+    ok(arts.find((a) => a.value === "plain.md")?.type === "file", "…a real file pin untouched");
+    const r = await fetch(`${BASE}/api/sessions`, { headers: authHeaders() });
+    const j = await r.json();
+    ok(j.find((s) => s.id === "legacy")?.artifacts.find((a) => a.value.endsWith("legacydir"))?.type === "dir", "…and the wire shows the listing");
+    // An ARCHIVED legacy record misses the boot pass; restore migrates it.
+    writeFileSync(join(WS, ".hadron", "agents", "legacyarch.json"), JSON.stringify({ id: "legacyarch", name: "LegacyArch", group: "Workers", launchCommand: "shell", archived: true, archivedAt: new Date().toISOString(),
+      artifacts: [{ type: "file", value: "legacydir" }], relatedAgents: [], notes: "" }));
+    const rr = await fetch(`${BASE}/api/sessions/legacyarch/restore`, { method: "POST", headers: authHeaders() });
+    ok(rr.status === 200 && agentJson("legacyarch").artifacts[0].type === "dir", `restoring an archived record migrates its folder pin too (${rr.status}, ${agentJson("legacyarch").artifacts[0].type})`);
+    await fetch(`${BASE}/api/sessions/legacyarch`, { method: "DELETE", headers: authHeaders() }).catch(() => {});
+  }
 
   console.log("\n[browse: start dir + rel contract]");
   {
@@ -147,6 +170,15 @@ async function main() {
     ok(r.status === 400, "dir artifact outside the workspace rejected (400)");
     r = await fetch(`${BASE}/api/sessions/arty/artifacts`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ type: "dir", value: "esc" }) });
     ok(r.status === 400, "dir artifact through an escaping symlink rejected (400)");
+    // A folder pinned as type "file" (what `hadron artifacts pin <dir>` posts)
+    // becomes the dir artifact it should have been; outside the jail it is
+    // refused with a message that says it is a folder.
+    r = await fetch(`${BASE}/api/sessions/arty/artifacts`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ type: "file", value: "sub/inner" }) });
+    let coerced = (await r.json()).artifacts.find((a) => /sub\/inner$/.test(a.value));
+    ok(r.status === 200 && coerced && coerced.type === "dir", `a folder pinned as a file lands as a dir artifact (${JSON.stringify(coerced)})`);
+    ok(agentJson("arty").artifacts.find((a) => a.value === "sub/inner")?.type === "dir", "…persisted as type dir");
+    r = await fetch(`${BASE}/api/sessions/arty/artifacts`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ type: "file", value: "/etc" }) });
+    ok(r.status === 400 && /\/etc is a folder outside the workspace/.test((await r.json()).error), "a folder outside the workspace pinned as a file → 400 naming it as a folder");
     r = await fetch(`${BASE}/api/sessions/arty/artifacts`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ type: "weird", value: "x" }) });
     ok(r.status === 400, "unknown artifact type rejected (400)");
     r = await fetch(`${BASE}/api/sessions/arty/artifacts`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ type: "dir", value: "sub/inner" }) });
@@ -208,6 +240,93 @@ async function main() {
     ok(r.status === 400, "missing value rejected (400)");
     r = await fetch(`${BASE}/api/sessions/deletee/artifacts`, { method: "DELETE", headers: authHeaders(), body: JSON.stringify({ index: 9, value: "one.md" }) });
     ok(r.status === 409, "out-of-range index → 409 (array drifted)");
+
+    // Value-only (`hadron artifacts unpin`): no index was ever rendered, so the
+    // path is canonicalised like a pin and the artifact it names goes.
+    mkdirSync(join(WS, "sub"), { recursive: true });
+    writeFileSync(join(WS, "sub", "deck-v0.8.md"), "old");
+    writeFileSync(join(WS, "sub", "deck-v0.10.md"), "new");
+    for (const v of ["sub/deck-v0.8.md", "sub/deck-v0.10.md"]) {
+      await fetch(`${BASE}/api/sessions/deletee/artifacts`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ type: "file", value: v }) });
+    }
+    ok(agentJson("deletee").artifacts.map((a) => a.value).join(",") === "one.md,three.md,sub/deck-v0.8.md,sub/deck-v0.10.md", "harness: four pinned");
+    r = await fetch(`${BASE}/api/sessions/deletee/artifacts`, { method: "DELETE", headers: authHeaders(), body: JSON.stringify({ value: "sub/nope.md" }) });
+    ok(r.status === 404, "value-only: a path that is not pinned → 404");
+    ok(agentJson("deletee").artifacts.length === 4, "…and nothing removed");
+    r = await fetch(`${BASE}/api/sessions/deletee/artifacts`, { method: "DELETE", headers: authHeaders(), body: JSON.stringify({ value: join(WS, "sub", "deck-v0.8.md") }) });
+    j = await r.json();
+    ok(r.status === 200 && j.artifacts.length === 3, "value-only: the absolute form of a workspace-relative pin removes it");
+    ok(agentJson("deletee").artifacts.map((a) => a.value).join(",") === "one.md,three.md,sub/deck-v0.10.md", "exactly deck-v0.8 removed, deck-v0.10 (shared prefix) untouched");
+    r = await fetch(`${BASE}/api/sessions/deletee/artifacts`, { method: "DELETE", headers: authHeaders(), body: JSON.stringify({ value: "./sub/../sub/deck-v0.10.md" }) });
+    ok(r.status === 200 && agentJson("deletee").artifacts.map((a) => a.value).join(",") === "one.md,three.md", "value-only: a non-normalised relative path canonicalises to its pin");
+    r = await fetch(`${BASE}/api/sessions/deletee/artifacts`, { method: "DELETE", headers: authHeaders(), body: JSON.stringify({ index: null }) });
+    ok(r.status === 400, "neither index nor value → 400");
+    r = await fetch(`${BASE}/api/sessions/deletee/artifacts`, { method: "DELETE", headers: authHeaders(), body: JSON.stringify({ index: "0", value: "one.md" }) });
+    ok(r.status === 400 && agentJson("deletee").artifacts.length === 2, "a string index is neither form → 400, nothing removed");
+    r = await fetch(`${BASE}/api/sessions/deletee/artifacts`, { method: "DELETE", headers: authHeaders(), body: JSON.stringify({ index: null, value: "one.md" }) });
+    ok(r.status === 400 && agentJson("deletee").artifacts.length === 2, "index: null is the index form with a bad index → 400, never a silent by-value removal");
+    // url and dir artifacts unpin by value too.
+    await fetch(`${BASE}/api/sessions/deletee/artifacts`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ type: "url", value: "https://example.com/dash" }) });
+    await fetch(`${BASE}/api/sessions/deletee/artifacts`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ type: "dir", value: "sub" }) });
+    ok(agentJson("deletee").artifacts.length === 4, "harness: a url and a dir pinned");
+    r = await fetch(`${BASE}/api/sessions/deletee/artifacts`, { method: "DELETE", headers: authHeaders(), body: JSON.stringify({ value: "https://example.com/dash" }) });
+    ok(r.status === 200 && !agentJson("deletee").artifacts.some((a) => a.type === "url"), "value-only removes a url artifact");
+    r = await fetch(`${BASE}/api/sessions/deletee/artifacts`, { method: "DELETE", headers: authHeaders(), body: JSON.stringify({ value: join(WS, "sub") }) });
+    ok(r.status === 200 && !agentJson("deletee").artifacts.some((a) => a.type === "dir"), "value-only removes a dir artifact by its absolute path");
+  }
+
+  console.log("\n[unpin by value: the deleted-file case and the cwd/workspace ambiguity]");
+  {
+    // An agent whose cwd is a subdirectory pins "a.md" → stored "proj/a.md".
+    // The motivating stale pin is a DELETED file: the same "a.md" must still
+    // unpin it (the existence-gated base pick in canonicalArtifactPath would
+    // otherwise resolve it against the workspace and 404).
+    mkdirSync(join(WS, "proj"), { recursive: true });
+    writeFileSync(join(WS, "proj", "a.md"), "a");
+    writeFileSync(join(WS, "proj", "both.md"), "p");
+    writeFileSync(join(WS, "both.md"), "w");
+    let r = await fetch(`${BASE}/api/sessions`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ name: "subcwd", launchCommand: "shell", cwd: join(WS, "proj") }) });
+    ok(r.status === 201, `harness: agent with cwd <ws>/proj (${r.status})`);
+    await fetch(`${BASE}/api/sessions/subcwd/artifacts`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ type: "file", value: "a.md" }) });
+    ok(agentJson("subcwd").artifacts.map((a) => a.value).join(",") === "proj/a.md", "harness: pinned from the cwd, stored workspace-relative under proj/");
+    rmSync(join(WS, "proj", "a.md"));
+    r = await fetch(`${BASE}/api/sessions/subcwd/artifacts`, { method: "DELETE", headers: authHeaders(), body: JSON.stringify({ value: "a.md" }) });
+    ok(r.status === 200 && agentJson("subcwd").artifacts.length === 0, "the path that pinned a now-DELETED file still unpins it (cwd base tried without the file)");
+    // Both bases name a pinned artifact → 409 naming both, nothing removed; the absolute form is never ambiguous.
+    await fetch(`${BASE}/api/sessions/subcwd/artifacts`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ type: "file", value: "both.md" }) });
+    await fetch(`${BASE}/api/sessions/subcwd/artifacts`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ type: "file", value: join(WS, "proj", "both.md") }) });
+    ok(agentJson("subcwd").artifacts.map((a) => a.value).sort().join(",") === "both.md,proj/both.md", `harness: both.md pinned at the workspace root (the relative pin: the workspace base wins while both exist) AND under the cwd (${agentJson("subcwd").artifacts.map((a) => a.value).join(",")})`);
+    r = await fetch(`${BASE}/api/sessions/subcwd/artifacts`, { method: "DELETE", headers: authHeaders(), body: JSON.stringify({ value: "both.md" }) });
+    const j = await r.json();
+    ok(r.status === 409 && /both\.md and proj\/both\.md|proj\/both\.md and both\.md/.test(j.error) && /absolute path/.test(j.error), `a relative path naming two pinned artifacts → 409 naming both (${j.error})`);
+    ok(agentJson("subcwd").artifacts.length === 2, "…nothing removed on ambiguity");
+    r = await fetch(`${BASE}/api/sessions/subcwd/artifacts`, { method: "DELETE", headers: authHeaders(), body: JSON.stringify({ value: join(WS, "proj", "both.md") }) });
+    ok(r.status === 200 && agentJson("subcwd").artifacts.map((a) => a.value).join(",") === "both.md", "the absolute path unpins exactly the one it names");
+    // Revalidation (whole-array PATCH) never rejects a pin that was valid when made.
+    mkdirSync(join(WS, "proj", "becomesdir.md"));
+    writeFileSync(join(WS, "proj", "keep.md"), "k");
+    rmSync(join(WS, "both.md"));
+    // A legacy outside-folder pin is staged as a FILE that is pinned, then
+    // replaced by a folder on disk — the shape a record from before this
+    // change has.
+    const outsideDir = mkdtempSync(join(tmpdir(), "hadron-outside-"));
+    const legacyOutside = join(outsideDir, "was-a-file");
+    writeFileSync(legacyOutside, "f");
+    r = await fetch(`${BASE}/api/sessions/subcwd/artifacts`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ type: "file", value: legacyOutside }) });
+    ok(r.status === 201 || r.status === 200, `harness: outside file pinned while it was a file (${r.status})`);
+    rmSync(legacyOutside); mkdirSync(legacyOutside);
+    let cur = agentJson("subcwd").artifacts;
+    r = await fetch(`${BASE}/api/sessions/subcwd`, { method: "PATCH", headers: authHeaders(), body: JSON.stringify({ artifacts: [...cur, { type: "file", value: "proj/keep.md" }, { type: "file", value: "proj/becomesdir.md" }] }) });
+    ok(r.status === 200, `a whole-array PATCH re-sending a stored file pin whose path became a folder outside the workspace is not rejected (${r.status})`);
+    const after = agentJson("subcwd").artifacts;
+    ok(after.find((a) => a.value === "proj/becomesdir.md")?.type === "dir", "…an in-workspace path that became a folder is the folder listing");
+    ok(after.find((a) => a.value === legacyOutside)?.type === "file", "…the stored outside one is left as the file pin it was");
+    cur = agentJson("subcwd").artifacts;
+    r = await fetch(`${BASE}/api/sessions/subcwd`, { method: "PATCH", headers: authHeaders(), body: JSON.stringify({ artifacts: [...cur, { type: "file", value: outsideDir }] }) });
+    ok(r.status === 400 && agentJson("subcwd").artifacts.length === cur.length, `…but a PATCH ADDING a fresh outside-folder file pin is refused like POST (${r.status})`);
+    r = await fetch(`${BASE}/api/sessions/subcwd/artifacts`, { method: "POST", headers: authHeaders(), body: JSON.stringify({ type: "file", value: outsideDir }) });
+    ok(r.status === 400, "…and so is a fresh POST of it");
+    rmSync(outsideDir, { recursive: true, force: true });
   }
 
   console.log("\n[concurrent append + delete]");

@@ -41,6 +41,7 @@ const WS = mkdtempSync(join(tmpdir(), "hadron-chgtest-"));
 const CONFIG = mkdtempSync(join(tmpdir(), "hadron-chgcfg-"));
 const GIT = join(WS, "repo");
 const SID = randomUUID();
+const SCRATCH = join(tmpdir(), `hadron-chgtest-scratch-${process.pid}.png`); // outside the workspace
 let server, TOKEN;
 const req = (p, auth = true) => fetch(`${BASE}${p}`, { headers: auth ? { "x-hadron-token": TOKEN, "Origin": BASE } : {} });
 const git = (...a) => execFileSync("git", ["-C", GIT, ...a], { encoding: "utf-8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t", LC_ALL: "C" }, stdio: ["ignore", "pipe", "pipe"] });
@@ -78,7 +79,9 @@ function seedAgents() {
   writeFileSync(join(tdir, `${SID}.jsonl`),
     JSON.stringify({ type: "user", timestamp: now, message: { role: "user", content: "hi" } }) + "\n" +
     JSON.stringify({ type: "assistant", timestamp: now, message: { id: "m1", role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Edit", input: { file_path: join(GIT, "src", "app.js"), old_string: "a", new_string: "b" } }] } }) + "\n" +
-    JSON.stringify({ type: "assistant", timestamp: now, message: { id: "m2", role: "assistant", content: [{ type: "tool_use", id: "t2", name: "Read", input: { file_path: join(GIT, "a.txt") } }] } }) + "\n");
+    JSON.stringify({ type: "assistant", timestamp: now, message: { id: "m2", role: "assistant", content: [{ type: "tool_use", id: "t2", name: "Read", input: { file_path: join(GIT, "a.txt") } }] } }) + "\n" +
+    // A scratch file written outside the workspace: a Changed fact, never Core.
+    JSON.stringify({ type: "assistant", timestamp: now, message: { id: "m3", role: "assistant", content: [{ type: "tool_use", id: "t3", name: "Write", input: { file_path: SCRATCH, content: "x" } }] } }) + "\n");
   // A repo with no commit yet (just scaffolded, `git add`ed) and an agent whose cwd is gone.
   const FRESH = join(WS, "fresh");
   mkdirSync(FRESH);
@@ -133,6 +136,12 @@ async function main() {
   ok(fresh0.root === join(WS, "fresh") && fresh0.files.length === 1 && fresh0.files[0].status === "added" && fresh0.files[0].add === 1, `no-commit repo: staged files listed as added with counts (${JSON.stringify(fresh0.files)})`);
   ok(c.total === 7 && c.truncated === false && by["src/app.js"].abs === join(GIT, "src", "app.js"), `total 7, not truncated, abs path present (${c.total}/${c.truncated})`);
   ok(!JSON.stringify(c).includes(SID), "no session id on the wire");
+
+  console.log("\n[file panel: Core is inside the workspace only]");
+  let files = null;
+  for (let i = 0; i < 20 && !(files && files.changed.length >= 2); i++) { const l = await (await req("/api/sessions")).json(); files = l.find((s) => s.id === "gitter")?.files || null; if (!(files && files.changed.length >= 2)) await sleep(500); }
+  ok(files && files.changed.some((f) => f.path === SCRATCH) && files.changed.some((f) => f.path === join(GIT, "src", "app.js")), `files.changed lists the /tmp write and the in-workspace write (${JSON.stringify(files?.changed.map((f) => f.path))})`);
+  ok(files && files.core.some((f) => f.path === join(GIT, "src", "app.js")) && !files.core.some((f) => f.path === SCRATCH), `files.core ranks the in-workspace file and never the /tmp one (${JSON.stringify(files?.core.map((f) => f.path))})`);
 
   console.log("\n[GET /api/sessions/:id/changes/diff]");
   ok((await req("/api/sessions/gitter/changes/diff?path=src/app.js", false)).status === 401, "401 without the token");

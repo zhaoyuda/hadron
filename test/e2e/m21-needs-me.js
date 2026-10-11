@@ -191,6 +191,26 @@ try {
   await shot("palette");
   await page.keyboard.press("Escape");
 
+  // ── 9. a new turn acks — the operator answered from somewhere Hadron cannot see ──
+  // gnu is unread (blocked) and not the active agent, so the dwell cannot ack
+  // it. Its pane going to `working` (here through the PATCH twin; the detector
+  // path is pinned in test-pane-resolution) means the operator answered — from
+  // claude's phone app, say — and that acks it on the server. The next done
+  // raises again. The client sends nothing: the server acked.
+  r.ok((await page.evaluate(() => activeSessionId)) !== "gnu", "harness: gnu is not the active agent (no dwell ack possible)");
+  const gnuRev = (await live("gnu")).attentionRev;
+  r.ok(gnuRev >= 1 && !(await live("gnu")).ackRev, `gnu: unread at rev ${gnuRev}`);
+  const patchesBefore = statePatches.length;
+  await api("PATCH", `/api/sessions/gnu`, { state: "working" });
+  r.ok(await until(async () => { const g = await live("gnu"); return g.ackRev === gnuRev && typeof g.ackAt === "string"; }), "blocked→working: server ackRev caught up (a new turn = answered) + ackAt stamped");
+  r.ok(await until(async () => !(await has("gnu", "dk-needs"))), "gnu's card goes quiet without anyone looking at it");
+  r.ok(!(await page.evaluate(() => needsMeList().some((s) => s.id === "gnu"))), "…and it left the needs-me count");
+  r.ok(agentJson("gnu").ackRev === gnuRev, "turn ack persisted to gnu's agent file");
+  r.ok(statePatches.length === patchesBefore, "the client sent no PATCH — the server acked");
+  await api("PATCH", `/api/sessions/gnu`, { state: "done" });
+  r.ok(await until(async () => { const g = await live("gnu"); return g.attentionRev > g.ackRev; }), "working→done raises past the turn ack: unread again");
+  r.ok(await until(() => has("gnu", "dk-needs")), "…card lit again");
+
   r.ok(pageErrors.length === 0, `no page errors (${pageErrors.join(" | ") || "none"})`);
 } catch (e) {
   r.fail(`exception: ${e.stack || e.message}`);

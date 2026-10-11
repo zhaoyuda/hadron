@@ -32,7 +32,7 @@ let openTabsPerSession = {}; // { sessionId: Set of tab ids }
 let layoutMode = "tabs"; // "tabs", "vsplit", "hsplit"
 let perSessionTab = {}; // { sessionId: activeTab }
 let perSessionLayout = {}; // { sessionId: layoutMode }
-let collapsedArtFolders = {}; // { sessionId: Set of collapsed artifact-folder dirs } — survives the 3s re-render
+let collapsedArtFolders = {}; // { sessionId: Set of artifact-folder dirs toggled AWAY from their default } — folder groups default open (member = collapsed), Changed/Core default closed (member = opened); survives the 3s re-render
 let workspaceGroups = null; // persisted group order from config, or null if not loaded
 let groupConfig = {}; // per-group attributes like { expandable: false }
 let deckSortMode = "state"; // "state", "manual", "name"
@@ -41,7 +41,8 @@ let deckFilter = "all"; // "all" | "needs" (only agents that need me, plus the a
 let deckStaleAfter = "3d"; // "1d" | "3d" | "7d" | "never" — fold quiet agents after this long
 const QUOTA_SHOW_FROM = [0, 30, 50]; // View → Quota: a window shows once this much of it is used
 let quotaShowFrom = 30;
-let deckStaleOpen = false; // the Stale section is collapsed unless the operator opened it
+let deckShowStale = false; // View → Show Stale Agents: every group's stale row stays open
+let deckStaleOpen = new Set(); // group keys whose stale row the operator opened (persisted)
 let currentTheme = "default"; // "default", "exploration"
 let notifyLevel = "all"; // "all" (sound+banner+flash), "banner" (banner+flash), "off"
 // System (OS-level) notifications on top of the level above: fire only while
@@ -259,19 +260,23 @@ function getPinnedSection() {
 // activity (claude's own record), when it last raised "needs me" (attentionAt)
 // and when the operator last looked (ackAt). The newest of them is "last
 // touched"; an agent untouched for deckStaleAfter that is not working, not
-// pinned, not needing me and not on screen folds into a collapsed Stale
-// section at the bottom of the deck — moved there, never archived, never
-// killed. `parked` is the manual version of the same fold (context menu /
-// `hadron park`). Either way, needing me pulls the card back out: attention
-// wins over quiet. Unknown timestamps fail toward visible.
+// pinned, not needing me and not on screen folds into its own group's stale
+// row — a "▸ N stale" line at the bottom of the group that opens in place
+// (dimmed cards under the live ones); never archived, never killed, never
+// moved out of its group. `parked` is the manual version of the same fold
+// (context menu / `hadron park`). Either way, needing me pulls the card back
+// out: attention wins over quiet. Unknown timestamps fail toward visible.
+// View → Show Stale Agents (deckShowStale) opens every row; a click on one
+// row opens that group (deckStaleOpen, remembered per group).
 const STALE_AFTER_MS = { "1d": 86400e3, "3d": 3 * 86400e3, "7d": 7 * 86400e3, never: Infinity };
 function lastTouchedAt(s) {
   const ts = [s.transcript?.lastActivityAt, s.attentionAt, s.ackAt]
     .map((t) => (t ? Date.parse(t) : NaN)).filter(Number.isFinite);
   return ts.length ? Math.max(...ts) : NaN;
 }
+const staleAfterMs = () => (Object.hasOwn(STALE_AFTER_MS, deckStaleAfter) ? STALE_AFTER_MS[deckStaleAfter] : STALE_AFTER_MS["3d"]);
 function staleByAge(s) {
-  const after = Object.hasOwn(STALE_AFTER_MS, deckStaleAfter) ? STALE_AFTER_MS[deckStaleAfter] : STALE_AFTER_MS["3d"];
+  const after = staleAfterMs();
   if (after === Infinity || s.state === "working") return false;
   const t = lastTouchedAt(s);
   return Number.isFinite(t) && Date.now() - t > after;
@@ -280,27 +285,45 @@ function isFolded(s) {
   if (s.pinned || needsMe(s) || s.id === activeSessionId) return false;
   return !!s.parked || staleByAge(s);
 }
-function getStaleSection() {
-  const items = sessions.filter(isFolded);
-  if (!items.length) return null;
-  // Most recently touched first; agents with no timestamp at all sink.
-  items.sort((a, b) => {
+// Most recently touched first; agents with no timestamp at all sink.
+function sortStale(items) {
+  return items.sort((a, b) => {
     const ta = lastTouchedAt(a), tb = lastTouchedAt(b);
     if (Number.isFinite(ta) !== Number.isFinite(tb)) return Number.isFinite(ta) ? -1 : 1;
     if (ta !== tb) return tb - ta;
     return a.id.localeCompare(b.id);
   });
-  const parked = items.filter((s) => s.parked).length;
-  return { label: `Stale · ${items.length}${parked ? ` (${parked} parked)` : ""}`, staleSection: true, items, collapsed: !deckStaleOpen };
 }
+// Keyed by layout so a group literally named `status:idle` and the Idle bucket never share a memory.
+const staleKey = (g) => (g.status ? `status:${g.status}` : `group:${g.label.toLowerCase()}`);
+const staleOpen = (g) => deckShowStale || deckStaleOpen.has(staleKey(g));
+// Every key either layout can produce right now (saveUIState prunes to these).
+const liveStaleKeys = () => {
+  try { return new Set([...getSessionGroups(), ...getStatusBuckets()].map(staleKey)); } catch { return deckStaleOpen; }
+};
+const staleLabel = (g) => { const parked = g.stale.filter((s) => s.parked).length; return `${g.stale.length} stale${parked ? ` (${parked} parked)` : ""}`; };
 
 // Rendering/nav layer: either semantic groups or status buckets. Persistence and
 // group-list bookkeeping keep using getSessionGroups() (always the group axis).
 // ═══ TRIAGE (attention / ack) ═══
 // Mail model: `state` is what the pane is doing (detector-owned, never edited
 // from here); attentionRev/ackRev say whether the operator has seen the last
-// time it needed them. A card "needs me" while attentionRev > ackRev.
-const needsMe = (s) => (s.attentionRev || 0) > (s.ackRev || 0);
+// time it needed them. A card "needs me" while attentionRev > ackRev — and
+// the raise is younger than the stale window (View → Fold Stale After; Never =
+// forever). An agent answered from a channel Hadron cannot see (the phone app)
+// is never acked here, so an old raise stops shouting the way an untouched
+// card stops showing: it counts for nothing, folds like any quiet card, and
+// the tooltip reads "last needed you Nd". The server still carries the unread
+// rev, so looking at it (ackTick) acks it like any other. A raise with no
+// timestamp fails toward lit.
+const unacked = (s) => (s.attentionRev || 0) > (s.ackRev || 0);
+function needsMe(s) {
+  if (!unacked(s)) return false;
+  const after = staleAfterMs();
+  if (after === Infinity) return true;
+  const t = s.attentionAt ? Date.parse(s.attentionAt) : NaN;
+  return !Number.isFinite(t) || Date.now() - t <= after;
+}
 const needsMeList = () => sessions.filter(needsMe);
 
 function getDeckSections({ filtered = true } = {}) {
@@ -316,23 +339,25 @@ function getDeckSections({ filtered = true } = {}) {
     if (pinnedSection) { pinnedSection = { ...pinnedSection, items: pinnedSection.items.filter(keep) }; if (!pinnedSection.items.length) pinnedSection = null; }
   }
   // The "needs me" filter already hides every quiet agent, so the fold has
-  // nothing to add there; otherwise stale/parked cards move (not copy) to it.
-  const staleSection = filtering ? null : getStaleSection();
-  if (pinnedSection || staleSection) {
-    base = base.map((g) => ({ ...g, items: g.items.filter((s) => !s.pinned && !isFolded(s)) }));
-  }
+  // nothing to add there; otherwise each group's stale/parked cards move
+  // (not copy) under its own "N stale" row.
+  base = base.map((g) => ({
+    ...g,
+    items: g.items.filter((s) => !s.pinned && (filtering || !isFolded(s))),
+    stale: filtering ? [] : sortStale(g.items.filter((s) => !s.pinned && isFolded(s))),
+  }));
   // Status buckets never render empty; group sections keep rendering empty
   // (they own the add/delete affordances) — unless the deck is filtered.
-  if (statusMode || filtering) base = base.filter((g) => g.items.length > 0);
-  return [...(pinnedSection ? [pinnedSection] : []), ...base, ...(staleSection ? [staleSection] : [])];
+  if (statusMode || filtering) base = base.filter((g) => g.items.length > 0 || g.stale.length > 0);
+  return [...(pinnedSection ? [pinnedSection] : []), ...base];
 }
 
 // Deck order. Filtered by default so Alt+1..9 / Alt+H/L index what is on
-// screen (a collapsed Stale section's cards are not); `{ filtered: false }` is
-// the full fleet (the palette must reach a quiet agent while the "needs me"
+// screen (a closed stale row's cards are not); `{ filtered: false }` is the
+// full fleet (the palette must reach a quiet agent while the "needs me"
 // filter or the fold hides it from the deck).
 function getDisplayOrder({ filtered = true } = {}) {
-  return getDeckSections({ filtered }).flatMap((g) => (filtered && g.staleSection && g.collapsed) ? [] : g.items);
+  return getDeckSections({ filtered }).flatMap((g) => [...g.items, ...((g.stale && (!filtered || staleOpen(g))) ? g.stale : [])]);
 }
 
 function syncGroupList() {
@@ -921,22 +946,6 @@ function renderDeck() {
       html += `</div></div>`;
       return;
     }
-    // The stale fold: a click on the header opens/closes it; cards render only
-    // while open (a collapsed fold takes no Alt+N slots — see getDisplayOrder).
-    if (g.staleSection) {
-      html += `<div class="deck-group deck-group-stale">`;
-      html += `<div class="deck-group-label" data-stale-toggle title="${g.collapsed ? "Show" : "Hide"} agents untouched for ${esc(deckStaleAfter === "never" ? "…" : deckStaleAfter)} or parked (nothing here is archived)">${g.collapsed ? "▸" : "▾"} ${esc(g.label)}</div>`;
-      if (!g.collapsed) {
-        html += `<div class="deck-cards">`;
-        g.items.forEach((s) => {
-          idx++;
-          html += mkDeckCard(s, idx, false);
-        });
-        html += `</div>`;
-      }
-      html += `</div>`;
-      return;
-    }
     // In status mode the header is a state label (not editable / not a drop target);
     // omit data-group-name so the rename/contextmenu handlers don't bind to it.
     const labelAttrs = statusMode
@@ -959,12 +968,29 @@ function renderDeck() {
       // Empty, non-protected group → offer a visible delete button (no right-click
       // needed). A group whose only members are pinned (moved to the pinned
       // section) is NOT empty — deleteGroup would no-op on it anyway.
-      const hasPinnedMember = sessions.some((s) => (s.pinned || isFolded(s)) && (s.group || "Workers").toLowerCase() === groupKey);
-      if (g.items.length === 0 && !hasPinnedMember && gc.expandable !== false) {
-        html += `<div class="dk-del dk-add-sm" title="Delete empty group "${esc(g.label)}"" data-del-group="${esc(g.label)}">×</div>`;
+      const hasPinnedMember = sessions.some((s) => s.pinned && (s.group || "Workers").toLowerCase() === groupKey);
+      if (g.items.length === 0 && g.stale.length === 0 && !hasPinnedMember && gc.expandable !== false) {
+        html += `<div class="dk-del dk-add-sm" title="Delete empty group &quot;${esc(g.label)}&quot;" data-del-group="${esc(g.label)}">×</div>`;
       }
     }
-    html += `</div></div>`;
+    html += `</div>`;
+    // The group's stale row: a click opens/closes it in place; the folded cards
+    // render dimmed under the live ones only while open (a closed row takes no
+    // Alt+N slots — see getDisplayOrder). View → Show Stale Agents opens all.
+    if (g.stale.length) {
+      const open = staleOpen(g);
+      const key = staleKey(g);
+      html += `<div class="deck-stale-row" data-stale-group="${esc(key)}" title="${open ? "Hide" : "Show"} ${deckStaleAfter === "never" ? "parked agents" : `agents untouched for ${esc(deckStaleAfter)} or parked`} (still running, nothing archived)${deckShowStale ? " — View → Show Stale Agents keeps them open" : ""}">${open ? "▾" : "▸"} ${esc(staleLabel(g))}</div>`;
+      if (open) {
+        html += `<div class="deck-cards deck-stale-cards">`;
+        g.stale.forEach((s) => {
+          idx++;
+          html += mkDeckCard(s, idx, false);
+        });
+        html += `</div>`;
+      }
+    }
+    html += `</div>`;
   });
 
   if (!statusMode) {
@@ -982,8 +1008,18 @@ function renderDeck() {
   el.querySelectorAll(".dk[data-sid]").forEach((card) => {
     card.addEventListener("click", () => switchSession(card.dataset.sid));
   });
-  const staleToggle = el.querySelector("[data-stale-toggle]");
-  if (staleToggle) staleToggle.addEventListener("click", () => { deckStaleOpen = !deckStaleOpen; renderDeck(); saveUIState(); });
+  el.querySelectorAll(".deck-stale-row[data-stale-group]").forEach((row) => row.addEventListener("click", () => {
+    const key = row.dataset.staleGroup;
+    // With Show Stale Agents on, a row click closes just this group by turning
+    // the global off and remembering every OTHER open row — one click, one row.
+    if (deckShowStale) {
+      deckShowStale = false;
+      for (const g of getDeckSections()) if (g.stale && g.stale.length && staleKey(g) !== key) deckStaleOpen.add(staleKey(g));
+      deckStaleOpen.delete(key);
+    } else if (deckStaleOpen.has(key)) deckStaleOpen.delete(key);
+    else deckStaleOpen.add(key);
+    renderDeck(); saveUIState();
+  }));
 
   // ── Drag and drop (group axis only; status buckets aren't reorderable) ──
   if (!statusMode) initDeckDragAndDrop(el);
@@ -1114,7 +1150,7 @@ function mkDeckCard(s, idx, allowDrag = true) {
   if (cpLine && (state === "idle" || state === "done")) sub = `<span class="dk-cp">${esc(cpLine)}</span>${age ? ` · ${age}` : ""}`;
 
   const draggable = allowDrag ? ` draggable="true"` : "";
-  const pin = (s.pinned ? `<span class="dk-pin" title="Pinned">📌</span>` : "") + (s.parked ? `<span class="dk-pin dk-parked" title="Parked — folded away until you unpark it (still running)">⏸</span>` : "")
+  const pin = (s.pinned ? `<span class="dk-pin" title="Pinned">📌</span>` : "") + (s.parked ? `<span class="dk-pin dk-parked" title="${s.pinned ? "Parked — folds into the stale row once unpinned (still running)" : "Parked — folded into the stale row until you unpark it (still running)"}">⏸</span>` : "")
     // The record file was unreadable at boot and this is the placeholder the
     // server wrote in its place — the agent is back (tmux kept), its
     // name/task/artifacts/notes are not. Shown until the agent is closed.
@@ -1143,10 +1179,10 @@ function initDeckDragAndDrop(el) {
     });
   });
 
-  // Dragover and drop on deck cards. The Pinned and Stale sections are
-  // display-only (no data-group, so handleDrop would refuse) — skip them so
-  // they never paint a drop indicator they cannot honour.
-  const dndCards = [...el.querySelectorAll(".dk[data-sid]")].filter((c) => !c.closest(".deck-group-pinned, .deck-group-stale"));
+  // Dragover and drop on deck cards. The Pinned section and the stale rows
+  // are display-only — skip them so they never paint a drop indicator they
+  // cannot honour.
+  const dndCards = [...el.querySelectorAll(".dk[data-sid]")].filter((c) => !c.closest(".deck-group-pinned, .deck-stale-cards"));
   dndCards.forEach((card) => {
     card.addEventListener("dragover", (e) => {
       e.preventDefault();
@@ -1180,7 +1216,7 @@ function initDeckDragAndDrop(el) {
   });
 
   // Dragover and drop on deck-cards containers (for dropping at end of group)
-  const dndContainers = [...el.querySelectorAll(".deck-cards")].filter((c) => !c.closest(".deck-group-pinned, .deck-group-stale"));
+  const dndContainers = [...el.querySelectorAll(".deck-cards")].filter((c) => !c.closest(".deck-group-pinned") && !c.classList.contains("deck-stale-cards"));
   dndContainers.forEach((container) => {
     container.addEventListener("dragover", (e) => {
       // Only handle if dragging over the container itself or the add button, not over a card
@@ -1283,6 +1319,42 @@ function handleDrop(draggedId, targetId, insertBefore, targetGroupKey) {
 }
 
 // ═══ CONTEXT PANEL (Zone C) ═══
+// Titles for the file panel's folder groups. Each entry { key, path, label }
+// starts as its label or last path segment; entries that share a title get
+// parent segments appended from the end — one more each round — until they
+// differ or run out: `retro — A`, `retro — B`, `retro — x/A`; a user label that
+// collides keeps its basename (`retro — alpha`). Returns key → title.
+function groupTitles(entries) {
+  const segsOf = (p) => String(p || "").split("/").filter(Boolean);
+  const byTitle = new Map();
+  entries.forEach((e) => {
+    const base = e.label || segsOf(e.path).pop() || e.path || "";
+    if (!byTitle.has(base)) byTitle.set(base, []);
+    byTitle.get(base).push(e);
+  });
+  const out = new Map();
+  byTitle.forEach((list, base) => {
+    if (list.length === 1) { out.set(list[0].key, base); return; }
+    // The tail is the path minus the segment already shown as the title; a user
+    // label that differs from the basename keeps the basename (that is what
+    // separates `alpha` labelled "retro" from `retro` itself).
+    const tails = list.map((e) => { const s = segsOf(e.path); return s[s.length - 1] === base ? s.slice(0, -1) : s; });
+    const depth = list.map(() => 1);
+    const sfx = (i) => tails[i].slice(Math.max(0, tails[i].length - depth[i])).join("/");
+    // Grow only the entries that still collide, each by one segment, until every
+    // suffix is distinct or the colliding ones have no more path to show.
+    for (;;) {
+      const counts = new Map();
+      list.forEach((_, i) => counts.set(sfx(i), (counts.get(sfx(i)) || 0) + 1));
+      let grew = false;
+      list.forEach((_, i) => { if (counts.get(sfx(i)) > 1 && depth[i] < tails[i].length) { depth[i]++; grew = true; } });
+      if (!grew) break;
+    }
+    list.forEach((e, i) => { const s = sfx(i); out.set(e.key, s ? `${base} — ${s}` : base); });
+  });
+  return out;
+}
+
 function renderRightPanel() {
   const el = document.getElementById("right");
   const activeSession = sessions.find((s) => s.id === activeSessionId);
@@ -1327,11 +1399,14 @@ function renderRightPanel() {
       const isOpen = group.classList.toggle("open");
       const dirIcon = hdr.querySelector(".af-dir-icon");
       if (dirIcon) dirIcon.innerHTML = folderIcon(isOpen, 15);
-      // Remember the collapse so the 3s deck refresh doesn't re-open it.
+      // Remember the toggle so the 3s deck refresh doesn't undo it: the set
+      // holds the deviation from the group's default (open for folders,
+      // closed for Changed / Core).
       const dir = group.dataset.afDir;
       if (dir) {
         const set = (collapsedArtFolders[activeSession.id] ||= new Set());
-        if (isOpen) set.delete(dir); else set.add(dir);
+        const closedByDefault = group.dataset.afDefault === "closed";
+        if (isOpen === closedByDefault) set.add(dir); else set.delete(dir);
       }
     });
   });
@@ -1431,6 +1506,8 @@ function renderRightPanel() {
 }
 
 // Sentinel key in collapsedArtFolders for the Changed section (never a real dir).
+// Changed and Core are collapsed by DEFAULT, so for these two keys membership
+// means "the user opened it" (the toggle handler inverts on data-af-default).
 const CHANGED_GROUP = "//changed";
 
 // "Changed · N": files this agent's claude session wrote (server `files`,
@@ -1458,8 +1535,8 @@ function buildCoreSection(activeSession) {
   const f = activeSession.files;
   if (!f || !Array.isArray(f.core) || !f.core.length) return "";
   const cwd = activeSession.cwd ? activeSession.cwd.replace(/\/+$/, "") + "/" : null;
-  const collapsed = (collapsedArtFolders[activeSession.id] || new Set()).has(CORE_GROUP);
-  let html = `<div class="af-group af-core${collapsed ? "" : " open"}" data-af-dir="${CORE_GROUP}">`;
+  const opened = (collapsedArtFolders[activeSession.id] || new Set()).has(CORE_GROUP);
+  let html = `<div class="af-group af-core${opened ? " open" : ""}" data-af-dir="${CORE_GROUP}" data-af-default="closed">`;
   html += `<div class="af-group-hdr" title="The files this session keeps coming back to, ranked by reads and writes in its transcript. Hover a row to pin it (moves to Pinned) or hide it."><span class="af-arrow">&#9654;</span> <span class="af-label">Core</span><span class="af-count">${f.core.length}${f.truncated || f.partial ? "+" : ""}</span>${coreDismissErr[activeSession.id] ? `<span class="af-core-err" title="${esc(coreDismissErr[activeSession.id])}">!</span>` : ""}</div>`;
   html += `<div class="af-group-body">`;
   f.core.forEach((e) => {
@@ -1579,8 +1656,8 @@ function buildChangedSection(activeSession) {
   if (!f || !Array.isArray(f.changed) || !f.changed.length) return "";
   const cwd = activeSession.cwd ? activeSession.cwd.replace(/\/+$/, "") + "/" : null;
   const others = otherWriters(activeSession);
-  const collapsed = (collapsedArtFolders[activeSession.id] || new Set()).has(CHANGED_GROUP);
-  let html = `<div class="af-group af-changed${collapsed ? "" : " open"}" data-af-dir="${CHANGED_GROUP}">`;
+  const opened = (collapsedArtFolders[activeSession.id] || new Set()).has(CHANGED_GROUP);
+  let html = `<div class="af-group af-changed${opened ? " open" : ""}" data-af-dir="${CHANGED_GROUP}" data-af-default="closed">`;
   html += `<div class="af-group-hdr"><span class="af-arrow">&#9654;</span> <span class="af-label">Changed</span><span class="af-count" title="${f.total} file${f.total === 1 ? "" : "s"} written this session${f.truncated ? " (at least — the list was capped)" : ""}${f.partial ? " (a record was too large to read — some writes may be missing)" : ""}${f.complete ? "" : " (still reading the transcript)"}">${f.total}${f.truncated || f.partial ? "+" : ""}${f.complete ? "" : "…"}</span></div>`;
   html += `<div class="af-group-body">`;
   f.changed.forEach((e) => {
@@ -1597,72 +1674,37 @@ function buildChangedSection(activeSession) {
 }
 
 function buildArtifactsSection(activeSession) {
-  // Changed (what the session wrote) → Core (what it keeps returning to) →
-  // Pinned (what the operator or the agent pinned: the artifacts).
-  let html = buildChangedSection(activeSession);
-  html += buildCoreSection(activeSession);
-  html += `<div class="rp-hdr" title="Files, folders and URLs pinned to this agent — by you here, or by the agent with \`hadron artifacts pin\`">Pinned</div>`;
+  // Pinned (what the operator or the agent pinned: the artifacts) on top —
+  // it is the curated list; Changed (what the session wrote) and Core (what
+  // it keeps returning to) follow, collapsed until opened, so a busy session's
+  // transcript never pushes the pins out of view.
+  let html = `<div class="rp-hdr" title="Files, folders and URLs pinned to this agent — by you here, or by the agent with \`hadron artifacts pin\`">Pinned</div>`;
   const artifacts = activeSession.artifacts || [];
 
   // ── Dir artifacts (type "dir"): live folder groups ──
   // Collapsed by default (artifact `open: true` flips the default; the user's toggle
   // persists in collapsedArtFolders). When EXPANDED, children come from the browse
   // API on the deck cadence (dirArtChildren in artifacts.js caches + refreshes);
-  // collapsed groups cost zero fetches. A file artifact directly under an expanded
-  // dir renders once — inside the group — so it's claimed away from the classic
-  // display-grouping below.
-  const claimed = new Set(); // artifact indexes rendered inside an expanded dir group
+  // collapsed groups cost zero fetches. A file artifact directly under a dir
+  // artifact belongs to that group whether it is open or collapsed — claimed away
+  // from the classic display-grouping below, so the folder is never drawn twice
+  // (prod 2026-10-09: `retros` collapsed + a second `retros` holding the pinned
+  // files). Collapsed, the header counts them (`retros · 2📌`).
+  const claimed = new Set(); // artifact indexes that render inside a dir group
+  const dirArts = []; // { idx, art, dirPath, inside: [{ art, idx, filename }] }
   artifacts.forEach((a, idx) => {
     if (a.type !== "dir") return;
     const dirPath = a.value || "";
-    const open = dirArtIsOpen(activeSession.id, a);
-    const dirName = a.label || dirPath.split("/").pop() || dirPath;
-    // File artifacts living directly under this dir (non-recursive).
+    // File artifacts living directly under this dir (non-recursive), matched on
+    // the full parent path — both sides are the resolved absolute form.
     const inside = [];
     artifacts.forEach((fa, fi) => {
-      if (fa.type !== "file" || !fa.value) return;
+      if ((fa.type ?? "file") !== "file" || !fa.value) return;
       const li = fa.value.lastIndexOf("/");
       if (li > 0 && fa.value.slice(0, li) === dirPath) inside.push({ art: fa, idx: fi, filename: fa.value.slice(li + 1) });
     });
-
-    let bodyHtml = "";
-    let badge = "";
-    if (open) {
-      inside.forEach(({ idx: fi }) => claimed.add(fi));
-      const entry = dirArtChildren(activeSession.id, dirPath);
-      if (entry.entries) {
-        const fileCount = entry.entries.filter((c) => c.type === "file").length;
-        badge = `<span class="af-count">${fileCount}</span>`;
-        const artByPath = new Map(inside.map((x) => [x.filename, x]));
-        entry.entries.forEach((child) => {
-          if (child.type === "dir") {
-            // v1: subdirs are inert rows with a count — no recursion.
-            bodyHtml += `<div class="af af-dir-sub"><span class="af-i">${folderIcon(false, 15)}</span><span class="af-label">${esc(child.name)}</span><span class="af-count">${child.count ?? ""}</span></div>`;
-            return;
-          }
-          const hit = artByPath.get(child.name);
-          if (hit) {
-            // Also an individual artifact → render as the artifact row (once).
-            bodyHtml += `<div class="af" data-art-idx="${hit.idx}"><span class="af-i">${fileIcon(child.name, 15)}</span><span class="af-label">${esc(hit.art.label || child.name)}</span><span class="af-rm" data-art-rm="${hit.idx}" title="Remove">×</span></div>`;
-          } else {
-            // Plain child file → ephemeral `file:` tab on click, no artifact created.
-            bodyHtml += `<div class="af af-file-eph" data-file-path="${esc(dirPath + "/" + child.name)}"><span class="af-i">${fileIcon(child.name, 15)}</span><span class="af-label">${esc(child.name)}</span></div>`;
-          }
-        });
-        if (!entry.entries.length) bodyHtml += `<div class="af-dir-empty">empty</div>`;
-      } else {
-        // Listing not here yet (first fetch in flight, or failed) — still show the
-        // file artifacts we already know live in this dir, plus a status line.
-        inside.forEach(({ art: fa, idx: fi, filename }) => {
-          bodyHtml += `<div class="af" data-art-idx="${fi}"><span class="af-i">${fileIcon(filename, 15)}</span><span class="af-label">${esc(fa.label || filename)}</span><span class="af-rm" data-art-rm="${fi}" title="Remove">×</span></div>`;
-        });
-        bodyHtml += `<div class="af-dir-empty">${entry.error ? "could not list folder" : "loading…"}</div>`;
-      }
-    }
-
-    html += `<div class="af-group af-dirart${open ? " open" : ""}" data-af-dirart="${esc(dirPath)}">`;
-    html += `<div class="af-group-hdr"><span class="af-arrow">&#9654;</span><span class="af-dir-icon">${folderIcon(open, 15)}</span> <span class="af-label">${esc(dirName)}</span>${badge}<span class="af-rm" data-art-rm="${idx}" title="Remove folder (files untouched)">×</span></div>`;
-    html += `<div class="af-group-body">${bodyHtml}</div></div>`;
+    inside.forEach(({ idx: fi }) => claimed.add(fi));
+    dirArts.push({ idx, art: a, dirPath, inside });
   });
 
   // ── Classic display-grouping of individually added files ──
@@ -1678,18 +1720,75 @@ function buildArtifactsSection(activeSession) {
     if (!groups.has(dir)) groups.set(dir, []);
     groups.get(dir).push({ art: a, idx: i, filename });
   });
+  groups.forEach((items, dir) => {
+    // Single file in dir — show flat, not grouped
+    if (items.length === 1) { topLevel.push(items[0]); groups.delete(dir); }
+  });
+
+  // Group titles — dir artifacts and display groups titled together: a folder's
+  // name (a user label wins), and when two collide, path segments are added
+  // from the end until they differ: `retro — A`, `retro — B`, `retro — x/A`.
+  // The full path is always the header's tooltip.
+  const titles = groupTitles([
+    ...dirArts.map((d) => ({ key: `dirart:${d.idx}`, path: d.dirPath, label: d.art.label })),
+    ...[...groups.keys()].map((dir) => ({ key: `dir:${dir}`, path: dir })),
+  ]);
+
+  dirArts.forEach(({ idx, art: a, dirPath, inside }) => {
+    const open = dirArtIsOpen(activeSession.id, a);
+    const dirName = titles.get(`dirart:${idx}`);
+    const pinRow = ({ art: fa, idx: fi, filename }) =>
+      `<div class="af af-pinned-in-dir" data-art-idx="${fi}"><span class="af-i">${fileIcon(filename, 15)}</span><span class="af-label">${esc(fa.label || filename)}</span><span class="af-pin-mark" title="Pinned on its own">📌</span><span class="af-rm" data-art-rm="${fi}" title="Remove">×</span></div>`;
+
+    let bodyHtml = "";
+    let badge = "";
+    if (open) {
+      const entry = dirArtChildren(activeSession.id, dirPath);
+      if (entry.entries) {
+        const fileCount = entry.entries.filter((c) => c.type === "file").length;
+        badge = `<span class="af-count">${fileCount}</span>`;
+        const artByPath = new Map(inside.map((x) => [x.filename, x]));
+        entry.entries.forEach((child) => {
+          if (child.type === "dir") {
+            // v1: subdirs are inert rows with a count — no recursion.
+            bodyHtml += `<div class="af af-dir-sub"><span class="af-i">${folderIcon(false, 15)}</span><span class="af-label">${esc(child.name)}</span><span class="af-count">${child.count ?? ""}</span></div>`;
+            return;
+          }
+          const hit = artByPath.get(child.name);
+          if (hit) {
+            // Also an individual artifact → render as the artifact row (once).
+            artByPath.delete(child.name);
+            bodyHtml += pinRow(hit);
+          } else {
+            // Plain child file → ephemeral `file:` tab on click, no artifact created.
+            bodyHtml += `<div class="af af-file-eph" data-file-path="${esc(dirPath + "/" + child.name)}"><span class="af-i">${fileIcon(child.name, 15)}</span><span class="af-label">${esc(child.name)}</span></div>`;
+          }
+        });
+        // A pin whose file is gone from the listing (deleted, renamed) is still a
+        // pin — shown here, never hidden, so it can be opened (missing) or removed.
+        artByPath.forEach((x) => { bodyHtml += pinRow(x); });
+        if (!entry.entries.length && !artByPath.size) bodyHtml += `<div class="af-dir-empty">empty</div>`;
+      } else {
+        // Listing not here yet (first fetch in flight, or failed) — still show the
+        // file artifacts we already know live in this dir, plus a status line.
+        inside.forEach((x) => { bodyHtml += pinRow(x); });
+        bodyHtml += `<div class="af-dir-empty">${entry.error ? "could not list folder" : "loading…"}</div>`;
+      }
+    } else if (inside.length) {
+      badge = `<span class="af-count af-pin-count" title="${inside.length} pinned file${inside.length === 1 ? "" : "s"} inside — expand to see them">${inside.length}📌</span>`;
+    }
+
+    html += `<div class="af-group af-dirart${open ? " open" : ""}" data-af-dirart="${esc(dirPath)}">`;
+    html += `<div class="af-group-hdr" title="${esc(dirPath)}"><span class="af-arrow">&#9654;</span><span class="af-dir-icon">${folderIcon(open, 15)}</span> <span class="af-label">${esc(dirName)}</span>${badge}<span class="af-rm" data-art-rm="${idx}" title="Remove folder (files untouched)">×</span></div>`;
+    html += `<div class="af-group-body">${bodyHtml}</div></div>`;
+  });
 
   // Render directory groups
   groups.forEach((items, dir) => {
-    const dirName = dir.split("/").pop() || dir;
-    if (items.length === 1) {
-      // Single file in dir — show flat, not grouped
-      topLevel.push(items[0]);
-      return;
-    }
+    const dirName = titles.get(`dir:${dir}`);
     const collapsed = (collapsedArtFolders[activeSession.id] || new Set()).has(dir);
     html += `<div class="af-group${collapsed ? "" : " open"}" data-af-dir="${esc(dir)}">`;
-    html += `<div class="af-group-hdr"><span class="af-arrow">&#9654;</span><span class="af-dir-icon">${folderIcon(!collapsed, 15)}</span> ${esc(dirName)}</div>`;
+    html += `<div class="af-group-hdr" title="${esc(dir)}"><span class="af-arrow">&#9654;</span><span class="af-dir-icon">${folderIcon(!collapsed, 15)}</span> ${esc(dirName)}</div>`;
     html += `<div class="af-group-body">`;
     items.forEach(({ art, idx, filename }) => {
       const icon = fileIcon(filename, 15);
@@ -1713,7 +1812,9 @@ function buildArtifactsSection(activeSession) {
   html += `<div class="af-add af-changes-btn" id="af-changes-btn" tabindex="0" title="What git sees in this agent's directory: changed files with +/− and a diff per file (read-only)">⎇ Changes</div>`;
 
 
-  // Related agents section
+  // Changed and Core (what the transcript says), collapsed by default, then Related
+  html += buildChangedSection(activeSession);
+  html += buildCoreSection(activeSession);
   html += `<div class="rp-hdr rp-hdr-related" style="margin-top:12px">Related</div>`;
   const related = activeSession.relatedAgents || [];
   related.forEach((rid) => {
@@ -1829,7 +1930,7 @@ function timestampsLine(s) {
   const wait = timeAgo(s.attentionAt);
   if (wait) parts.push(needsMe(s) ? `waiting for you ${wait}` : `last needed you ${wait}`);
   const seen = timeAgo(s.ackAt);
-  if (seen) parts.push(`you last looked ${seen}`);
+  if (seen) parts.push(`you last looked or answered ${seen}`);
   if (s.parked) parts.push("parked");
   return parts.join(" · ");
 }
@@ -2288,7 +2389,7 @@ function showCtxMenu(e, sessionId) {
   menu.innerHTML = `
     <div class="cm-item" data-action="focus" data-sid="${sessionId}">Focus ${esc(s.name.toUpperCase())}</div>
     <div class="cm-item" data-action="pin" data-sid="${sessionId}">${s.pinned ? "Unpin" : "Pin"} ${esc(s.name.toUpperCase())}</div>
-    <div class="cm-item" data-action="park" data-sid="${sessionId}" title="${s.parked ? "Bring it back to its group" : "Fold it into the Stale section — keeps running, never archived"}">${s.parked ? "Unpark" : "Park"} ${esc(s.name.toUpperCase())}</div>
+    <div class="cm-item" data-action="park" data-sid="${sessionId}" title="${s.parked ? "Bring it back out of the stale row" : "Fold it into its group's stale row — keeps running, never archived"}">${s.parked ? "Unpark" : "Park"} ${esc(s.name.toUpperCase())}</div>
     ${canClose ? `<div class="cm-sep"></div><div class="cm-item danger" data-action="close" data-sid="${sessionId}">Close ${esc(s.name.toUpperCase())}</div>` : ""}
   `;
   menu.style.display = "block";
@@ -2421,7 +2522,7 @@ function ackTick() {
   if (!looking) { viewing = null; return; }
   if (!viewing || viewing.id !== s.id) { viewing = { id: s.id, since: Date.now() }; return; }
   if (Date.now() - viewing.since < ACK_DWELL_MS) return;
-  if (needsMe(s)) ackAttention(s, s.attentionRev);
+  if (unacked(s)) ackAttention(s, s.attentionRev); // aged-out raises are acked too — looking is looking
 }
 setInterval(ackTick, 250);
 
@@ -2661,6 +2762,7 @@ function initKeyboard() {
 
 function cycleAgent(direction) {
   const ordered = getDisplayOrder();
+  if (!ordered.length) return;
   const curIdx = ordered.findIndex((s) => s.id === activeSessionId);
   const next = (curIdx + direction + ordered.length) % ordered.length;
   switchSession(ordered[next].id);
@@ -2994,6 +3096,7 @@ async function showMenu(menuId, anchorEl) {
       menuItem("Agent Sorting", "", { submenu: sortSub }),
       menuItem("Only Agents That Need Me", "toggle-needs-filter", { checked: deckFilter === "needs" }),
       menuItem("Fold Stale After", "", { submenu: staleSub }),
+      menuItem("Show Stale Agents", "toggle-show-stale", { checked: deckShowStale }),
       menuItem("Show Quota", "", { submenu: quotaSub }),
       menuItem("Theme", "", { submenu: themeSub }),
       menuItem("Editor", "", { submenu: editorSub }),
@@ -3069,6 +3172,10 @@ async function handleMenuAction(action, item) {
     setDeckFilter(deckFilter === "needs" ? "all" : "needs");
   } else if (action === "set-stale-after") {
     deckStaleAfter = Object.hasOwn(STALE_AFTER_MS, item.dataset.staleAfter) ? item.dataset.staleAfter : "3d";
+    renderDeck();
+    saveUIState();
+  } else if (action === "toggle-show-stale") {
+    deckShowStale = !deckShowStale;
     renderDeck();
     saveUIState();
   } else if (action === "set-quota-from") {

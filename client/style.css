@@ -161,11 +161,19 @@ html, body {
 .deck-group-status .deck-group-label { cursor: default; }
 /* Pinned section: display-only header (no rename/drop affordances). */
 .deck-group-pinned .deck-group-label { cursor: default; color: var(--yellow, #d29922); }
-/* Stale fold: the header is the toggle; folded cards read quieter. */
-.deck-group-stale .deck-group-label { cursor: pointer; color: var(--text3); }
-.deck-group-stale .deck-group-label:hover { color: var(--text2); }
-.deck-group-stale .dk { opacity: .75; }
-.deck-group-stale .dk:hover, .deck-group-stale .dk.active { opacity: 1; }
+/* Stale row: one line at the bottom of a group, the toggle for its folded cards; folded cards read quieter. */
+.deck-stale-row {
+  font-size: 10px;
+  color: var(--text3);
+  text-align: center;
+  cursor: pointer;
+  user-select: none;
+  margin-top: -6px;
+  padding: 0 2px 6px;
+}
+.deck-stale-row:hover { color: var(--text2); }
+.deck-stale-cards .dk { opacity: .7; }
+.deck-stale-cards .dk:hover, .deck-stale-cards .dk.active { opacity: 1; }
 .dk .dk-parked { color: var(--text3); }
 .dk .dk-recovered { color: #d29922; }
 .deck-group-edit {
@@ -741,6 +749,13 @@ html, body {
 }
 .artifact-file-error { color: var(--red); }
 
+/* ── Image artifacts: fit the pane, click for full size (scrolls) ── */
+.artifact-image-wrap { height: 100%; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 12px; box-sizing: border-box;
+  background-image: linear-gradient(45deg, var(--bg2) 25%, transparent 25%), linear-gradient(-45deg, var(--bg2) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, var(--bg2) 75%), linear-gradient(-45deg, transparent 75%, var(--bg2) 75%);
+  background-size: 16px 16px; background-position: 0 0, 0 8px, 8px -8px, -8px 0; }
+.artifact-image { max-width: 100%; max-height: 100%; object-fit: contain; cursor: zoom-in; image-rendering: auto; }
+.artifact-image.full { max-width: none; max-height: none; cursor: zoom-out; align-self: flex-start; margin: auto; }
+
 /* ── Tab close button + icons (all closable tabs) ── */
 .wh-tab-i {
   display: inline-flex;
@@ -916,6 +931,8 @@ html, body {
   background: rgba(110,118,129,.2); border-radius: 8px; padding: 0 6px;
 }
 .af-group-hdr .af-count { margin-left: 4px; }
+.af-pin-mark { font-size: 9px; opacity: .6; margin-left: 4px; flex-shrink: 0; }
+.af-pinned-in-dir .af-label { color: var(--text); }
 .af-dir-sub { opacity: .45; cursor: default; }
 .af-dir-sub:hover { background: none; }
 .af-dir-empty { padding: 4px 10px 6px 28px; font-size: 10px; color: var(--text3); font-style: italic; }
@@ -2070,6 +2087,10 @@ html, body {
   font-size: 20px;
   text-shadow: 1px 0 0 #3a2810;
 }
+
+/* The stale row is the fold's only affordance: on the planking --text3 is ~2:1, so it takes the sign colour. */
+[data-theme="exploration"] .deck-stale-row { color: #c4a060; text-shadow: 1px 1px 0 #1a1208; }
+[data-theme="exploration"] .deck-stale-row:hover { color: #e0c080; }
 
 /* ── Group labels as carved wood signs ── */
 [data-theme="exploration"] .deck-group-label {

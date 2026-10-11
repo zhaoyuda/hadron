@@ -135,6 +135,26 @@ npm test
 #                            token-bearing list only
 #                            (parking leaves tmux running and never sets archived; both survive the restart block),
 #                            archive/restore lifecycle over HTTP, CLI pin/unpin/park/unpark/close/restore/ls --archived;
+#                            a folder pinned as type file (`hadron artifacts pin <dir>`) is stored as a dir artifact — the live
+#                            folder listing — on every write path (validateAndCanonicalizeArtifact), outside the workspace 400
+#                            "… is a folder outside the workspace" (prod 2026-10-09: an agent pinned a folder, the tab errored);
+#                            a whole-array PATCH revalidates with { stored } (the record's current values) — a STORED file pin
+#                            whose path became a folder outside the workspace stays the file pin it was (never a 400 blocking the
+#                            other entries), inside it becomes the listing, an entry NOT on the record gets the fresh-pin rule (the
+#                            PATCH is no way around what POST refuses); ambiguity is decided in removeAgentArtifact under the lock
+#                            ({ ambiguous: [values] } → 409); migrateFolderPinsOn also runs on restore of an archived record; `hadron artifacts unpin <path...>` (alias rm) removes a pinned file by the path that
+#                            pinned it — DELETE /api/sessions/:id/artifacts with { value } alone (index undefined; index: null is
+#                            a bad index → 400) matches every canonical form the path could have been stored under WITHOUT an
+#                            existence gate (canonicalCandidates: workspace base + the agent's cwd base — a deleted file still
+#                            unpins, test-artifacts "deleted-file case"), two different pinned artifacts under the two bases →
+#                            409 naming both and the absolute path `ls` prints, nothing pinned → 404; the index+value form is unchanged;
+#                            the CLI prints each removal as it lands, a duplicated path is removed once and reported once,
+#                            `--auto --agent` scores the target's cwd; at boot migrateFolderPins turns every in-workspace
+#                            folder still pinned as a file on an active record into a dir artifact and saves it once
+#                            (test-artifacts "[boot: …]"; outside the workspace left alone);
+#                            a miss exits 1 after the hits in the same call are removed; `--agent <name|id>` on artifacts
+#                            pin/unpin/ls acts on that agent's panel from outside its pane (name→id resolution, ambiguous → exit 1
+#                            with nothing touched, no value → exit 1), without it outside a pane the verb exits 1;
 #                            `hadron ls --all` walks HADRON_HOME/servers (default ~/.hadron/servers — each server writes
 #                            {workspace, port, pid} at boot, removes it on clean exit, prunes dead-pid siblings at boot;
 #                            the CLI lists only live hadron-server pids, --json marks the rest stale, no token needed)
@@ -151,7 +171,11 @@ npm test
 #                            integer (400 otherwise), clamped to attentionRev, never moves back, leaves state
 #                            alone; {state, ackRev} in one request cannot swallow its own bump; both revs
 #                            persist and survive the restart block while state resets to idle; an accepted ack
-#                            stamps ackAt ("you last looked", persisted, an ignored ack does not restamp it); test-pane-resolution also pins the
+#                            stamps ackAt ("you last looked or answered", persisted, an ignored ack does not restamp it); entering `working` ACKS
+#                            the outstanding raise (ackByTurn: ackRev = attentionRev + ackAt, persisted — a new turn means the operator
+#                            answered, from the dashboard, the pane, or claude's phone app, prod 2026-10-08: remote-driven agents stayed
+#                            "needs me" for days) and the next done raises past it, working with nothing outstanding is a no-op; test-pane-resolution
+#                            pins the same on the detector path incl. a first post-boot verdict of working on an unread agent; it also pins the
 #                            context meter's sticky rule at the tmux boundary (agent-process pane with the footer → contextPct,
 #                            a shell foreground keeps the reading while working and drops it otherwise, read before _applySnap); it
 #                            covers the boot rule: a first post-boot verdict equal to the persisted attentionState is a
@@ -455,7 +479,15 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #   + test/e2e/m9-artifact-reload.js (mtime poller baseline + HTML update pill, tab & split; a tab opened before the
 #                                    file exists paints it when it appears; live jupyter iframes get the pill +
 #                                    cache-busted proxy reload (marimo --watch reloads itself); a directory-as-file
-#                                    artifact is not re-rendered every poll — proxies route-stubbed, no kernels needed)
+#                                    artifact is not re-rendered every poll — proxies route-stubbed, no kernels needed; a png
+#                                    artifact is an <img> (renderImageArtifact — IMAGE_EXTS = the server's IMAGE_MIMES minus svg, which stays
+#                                    an editor file (markdown previews still get it served as an image), cache-busted by mtime, the poller's silent
+#                                    reload repaints it, split panes watched like HTML panes via data-img-path; before, the
+#                                    text editor painted the bytes as garbage); the
+#                                    silent md/csv reload keeps the reader's place (prod 2026-10-08: every rewrite by the
+#                                    agent yanked the preview back to the top): scrolled partway → same scrollTop after the
+#                                    rewrite, scrolled to the bottom → bottom of the longer file (rememberArtifactScroll /
+#                                    restoreArtifactScroll around the cache eviction in artifacts.js))
 #   + test/e2e/m10-clipboard.js  (OSC 52 from pane → browser clipboard; read-request ignored)
 #   + test/e2e/m11-terminal-paths.js (clickable terminal path → resolve vs pane cwd → open as current agent's artifact)
 #   + test/e2e/m12-artifact-folders.js (artifact folder collapse persists across the 3s deck refresh)
@@ -465,18 +497,24 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #   + test/e2e/m16-editor-drafts.js (editor draft model: preview renders draft, reload restores it, agent-write → Save 409s with Compare/Overwrite/Cancel, Discard confirms)
 #   + test/e2e/m17-annotation-ux.js (annotation UX: FAB follows the selection; cross-block/formatted/duplicate/overlapping selections anchor + paint honestly; hover card edit, sent read-only; CLI excerpt for formatted anchors; marks survive auto-reload — runs at a <560px preview so the P0 surfaces stay authoritative)
 #   + test/e2e/m18-comment-rail.js (comment rail: cards permanently visible at ≥560px previews (width-adaptive 190-260px — split panes qualify), aligned with highlights; rail composer + in-rail edit/delete; mark↔card two-way linking; orphan + doc sections; annRailBusy edit guard; split-layout context derivation; <560px falls back to the P0 hover card)
-#   + test/e2e/m19-artifacts-ux.js (artifacts add/remove UX: Browse popover survives folder clicks (pointerdown close model) + keyboard nav + hidden-files toggle; atomic add with canonical de-dupe; URL validation + escaped labels; remove with 409 drift recovery; dir artifacts — live folder groups where new on-disk files appear automatically; ephemeral file: tabs; add concurrency; viewport clamp)
+#   + test/e2e/m19-artifacts-ux.js (artifacts add/remove UX: Browse popover survives folder clicks (pointerdown close model) + keyboard nav + hidden-files toggle; atomic add with canonical de-dupe; URL validation + escaped labels; remove with 409 drift recovery; dir artifacts — live folder groups where new on-disk files appear automatically; ephemeral file: tabs; add concurrency; viewport clamp; two pinned folders named alike with a file pinned inside each → one group per folder titled `retro — A` / `retro — B` (full path in the tooltip), each file once inside its own group open (📌 row) or collapsed (`1📌` in the header), no extra display group, collapsing one leaves the other; POST answers `coveredBy` / `covers`)
 #   + test/e2e/m20-agent-ops.js  (agent ops: context-menu Pin → "📌 Pinned" section first in BOTH deck modes, card moved not duplicated, survives 3s refresh + reload; `hadron pin <name>`; `hadron close <name>` → tmux dead + JSON archived + ls --archived + restore, with the dashboard left ON the closed agent: its WS is refused (4404), no reconnect loop, record not blanked/resurrected; in-pane `hadron message` sender attribution + --raw; ambiguous names exit 1, nothing delivered)
-#   + test/e2e/m21-needs-me.js   (triage: cards light on unseen done/blocked with a "N need me" counter; a 1-s dwell on the agent's terminal in a focused window acks it — card goes quiet, ackRev persisted, and the client never PATCHes `state`; an unread agent stays lit when its state moves on; Alt+N jumps to the next unread and wraps; a re-raise on the active agent is acked as the rev moves; "Only Agents That Need Me" keeps the active card and survives a reload; the palette lists all agents (no 8-row cap) with a "needs me" hint)
-#   + test/e2e/m22-stale-fold.js (cards + stale fold: a seeded agent whose three timestamps are days old folds into a
-#                                 collapsed "Stale · N" section rendered last (harness `seed(ws)` hook writes it before boot);
-#                                 fresh or timestamp-less agents stay visible; the header toggles the fold and the open state
-#                                 survives the 3-s refresh + a reload; a collapsed fold takes no Alt+N slot while the
+#   + test/e2e/m21-needs-me.js   (triage: cards light on unseen done/blocked with a "N need me" counter; a 1-s dwell on the agent's terminal in a focused window acks it — card goes quiet, ackRev persisted, and the client never PATCHes `state`; an unread agent stays lit when its state moves on; Alt+N jumps to the next unread and wraps; a re-raise on the active agent is acked as the rev moves; "Only Agents That Need Me" keeps the active card and survives a reload; the palette lists all agents (no 8-row cap) with a "needs me" hint; an unread agent whose pane goes to `working` (PATCH twin) goes quiet with no client PATCH — the server acked the turn — and the next done lights it again)
+#   + test/e2e/m22-stale-fold.js (cards + stale fold: a seeded agent whose three timestamps are days old folds under its
+#                                 OWN group's "▸ N stale" row — the last line of the group, opened in place with the cards
+#                                 dimmed under the live ones, no global Stale section (harness `seed(ws)` hook writes it before
+#                                 boot); fresh or timestamp-less agents stay visible; a row click toggles that group and the
+#                                 open state (deckStaleOpen = Set of group keys, "status:<state>" in the status layout, which
+#                                 folds per bucket too) survives the 3-s refresh + a reload; View → "Show Stale Agents"
+#                                 (deckShowStale) opens every row, persists, and a row click while it is on closes just that
+#                                 row and turns it off; a closed row takes no Alt+N slot while the
 #                                 palette's full order still reaches it; the active agent never folds; context-menu Park →
 #                                 fold + ⏸ + `parked:true` on disk with tmux alive and nothing archived; PATCH state done
 #                                 pulls the parked card out lit and acking folds it again; Unpark restores; View → Fold
 #                                 Stale After "Never" removes the age fold, persists, "1 day" folds again, an unknown value
-#                                 falls back to 3 days; the tooltip spells out the timestamps)
+#                                 falls back to 3 days; the tooltip spells out the timestamps; a seeded UNREAD raise 5 days old (the
+#                                 phone-app case: attentionRev 2, ackRev 0) counts for nothing at 3 d — folded, counter hidden, tooltip
+#                                 "last needed you 5d" — lights and counts again under Never ("waiting for you 5d"), ages out again at 1 d)
 #   + test/e2e/m23-context-badge.js (context badge: seeded transcripts (CLAUDE_CONFIG_DIR relocated) → "64%" plain,
 #                                 "85%" red (level "hot": 10k before auto-compact on 200k), "30%" for 300k on a
 #                                 "[1m]" model and 950k of 1M is "95%" but only amber (colour is headroom in tokens,
@@ -508,9 +546,16 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                                 switches = fitted xterm minus the status-line rows)
 #   + test/e2e/m26-changed-files.js (file panel Changed / Core / Pinned: seeded transcripts (CLAUDE_CONFIG_DIR
 #                                 relocated) → CHANGED rows newest write first, relative to the agent's cwd, "2× 2m",
-#                                 a Read-only file absent, two agents in one cwd list their own; CORE ranks every
-#                                 touched file by 3·writes + reads (ties by recency, reads included), sits between
-#                                 Changed and Pinned; 📌 on a Core row → a file artifact under Pinned + the row leaves
+#                                 a Read-only file absent, two agents in one cwd list their own; the panel order is
+#                                 Pinned, Changed, Core, Related — Changed and Core start COLLAPSED (collapsedArtFolders
+#                                 holds the deviation from a group's default: data-af-default="closed"), a header click
+#                                 opens one and it stays open across the 3-s refresh; CORE ranks every touched file by
+#                                 3·writes + reads (ties by recency, reads included) and only INSIDE the workspace
+#                                 (namedUnderWorkspace in resolvedSession's coreSkip — lexical, realpath fallback memoised
+#                                 30 s, a ranking hint and NOT the insideWorkspace jail; a /tmp write is a Changed row, never
+#                                 core, prod 2026-10-09: a young agent's Core was all /tmp screenshots; wire-level proof in
+#                                 test-changes.js); 📌 on a Core row
+#                                 → a file artifact under Pinned + the row leaves
 #                                 Core (the server drops pinned files from core); × → `coreDismissed` on the record,
 #                                 hidden across the 3-s refresh, Changed still lists it; an Edit appended to a
 #                                 transcript re-ranks Core and puts the row on top of Changed, and a file both agents
