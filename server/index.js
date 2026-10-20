@@ -22,6 +22,7 @@ import { syncSkills } from "./skills.js";
 import { collectProvenance } from "./provenance.js";
 import { transcriptPath, readTranscriptSummary, transcriptWire, CONTEXT_WINDOW, readTranscriptFiles, filesWire, FILES_CHUNK_BYTES, FILES_MAX_LINE, FILES_CORE } from "./transcript.js";
 import { warnOnce, initServerLog, serverLogStatus } from "./log.js";
+import { parseDialog } from "./dialog.js";
 import { createTmuxHealth, sendNtfy, readNtfyTopic } from "./tmux-health.js";
 import { createPerfLog } from "./perf-log.js";
 import { gitChanges, gitDiffFile } from "./changes.js";
@@ -931,6 +932,12 @@ app.get("/api/doctor", async (req, res) => {
       finding.message += ` · chat view is a floor: ${parts.join(", ")}`;
       if (finding.level !== "red") finding.level = "yellow";
     }
+    // A "Needs input" screen the chat view could not read (dialog parser miss):
+    // the card said "answer it in the terminal" — yellow, so the miss is seen.
+    if (session.dialogMisses) {
+      finding.message += ` · ${session.dialogMisses} "Needs input" screen(s) the chat view could not read as a dialog — answer those in the terminal (a dialog shape server/dialog.js does not know?)`;
+      if (finding.level !== "red") finding.level = "yellow";
+    }
     const recovered = safeRecoveredFrom(session.recoveredFrom, now);
     if (recovered) {
       const note = `record was unreadable at boot (${recovered.bytes === null ? "?" : recovered.bytes} bytes) — placeholder written, name/task/artifacts/notes lost; original kept as .hadron/agents/${recovered.file}`;
@@ -1295,7 +1302,7 @@ function safeRecoveredFrom(rf, now = Date.now()) {
   return { file: String(rf.file || "").replace(/[^\w.@-]/g, "").slice(0, 200), at: safeTimestamp(rf.at, now), bytes: Number.isInteger(rf.bytes) && rf.bytes >= 0 ? rf.bytes : null };
 }
 function resolvedSession(s, { authenticated = false } = {}) {
-  const { transcript, contextPct, files, coreDismissed, checkpoint, recoveredFrom, draft, outbox, ...rest } = s;
+  const { transcript, contextPct, files, coreDismissed, checkpoint, recoveredFrom, draft, outbox, dialog, ...rest } = s;
   const dr = authenticated ? draftOut(s) : null;
   if (recoveredFrom) rest.recoveredFrom = safeRecoveredFrom(recoveredFrom);
   const context = contextWire(s);
@@ -1324,6 +1331,9 @@ function resolvedSession(s, { authenticated = false } = {}) {
     // The outbox (queued / sent / failed messages from the composer) rides the
     // list with its text clipped; GET /api/sessions/:id/outbox has it whole.
     ...(authenticated && Array.isArray(s.outbox) && s.outbox.length ? { outbox: outboxWire(outboxOut(s)) } : {}),
+    // The dialog claude is showing (parsed from the pane — the command, the
+    // file, the choices): the agent's business, token-bearing readers only.
+    ...(authenticated && dialog && typeof dialog === "object" ? { dialog } : {}),
     ...(dr ? { draft: { revision: dr.revision, deviceId: dr.deviceId, updatedAt: dr.updatedAt, conversationId: dr.conversationId, chars: dr.text.length, attachments: dr.attachments.length, ...(dr.stale ? { stale: true } : {}) } } : {}),
     // `files` (what the session edited — file paths, not conversation, but
     // still the agent's private business): token-bearing readers only. A path
@@ -1816,6 +1826,109 @@ app.post("/api/sessions/:id/send-keys", async (req, res) => {
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// Answer the dialog claude is showing (chat view, G4 — the card's buttons).
+// {action: "option", n, text?} types the option's digit (then the text and
+// Enter when the option opens a text field); {action: "cancel"} sends Escape;
+// {action: "amend", text} is Tab + the text + Enter. `key` must be the dialog
+// on screen (409 with the current one otherwise) — an answer is bound to the
+// dialog it was read from, never to "whatever the pane shows now": the pane is
+// captured and parsed again UNDER the pane lock, the keystrokes come from that
+// fresh read (an unnumbered list moves the ❯ from where it is now, not where
+// the card last saw it), and a screen that no longer shows the dialog is a
+// 409. Text goes through send-keys -l, capped short enough for it to be
+// reliable. `answeredAt` is stamped only once every keystroke went in; a
+// failed send leaves the dialog answerable with `answerError` on it.
+// Serialised with message delivery under the pane lock; acks attention like
+// a keystroke.
+const DIALOG_TEXT_MAX = 500;
+const DIALOG_FIELD_WAIT_MS = 1500;
+app.post("/api/sessions/:id/dialog/answer", async (req, res) => {
+  const { id } = req.params;
+  if (!isValidId(id)) return res.status(400).json({ error: "invalid id" });
+  const s = sessions.get(id);
+  if (!s) return res.status(404).json({ error: "session not found" });
+  const { action, n, text, key } = req.body || {};
+  if (!["option", "cancel", "amend"].includes(action)) return res.status(400).json({ error: "action must be option, cancel or amend" });
+  if (typeof key !== "string" || !/^[0-9a-f]{8}$/.test(key)) return res.status(400).json({ error: "key (the dialog's key) required" });
+  if (text !== undefined && (typeof text !== "string" || text.length > DIALOG_TEXT_MAX || /[\x00-\x1f\x7f]/.test(text))) return res.status(400).json({ error: `text must be one line of at most ${DIALOG_TEXT_MAX} characters` });
+  if (action === "amend" && !(text && text.trim())) return res.status(400).json({ error: "amend needs text" });
+  if (action === "option" && !(Number.isInteger(n) && n >= 1 && n <= 99)) return res.status(400).json({ error: "n (option number) required" });
+  const d = s.dialog;
+  const current = () => ({ state: s.state, blockReason: s.blockReason, dialog: s.dialog || null });
+  if (s.state !== "blocked" || !d) return res.status(409).json({ error: "claude is not showing a dialog", ...current() });
+  if (d.key !== key) return res.status(409).json({ error: "the dialog changed — read it again", ...current() });
+  if (d.answeredAt) return res.status(409).json({ error: "already answered — waiting for claude", ...current() });
+  if (action === "amend" && !d.amend) return res.status(409).json({ error: "this dialog cannot be amended", ...current() });
+  let opt = null;
+  if (action === "option") {
+    opt = d.options.find((o) => o.n === n);
+    if (!opt) return res.status(409).json({ error: `no option ${n}`, ...current() });
+    if (d.numbered && n > 9) return res.status(409).json({ error: `option ${n} takes two digits — choose it in the terminal`, ...current() });
+  }
+  const tmuxName = tmuxSessionName(id);
+  const keys = (...k) => tmuxAsync(["send-keys", "-t", tmuxName, ...k]);
+  const literal = (t) => tmuxAsync(["send-keys", "-t", tmuxName, "-l", "--", t]);
+  const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+  const capture = async () => (await tmuxAsync(["capture-pane", "-t", tmuxName, "-p"], { timeout: 2000 })).split("\n");
+  // after Tab / a text option's digit: wait for claude to open the field (the
+  // screen changes) before typing into it — typed into the option list, digits
+  // in the text would pick options
+  const waitFieldOpen = async (before, what) => {
+    const t0 = Date.now();
+    while (Date.now() - t0 < DIALOG_FIELD_WAIT_MS) {
+      await pause(100);
+      if ((await capture()).join("\n") !== before) return;
+    }
+    throw Object.assign(new Error(`claude did not open the ${what} — check the terminal`), { status: 409 });
+  };
+  const fail = (msg) => Object.assign(new Error(msg), { status: 409 });
+  const stale = (msg) => Object.assign(fail(msg), { stale: true });
+  try {
+    await withPaneLock(id, async () => {
+      if (s.dialog !== d) throw stale("the dialog changed while waiting for the pane");
+      try {
+        const lines = await capture();
+        const fresh = parseDialog(lines);
+        if (!fresh || fresh.key !== d.key) {
+          // the card was behind the pane: hand back what is there now
+          const mon = monitors.get(id);
+          if (mon) mon._applyDialog({ state: "blocked", dialog: fresh, fromRoute: true });
+          else s.dialog = fresh ? { ...fresh, at: new Date().toISOString() } : null;
+          throw stale("the dialog changed — read it again");
+        }
+        if (action === "cancel") await keys("Escape");
+        else if (action === "amend") { await keys("Tab"); await waitFieldOpen(lines.join("\n"), "amend line"); await literal(text); await pause(100); await keys("Enter"); }
+        else {
+          if (fresh.numbered) await literal(String(n));
+          else {
+            // an unnumbered list (folder trust): move the ❯ from where it IS, then Enter
+            const from = fresh.options.findIndex((o) => o.selected), to = fresh.options.findIndex((o) => o.n === n);
+            if (from < 0 || to < 0) throw fail("cannot tell which row is selected — answer it in the terminal");
+            const step = to > from ? "Down" : "Up";
+            for (let i = 0; i < Math.abs(to - from); i++) await keys(step);
+            await keys("Enter");
+          }
+          if (text && text.trim()) { await waitFieldOpen(lines.join("\n"), "text field"); await literal(text); await pause(100); await keys("Enter"); }
+        }
+      } catch (e) {
+        // nothing, or only part of the sequence, reached claude (a tmux error,
+        // a field that did not open): the dialog stays answerable and says so
+        if (!e.stale) d.answerError = e.message;
+        throw e;
+      }
+      delete d.answerError;
+      d.answeredAt = new Date().toISOString();
+    });
+    monitors.get(id)?.wake();   // input landed: capture at full rate again
+    ackByInput(id);             // answering IS looking at the agent
+    res.json({ ok: true, action, key, ...(opt ? { n, label: opt.label } : {}) });
+  } catch (e) {
+    monitors.get(id)?.wake();
+    if (e.status === 409) return res.status(409).json({ error: e.message, ...current() });
+    res.status(500).json({ error: e.message, ...current() });
   }
 });
 

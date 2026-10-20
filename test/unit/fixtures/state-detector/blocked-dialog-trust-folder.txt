@@ -1,0 +1,20 @@
+Permission allow rule (/home/ubuntu/.claude/settings.json): Write(/Users/yudazhao/work/**) is not matched by f
+ile permission checks — only Edit(path) rules are. Use Edit(/Users/yudazhao/work/**) instead (Edit rules cover
+ all file-editing tools).
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Accessing workspace:
+
+ /home/user/proj
+
+ Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open
+ source project, or work from your team). If not, take a moment to review what's in this folder first.
+
+ Claude Code'll be able to read, edit, and execute files here.
+
+ Security guide
+
+ ❯ No, exit
+   Yes, I trust this folder
+
+ Enter to confirm · Esc to cancel

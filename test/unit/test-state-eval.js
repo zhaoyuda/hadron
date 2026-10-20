@@ -127,6 +127,13 @@ const EXPECTED = {
   "blocked-plan-approval":             { state: "blocked", blockReason: "Needs input" },
   "blocked-permission-allow-deny":     { state: "blocked", blockReason: "Needs input" },
   "blocked-selection-4options":        { state: "blocked", blockReason: "Needs input" },
+  "blocked-dialog-bash-v2": { state: "blocked", blockReason: "Needs input" },
+  "blocked-dialog-bash-amend": { state: "blocked", blockReason: "Needs input" },
+  "blocked-dialog-write-v2": { state: "blocked", blockReason: "Needs input" },
+  "blocked-dialog-webfetch-v2": { state: "blocked", blockReason: "Needs input" },
+  "blocked-dialog-question-v2": { state: "blocked", blockReason: "Needs input" },
+  "blocked-dialog-plan-v2": { state: "blocked", blockReason: "Needs input" },
+  "blocked-dialog-trust-folder": { state: "blocked", blockReason: "Needs input" },
   "blocked-do-you-want-to-proceed":    { state: "blocked", blockReason: "Needs input" },
   "blocked-prompt-editor":             { state: "blocked", blockReason: "Needs input" },
 

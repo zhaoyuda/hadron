@@ -3041,4 +3041,43 @@ mark.ann-mark.ann-mark-flash { background: rgba(210, 153, 34, .8); outline: 1px 
 .chat-send:hover { filter: brightness(1.1); }
 .chat-draft-st { grid-column: 1 / -1; min-height: 14px; font-size: 11px; color: var(--text3); padding: 0 4px; }
 .chat-draft-off { color: var(--yellow); }
+/* the dialog card (G4): claude's permission / plan / question dialog, parsed from the pane */
+.chat-dialog { flex-shrink: 0; display: flex; flex-direction: column; margin: 0 auto; width: 100%; max-width: 860px; box-sizing: border-box; padding: 0 20px; max-height: 45%; overflow: hidden; }
+.cd-hdr, .cd-foot, .cd-textrow { flex-shrink: 0; }
+.cd-body { flex-shrink: 4; }           /* a short window scrolls the body first, the options last — the buttons are the point */
+.chat-dialog[hidden] { display: none; }
+.chat-dialog { --cd-accent: var(--yellow); }
+.chat-dialog[data-kind="plan"] { --cd-accent: var(--blue); }
+.chat-dialog[data-kind="question"] { --cd-accent: var(--purple, #a371f7); }
+.cd-hdr { display: flex; align-items: baseline; gap: 10px; padding: 8px 12px 4px; border: 1px solid var(--cd-accent); border-bottom: none; border-radius: 12px 12px 0 0; background: var(--bg2); font-size: 13px; }
+.cd-kind { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--cd-accent); white-space: nowrap; }
+.cd-title { flex: 1; min-width: 0; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cd-open { cursor: pointer; color: var(--blue); font-size: 12px; white-space: nowrap; }
+.cd-open:hover { text-decoration: underline; }
+.cd-body { min-height: 0; overflow-y: auto; padding: 4px 12px; border-left: 1px solid var(--cd-accent); border-right: 1px solid var(--cd-accent); background: var(--bg2); font-size: 13px; color: var(--text2); }
+.cd-text { white-space: pre-wrap; word-break: break-word; margin: 2px 0 6px; }
+.cd-code { margin: 4px 0 8px; padding: 8px 10px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border); font-family: 'JetBrains Mono', Menlo, monospace; font-size: 12px; line-height: 1.5; color: var(--text); white-space: pre-wrap; word-break: break-word; }
+.cd-trunc { font-size: 11px; color: var(--text3); margin: 0 0 6px; }
+.cd-q { font-weight: 600; color: var(--text); margin: 4px 0 2px; }
+.cd-opts { display: flex; flex-wrap: wrap; gap: 6px; min-height: 0; overflow-y: auto; padding: 6px 12px; border-left: 1px solid var(--cd-accent); border-right: 1px solid var(--cd-accent); background: var(--bg2); }
+.cd-sep { flex-basis: 100%; height: 0; border-top: 1px dashed var(--border); margin: 2px 0; }
+.cd-opt { display: inline-flex; align-items: baseline; gap: 8px; max-width: 100%; padding: 6px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg3); color: var(--text); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.cd-opt:hover:not(:disabled) { border-color: var(--cd-accent); }
+.cd-opt.cd-sel { border-color: var(--cd-accent); box-shadow: inset 0 0 0 1px var(--cd-accent); }
+.cd-opt:disabled, .cd-amend:disabled, .cd-cancel:disabled, .cd-go:disabled { opacity: 0.55; cursor: default; }
+.cd-n { color: var(--text3); font-size: 11px; font-family: 'JetBrains Mono', Menlo, monospace; }
+.cd-lab { min-width: 0; word-break: break-word; }
+.cd-detail { display: block; font-size: 11px; color: var(--text3); margin-top: 1px; }
+.cd-textrow { display: flex; gap: 6px; padding: 0 12px 6px; border-left: 1px solid var(--cd-accent); border-right: 1px solid var(--cd-accent); background: var(--bg2); }
+.cd-input { flex: 1; min-width: 0; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; font-size: 13px; outline: none; }
+.cd-input:focus { border-color: var(--blue); }
+.cd-go, .cd-amend, .cd-cancel { padding: 5px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg3); color: var(--text2); font: inherit; font-size: 12px; cursor: pointer; }
+.cd-go { background: var(--blue); color: #fff; border-color: var(--blue); }
+.cd-cancel:hover:not(:disabled) { border-color: var(--red); color: var(--red); }
+.cd-amend:hover:not(:disabled) { border-color: var(--blue); color: var(--blue); }
+.cd-foot { display: flex; align-items: center; gap: 8px; padding: 4px 12px 8px; border: 1px solid var(--cd-accent); border-top: none; border-radius: 0 0 12px 12px; background: var(--bg2); font-size: 12px; }
+.cd-status { flex: 1; min-width: 0; color: var(--text3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cd-answered .cd-status { color: var(--green, #3fb950); }
+.cd-busy .cd-status { color: var(--text2); }
+@media (max-width: 700px) { .chat-dialog { padding-left: 10px; padding-right: 10px; } .cd-opt { flex-basis: 100%; } }
 @media (max-width: 700px) { .chat-list, .chat-composer, .chat-outbox, .chat-notice { padding-left: 10px; padding-right: 10px; } }

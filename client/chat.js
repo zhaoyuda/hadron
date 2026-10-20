@@ -84,6 +84,7 @@ function renderChatView(el, s) {
     <div class="chat-jump" hidden>↓</div>
     <div class="chat-notice" hidden></div>
     <div class="chat-outbox" hidden></div>
+    <div class="chat-dialog" hidden></div>
     <div class="chat-composer"><textarea class="chat-input" rows="1" placeholder="Message claude — Enter to send, Shift+Enter for a new line"></textarea><button class="chat-send" title="Send (Enter)">↑</button><div class="chat-draft-st"></div></div>
   </div>`;
   const scroll = el.querySelector(".chat-scroll"), list = el.querySelector(".chat-list"), jump = el.querySelector(".chat-jump"), live = el.querySelector(".chat-live");
@@ -197,6 +198,7 @@ function renderChatView(el, s) {
     live.hidden = false;
     if (state === "blocked") {
       live.className = "chat-live chat-live-blocked";
+      if (sess.dialog && sess.dialog.key) { live.innerHTML = `<span class="chat-live-dot chat-live-dot-warn"></span>Needs input · answer below`; return; }
       live.innerHTML = `<span class="chat-live-dot chat-live-dot-warn"></span>Needs input — ${esc(sess.blockReason || "claude is waiting in the terminal")} · <span class="chat-open-primary" title="The dialog is in the terminal">Open Primary</span>`;
       live.querySelector(".chat-open-primary").addEventListener("click", () => { if (typeof switchTab === "function") switchTab("terminal"); });
       return;
@@ -307,9 +309,11 @@ function renderChatView(el, s) {
     if (m.rebuild && !m.offline && after === null) { try { await finishRebuild(); } catch {} }
     if (!el.isConnected) return;
     drawHeader(); drawLive(); drawEmpty();
+    try { dialogCard.tick(); } catch {}
     try { await composer.tick(); } catch {}
   };
   const composer = chatComposer(el, m, sessionId, { list });
+  const dialogCard = chatDialogCard(el, sessionId);
   chatTeardown.set(el, () => { composer.flush(); if (chatActiveComposer === composer) chatActiveComposer = null; });
   // Draw what the model already holds (back from another tab) before the first
   // poll — at the reader's place when they had scrolled up, with the pill.
@@ -318,6 +322,7 @@ function renderChatView(el, s) {
     drawHeader(); drawLive();
     if (m.paused && restoreAnchor()) drawJump(); else follow();
   }
+  try { dialogCard.tick(); } catch {}
   refresh();
   chatPolls.set(el, setInterval(refresh, CHAT_POLL_MS));
   composer.focus();
@@ -597,6 +602,125 @@ function chatObserved(m, row) {
     if (it.text === row.text || (it.truncated && row.text.startsWith(it.text)) || (row.truncated && it.text.startsWith(row.text))) return true;
   }
   return false;
+}
+
+// ── the dialog card (G4) ──
+// The dialog claude is showing, parsed from the pane by the server (the
+// command, the file, the choices — never generic 1/2/Esc buttons). Every
+// answer carries the dialog's key: 409 means the dialog on screen is not the
+// one that was read (another device answered, claude moved on) and the card
+// repaints from the server's answer instead of guessing. After an answer the
+// card says so until the pane stops being blocked or a NEW dialog appears.
+function chatDialogCard(el, sessionId) {
+  const box = el.querySelector(".chat-dialog");
+  const api = (path) => `/api/sessions/${encodeURIComponent(sessionId)}${path}`;
+  const sess = () => (typeof sessions !== "undefined" ? sessions : []).find((x) => x.id === sessionId);
+  let shownKey = null, shownSig = null, answered = null, busy = false, notice = "";
+  const KIND = { permission: "Permission", plan: "Plan", question: "Question", select: "Choose" };
+  const hide = () => { if (!box.hidden) { box.hidden = true; box.innerHTML = ""; box.className = "chat-dialog"; } shownKey = null; shownSig = null; busy = false; };
+  // "answered" is this dialog's showing, not its key: the same dialog shown
+  // again after the pane was idle (a retried tool) carries a fresh `at`
+  const showing = (d) => `${d.key}@${d.at || ""}`;
+  // what the card is drawn from: the showing, its answered state, the row the ❯
+  // is on (it moves when the operator uses the terminal), a failed delivery
+  const sigOf = (d, isAnswered) => `${showing(d)}|${isAnswered ? 1 : 0}|${(d.options || []).findIndex((o) => o.selected)}|${d.answerError || ""}`;
+  const node = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = text; return n; };
+  const render = (d, state) => {
+    shownKey = d.key; busy = false;
+    box.innerHTML = ""; box.hidden = false; box.className = "chat-dialog";
+    box.dataset.key = d.key; box.dataset.kind = d.kind;
+    const hdr = node("div", "cd-hdr");
+    hdr.appendChild(node("span", "cd-kind", KIND[d.kind] || "Dialog"));
+    hdr.appendChild(node("span", "cd-title", d.title || ""));
+    const open = node("span", "cd-open", "Open Primary"); open.title = "See the dialog in the terminal";
+    open.addEventListener("click", () => { if (typeof switchTab === "function") switchTab("terminal"); });
+    hdr.appendChild(open);
+    box.appendChild(hdr);
+    const body = node("div", "cd-body");
+    for (const sec of d.sections || []) {
+      if (sec.code) { const pre = node("pre", "cd-code", sec.text); body.appendChild(pre); continue; }
+      let text = sec.text;
+      if (sec === d.sections[0] && d.title && text.startsWith(d.title)) text = text.slice(d.title.length).replace(/^\n+/, "");
+      if (sec === d.sections[d.sections.length - 1] && d.question && text.endsWith(d.question)) text = text.slice(0, -d.question.length).replace(/\n+$/, "");
+      if (text.trim()) body.appendChild(node("div", "cd-text", text));
+    }
+    if (d.truncated) body.appendChild(node("div", "cd-trunc", "… (clipped — the terminal has all of it)"));
+    if (d.question) body.appendChild(node("div", "cd-q", d.question));
+    box.appendChild(body);
+    const opts = node("div", "cd-opts");
+    const status = node("div", "cd-status");
+    const done = state === "answered";
+    const setBusy = (b) => { busy = b; box.classList.toggle("cd-busy", b); for (const el2 of box.querySelectorAll("button")) el2.disabled = b || done; };
+    const answer = async (payload, label) => {
+      if (busy || done) return;
+      setBusy(true); notice = ""; status.textContent = `Sending ${label}…`;
+      let r = null, j = {};
+      try { r = await fetch(api("/dialog/answer"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...payload, key: d.key }) }); j = await r.json().catch(() => ({})); } catch { r = null; }
+      if (!el.isConnected) return;
+      if (r && r.ok) { answered = showing(d); render(d, "answered"); return; }
+      setBusy(false);
+      if (!r) { status.textContent = "Not sent — the server could not be reached"; return; }
+      notice = r.status === 409 ? (j.error || "the dialog changed") : `Not sent — ${j.error || `HTTP ${r.status}`}`;
+      // the refusal carries the pane's current picture: draw that, not the stale card
+      if (j.dialog && j.dialog.key) { render(j.dialog, j.dialog.answeredAt ? "answered" : null); return; }
+      if (j.state && j.state !== "blocked") { hide(); return; }
+      status.textContent = notice;
+    };
+    let textRow = null;
+    const askText = (placeholder, submit) => {
+      if (textRow) textRow.remove();
+      textRow = node("div", "cd-textrow");
+      const inp = node("input", "cd-input"); inp.type = "text"; inp.placeholder = placeholder; inp.maxLength = 500;
+      const go = node("button", "cd-go", "Send");
+      go.addEventListener("click", () => submit(inp.value.trim()));
+      inp.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); submit(inp.value.trim()); } });
+      textRow.appendChild(inp); textRow.appendChild(go);
+      opts.after(textRow); inp.focus();
+    };
+    for (const o of d.options || []) {
+      if (o.sepAbove) opts.appendChild(node("div", "cd-sep"));
+      const b = node("button", `cd-opt${o.selected ? " cd-sel" : ""}`);
+      b.dataset.n = String(o.n);
+      b.appendChild(node("span", "cd-n", d.numbered ? `${o.n}` : "›"));
+      const lab = node("span", "cd-lab", o.label);
+      if (o.detail) lab.appendChild(node("span", "cd-detail", o.detail));
+      b.appendChild(lab);
+      const twoDigits = d.numbered && o.n > 9;
+      b.title = twoDigits ? "A two-digit option is chosen in the terminal" : d.numbered ? `Types ${o.n} into the dialog` : "Moves the ❯ there (from where the terminal has it when you click) and presses Enter";
+      if (twoDigits) b.disabled = true;
+      b.addEventListener("click", () => {
+        if (o.text) askText("What should claude do? (optional — Send with nothing to just pick this)", (t) => answer({ action: "option", n: o.n, ...(t ? { text: t } : {}) }, `${o.n}`));
+        else answer({ action: "option", n: o.n }, `${o.n}`);
+      });
+      opts.appendChild(b);
+    }
+    box.appendChild(opts);
+    const foot = node("div", "cd-foot");
+    if (d.amend) { const am = node("button", "cd-amend", "Amend…"); am.title = "Tab in the dialog: say what to do instead"; am.addEventListener("click", () => askText("Tell claude what to do instead", (t) => { if (t) answer({ action: "amend", text: t }, "the amendment"); })); foot.appendChild(am); }
+    if (d.cancel) { const c = node("button", "cd-cancel", "Cancel (Esc)"); c.title = "Escape in the dialog"; c.addEventListener("click", () => answer({ action: "cancel" }, "Escape")); foot.appendChild(c); }
+    foot.appendChild(status);
+    box.appendChild(foot);
+    if (done) { status.textContent = "Answered · waiting for claude…"; box.classList.add("cd-answered"); for (const el2 of box.querySelectorAll("button")) el2.disabled = true; }
+    else if (notice) status.textContent = notice;
+    shownSig = sigOf(d, done);
+  };
+  const tick = () => {
+    const s = sess();
+    if (!s || s.state !== "blocked") { hide(); answered = null; return; }
+    const d = s.dialog;
+    if (!d || !d.key) {
+      // blocked with no readable dialog: the live line hands over to the
+      // terminal; after an answer the card stays as "waiting" until the pane moves on
+      if (answered && box.classList.contains("cd-answered")) return;
+      hide(); return;
+    }
+    const isAnswered = Boolean(d.answeredAt) || answered === showing(d);
+    if (sigOf(d, isAnswered) === shownSig) return;
+    if (busy && d.key === shownKey) return;
+    if (d.answerError && !isAnswered) notice = `Not delivered — ${d.answerError}. Check the terminal before answering again`;
+    render(d, isAnswered ? "answered" : null);
+  };
+  return { tick };
 }
 
 function chatComposer(el, m, sessionId, { list }) {

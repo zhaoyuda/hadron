@@ -50,7 +50,7 @@ scripts/
   setup-workspace.js  # Interactive workspace initializer
 test/
   unit/               # detectState/nextState fixtures + security HTTP suite (npm test)
-  e2e/                # Playwright browser modules M1-M33 (npm run test:e2e)
+  e2e/                # Playwright browser modules M1-M34 (npm run test:e2e)
 ```
 
 ## Conventions
@@ -488,6 +488,43 @@ npm test
 #                            saved (agents dir 0o500) → 500 "not queued", nothing on the record, never delivered; dispatch
 #                            waits for the detector's first post-boot verdict (detector.verdictSeen);
 #                            no tmux buffers / temp files / token left behind)
+#   + test-dialog.js        (permission cards — server/dialog.js parseDialog over the pane: the dialog claude shows
+#                            (fixtures blocked-dialog-*-v2 from claude 2.1.304: Bash / Write / WebFetch permission, the
+#                            amend line after Tab, AskUserQuestion, plan approval, folder trust) → {kind permission|plan|
+#                            question|select, title, question, sections [{code, text}] split on ╌ fences (code dedented),
+#                            options [{n, label, selected, detail? (the option's continuation lines), sepAbove?, text?
+#                            (opens a text field)}], hints, numbered, cancel (Esc hint or an "(esc)" option), amend (Tab
+#                            to amend), truncated?, key (8-hex hash of body + options + hints — the same screen is the
+#                            same key)}; the Tip line and the preamble above the first ──── are dropped, a body over 40
+#                            lines keeps its LAST lines (the question) and says truncated, non-dialog panes → null; on
+#                            the 5a/5b blocked verdicts, `session.dialog` runtime-only (refreshed every capture while
+#                            blocked, `at` kept across captures of the same screen, cleared when the state leaves blocked,
+#                            never on the record), on the token-bearing list only. POST /api/sessions/:id/dialog/answer
+#                            {action option|cancel|amend, n?, text?, key} at the REAL tmux boundary (private socket +
+#                            test/e2e/fixtures/claude-m34.sh, a process named claude showing the Bash dialog and logging
+#                            each key): the pane is captured and parsed AGAIN under withPaneLock and the keystrokes
+#                            come from that fresh read (a screen that no longer shows the key → 409 and the wire takes
+#                            the fresh picture); a numbered option types its digit (a digit submits in claude's dialogs;
+#                            n > 9 → 409, two digits would pick option 1), + text → the text and Enter after the screen
+#                            changed (the field opened; bounded wait, else 409 + answerError); an unnumbered row →
+#                            Down/Up from where the ❯ IS in the pane (the operator moved it in the terminal → the wire
+#                            and the card follow, the click still lands on the row it names), then Enter; cancel →
+#                            Escape; amend → Tab, wait for the amend line, the text, Enter; then wake + ackByInput; the
+#                            key must be the dialog on screen — a stale key, no dialog, an answered dialog, amend on a
+#                            dialog without Tab, an unknown n → 409 carrying {state, blockReason, dialog} so the card
+#                            repaints from the truth; `answeredAt` is stamped only once every keystroke went in (a tmux
+#                            failure → 500 carrying the dialog with `answerError`, answerable again) and refuses a
+#                            second answer only while the SAME screen is up (`render` = hash of the whole screen: the
+#                            same dialog drawn again after a retried tool keeps its key and is a new showing with a new
+#                            `at`) and the keystroke is recent (DIALOG_ANSWER_GRACE_MS 10 s, HADRON_DIALOG_ANSWER_GRACE_MS
+#                            in tests — a dialog claude never took the answer for is answerable again); an unnumbered
+#                            ❯ list without claude's hint row is not a dialog (quoted output); a "Needs input" screen the
+#                            parser cannot read counts on session.dialogMisses, warnOnce + a yellow doctor note
+#                            (silent-failure rule; the answer route's own re-read never counts — a dialog that went
+#                            away before the click is not a parser miss); 400 on shape (text one line ≤ 500 chars —
+#                            dialog text deliberately goes in with send-keys -l, NOT the buffer-paste path of
+#                            /message: a paste into claude's dialog field is not proven and the field is one line;
+#                            -l is reliable only for short text, hence the cap); no token → 401)
 ```
 
 ### Reliability gate
@@ -721,6 +758,18 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                            finds nothing, never resent on its own, "Send again" delivers exactly once; an image pasted
 #                            into .chat-input is uploaded and its bare path inserted (markdown.js IMAGE_PASTE_TARGETS);
 #                            a handed row not seen as a bubble for 20 s says so and points at Primary)
+#   + test/e2e/m34-permission-cards.js (permission cards under the chat view — chat.js chatDialogCard reading
+#                            `dialog` off the 3-s sessions poll, against test/e2e/fixtures/claude-m34.sh exec'd into the
+#                            pane: a .chat-dialog card between the outbox and the composer with the kind badge + title,
+#                            code sections as <pre>, the question, one button per REAL option (the ❯ one marked, the
+#                            scope detail under option 2), Amend… (an inline field → {action amend}) and Cancel (Esc);
+#                            the live line says "Needs input · answer below" (no card → "Open Primary" as before); a click
+#                            POSTs with the card's key, disables the buttons, says "Answered · waiting for claude…" and
+#                            the card goes once the pane is idle; the dialog back → the card is back; the operator
+#                            answering in Primary while the card is stale → the click's 409 repaints the card from the
+#                            server's picture, nothing typed twice; the folder-trust list is a Choose card whose row
+#                            click sends Down, Enter, and a ↓ typed in the terminal moves the card's mark — the next
+#                            row click moves from THERE (Up, Enter); chatAttentionVisible stays false while blocked)
 ```
 
 `npm run test:e2e` runs `test/e2e/run-all.js`, which executes every `m*.js`

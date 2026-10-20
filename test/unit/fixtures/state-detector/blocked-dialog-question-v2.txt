@@ -1,0 +1,40 @@
+
+● Ok. The remove command was declined, so zz.txt is still in place.
+
+✻ Worked for 3s · done 6:10 PM
+
+❯ use the Write tool to create a file named note.md containing the single line hello
+
+● Writing note.md in the working directory.
+
+● Write(note.md)
+  ⎿  Wrote 1 line to note.md
+      1 hello
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ use WebFetch to fetch https://example.com and tell me its title
+
+● Loading WebFetch, then fetching the page.
+
+● Fetch(https://example.com)
+  ⎿  Interrupted · What should Claude do instead?
+
+✻ Churned for 4s · done 6:11 PM
+
+❯ use the AskUserQuestion tool to ask me which colour I prefer, with the options red, green and blue
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Colour
+
+Which colour do you prefer?
+
+❯ 1. Red
+     Prefer red
+  2. Green
+     Prefer green
+  3. Blue
+     Prefer blue
+  4. Type something.
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel

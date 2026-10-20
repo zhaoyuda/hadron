@@ -1,0 +1,40 @@
+
+● Running rm -f zz.txt now.
+
+● Bash(rm -f zz.txt)
+  ⎿  Interrupted · What should Claude do instead?
+
+✻ Sautéed for 2s · done 6:02 PM
+
+❯ say ok
+
+● Ok. The remove command was declined, so zz.txt is still in place.
+
+✻ Worked for 3s · done 6:10 PM
+
+❯ use the Write tool to create a file named note.md containing the single line hello
+
+● Writing note.md in the working directory.
+
+● Write(note.md)
+  ⎿  Wrote 1 line to note.md
+      1 hello
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ use WebFetch to fetch https://example.com and tell me its title
+
+● Loading WebFetch, then fetching the page.
+
+● Fetch(https://example.com)
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Fetch
+ Claude wants to fetch content from example.com
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ url: https://example.com/
+ prompt: What is the title of this page? Return only the title text.
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Do you want to allow Claude to fetch this content?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for example.com
+   3. No, and tell Claude what to do differently (esc)

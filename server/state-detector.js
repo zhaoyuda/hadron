@@ -7,8 +7,13 @@
  * States: idle, working, done, blocked
  */
 
+import { parseDialog } from "./dialog.js";
 import { tmuxAsync, isTmuxTimeout } from "./tmux.js";
 import { warnOnce } from "./log.js";
+
+// An answered dialog still on the same screen this long after the keystroke
+// is a dialog claude never took the answer for — answerable again.
+export const DIALOG_ANSWER_GRACE_MS = Number(process.env.HADRON_DIALOG_ANSWER_GRACE_MS) || 10000;
 
 // Processes that indicate an agent (Claude) is running
 const AGENT_PROCESS_RE = /^(claude[-_]?code|claude|node|npx|bun|deno|\d+\.\d+\.\d+)(\.exe)?$/i;
@@ -627,13 +632,14 @@ export function detectState(rawLines, opts = {}) {
   const bottom5 = rawLines.slice(Math.max(0, rawLines.length - 5));
   for (const line of bottom5) {
     if (SELECTION_PROMPT_RE.test(line.trim())) {
-      return { state: "blocked", blockReason: "Needs input", substatus: null };
+      return { state: "blocked", blockReason: "Needs input", substatus: null, dialog: parseDialog(rawLines) };
     }
   }
 
-  // 5b. Permission / input dialogs
+  // 5b. Permission / input dialogs — `dialog` is the parsed card (server/dialog.js),
+  // null when the pane shows a shape the parser does not read (the card hands over).
   if (WAITING_INPUT_RE.test(tailText)) {
-    return { state: "blocked", blockReason: "Needs input", substatus: null };
+    return { state: "blocked", blockReason: "Needs input", substatus: null, dialog: parseDialog(rawLines) };
   }
 
   // 5c. Prompt editor (vi editing /tmp/claude-prompt-*.md)
@@ -1020,12 +1026,53 @@ export class StateDetector {
     this.blockedCount = m.blockedHits;
     this.shellDoneCount = m.shellHits;
 
-    if (!decision) return;
-    if (decision.state) {
-      this._setState(decision.state, decision.blockReason, decision.substatus);
-    } else if (decision.substatus !== undefined) {
-      this.session.substatus = decision.substatus;
+    if (decision) {
+      if (decision.state) {
+        this._setState(decision.state, decision.blockReason, decision.substatus);
+      } else if (decision.substatus !== undefined) {
+        this.session.substatus = decision.substatus;
+      }
     }
+    this._applyDialog(snap);
+  }
+
+  // The dialog card (chat view, G4) follows every CAPTURE, not just state
+  // entries: an amend changes option 1's text, one dialog can replace another
+  // while the state stays blocked, and an answered dialog must go away before
+  // the reducer settles out of blocked. Runtime-only (saveAgent allowlists what
+  // goes to disk), token-bearing readers only (resolvedSession).
+  _applyDialog(snap) {
+    const d = this.session.state === "blocked" && snap.state === "blocked" ? snap.dialog || null : null;
+    const prev = this.session.dialog || null;
+    if (!d) {
+      if (prev) this.session.dialog = null;
+      // A "Needs input" pane the parser cannot read: the card hands over to
+      // the terminal — silently unless said here (silent-failure rule; counted
+      // once per unreadable screen, `hadron doctor` has the row). The answer
+      // route's re-read (fromRoute) never counts: a dialog that went away between
+      // the card's read and the click is not a parser miss.
+      const miss = "dialog" in snap && snap.dialog === null && snap.state === "blocked" && !snap.fromRoute;
+      if (miss && !this._dialogMiss) {
+        this.session.dialogMisses = (this.session.dialogMisses || 0) + 1;
+        warnOnce(`dialog-parse:${this.session.id}`, `[state] agent ${this.session.id}: the pane needs input but its dialog could not be parsed — the chat view says "answer it in the terminal" (\`hadron doctor\` has the row)`);
+      }
+      this._dialogMiss = miss;
+      return;
+    }
+    this._dialogMiss = false;
+    const now = new Date().toISOString();
+    if (prev && prev.key === d.key) {
+      d.at = prev.at;
+      const sameScreen = prev.render === d.render;
+      // The answered showing is still up only while the screen has not been
+      // redrawn and the keystroke is recent: the same dialog drawn again (a
+      // retried tool, no idle capture in between) and an answer claude never
+      // took (same screen past the grace) are both a NEW showing, answerable.
+      if (prev.answeredAt && sameScreen && Date.now() - Date.parse(prev.answeredAt) < DIALOG_ANSWER_GRACE_MS) d.answeredAt = prev.answeredAt;
+      else if (prev.answeredAt) d.at = now;
+      if (prev.answerError && !prev.answeredAt && sameScreen) d.answerError = prev.answerError;
+    } else d.at = now;
+    this.session.dialog = d;
   }
 
   _canTransition() {

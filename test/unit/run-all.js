@@ -23,6 +23,7 @@ const SUITES = [
   "test-artifacts.js", "test-agent-ops.js", "test-terminal-ws.js", "test-provenance.js",
   "test-resume-live.js", "test-doctor.js", "test-watchdog.js", "test-cli-flags.js", "test-transcript.js", "test-quota.js",
   "test-changes.js", "test-checkpoint.js", "test-tmux-health.js", "test-perf-log.js", "test-conversation.js", "test-outbox.js",
+  "test-dialog.js",
 ];
 
 const results = [];
