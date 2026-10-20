@@ -2527,7 +2527,11 @@ const pendingAcks = new Map(); // id → rev PATCHed, applied over polled data u
 const ackRetryAt = new Map(); // id → time before which a failed ack is not retried (warned once)
 
 function terminalOnScreen() {
-  return layoutMode !== "tabs" || activeTab === "terminal" || activeTab === "chat"; // reading the conversation is looking at the agent
+  if (layoutMode !== "tabs" || activeTab === "terminal") return true;
+  // The chat tab counts as looking at the agent only while the latest of the
+  // conversation is actually on screen (not scrolled up, not offline, not a
+  // dialog that exists only in the terminal) — chat.js decides.
+  return activeTab === "chat" && typeof chatAttentionVisible === "function" && chatAttentionVisible(activeSessionId);
 }
 
 function ackTick() {

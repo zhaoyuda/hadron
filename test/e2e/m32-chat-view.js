@@ -21,10 +21,20 @@
  *     survives a reload); a shell agent's chat says it has no conversation
  *   - hostile HTML quoted in a reply is rendered inert (sanitised markdown);
  *     an open Thinking survives its message's re-render; scrolled up, then
- *     Primary and back → at the bottom, following, no phantom pill; 1200
- *     records appended at once (more than one tick's pages) all arrive; a
- *     server-side cache rebuild while the tab was away loses nothing (new
- *     generation); an adopted second session id paints the new conversation
+ *     Primary and back → the reader's place is kept with the pill, a new
+ *     exchange counts on it, the jump follows again; 1200 records appended at
+ *     once (more than one tick's pages) all arrive — at the START of what
+ *     arrived (a multi-screen arrival never lands the reader at its end) with
+ *     the pill offering the latest; a server-side cache rebuild while the tab
+ *     was away loses nothing (new generation) and keeps a scrolled-up reader's
+ *     place, counting what was written meanwhile; an adopted second session
+ *     id paints the new conversation
+ *   - a message that grows a text block while the reader is scrolled up counts
+ *     on the pill, and its Thinking node is kept (block-level patch); blocked
+ *     → "Needs input — <reason> · Open Primary" and NO ack from the chat tab
+ *     until Primary is opened; working → "last activity Ns ago" + the pending
+ *     glyph on a result-less tool card follows the pane's state; done at the
+ *     bottom → acked; server unreachable → an offline banner, no live line
  *
  * Run: node test/e2e/m32-chat-view.js
  */
@@ -202,25 +212,114 @@ try {
   r.ok(await until(async () => (await mt.locator(".ci-tool").count()) === 1 && (await mt.locator(".ci-tool-st").textContent()) === "✓"), "…the tool call + result re-render the message (rev moved)");
   r.ok(await mt.locator(".ci-think").evaluate((d) => d.open), "…and Thinking is still open");
 
-  // ── scrolled up, then away and back: the view is at the bottom and follows again ──
-  await sc2.evaluate((el) => { el.scrollTop = 0; });
+  // ── scrolled up, then away and back: the reader's place is kept ──
+  await sc2.evaluate((el) => { el.scrollTop = 900; });
   await sc2.dispatchEvent("scroll");
   r.ok(await until(async () => (await chat2.locator(".chat-jump").isVisible())), "scrolled up → pill");
+  const placeId = await sc2.evaluate((el) => { const top = el.getBoundingClientRect().top; return [...el.querySelectorAll(".ci")].find((c) => c.getBoundingClientRect().bottom > top).dataset.id; });
+  const placeY = await page.locator(`#chat-container .ci[data-id="${placeId}"]`).evaluate((el) => el.getBoundingClientRect().top);
   await page.locator(".wh-tab", { hasText: "Primary" }).click();
   await page.locator("#af-chat-btn").click();
   const sc3 = page.locator("#chat-container .chat-scroll");
-  r.ok(await until(async () => (await sc3.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 48)) && !(await page.locator("#chat-container .chat-jump").isVisible())), "Primary and back: the view is at the bottom with no pill");
+  const placeY2 = await until(async () => Math.abs((await page.locator(`#chat-container .ci[data-id="${placeId}"]`).evaluate((el) => el.getBoundingClientRect().top)) - placeY) < 4);
+  r.ok(placeY2 && (await page.locator("#chat-container .chat-jump").isVisible()), `Primary and back: the item the reader was on is where it was (${Math.round(placeY)}px), the pill is still there`);
   appendFileSync(transcript, user("回来了") + asst("mb", { type: "text", text: "在底部。" }, { stop_reason: "end_turn" }));
-  r.ok(await until(async () => (await page.locator('#chat-container .ci-assistant[data-id="a:mb"]').count()) === 1), "…a new exchange lands");
-  r.ok(await until(async () => (await sc3.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 48)) && !(await page.locator("#chat-container .chat-jump").isVisible())), "…the view followed it and no phantom pill appeared");
+  r.ok(await until(async () => (await page.locator("#chat-container .chat-jump").textContent()) === "↓ 2 new"), `…a new exchange counts on the pill (${await page.locator("#chat-container .chat-jump").textContent()})`);
+  r.ok(Math.abs((await page.locator(`#chat-container .ci[data-id="${placeId}"]`).evaluate((el) => el.getBoundingClientRect().top)) - placeY) < 4, "…and did not move the reader");
+  await page.locator("#chat-container .chat-jump").click();
+  r.ok(await until(async () => (await sc3.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 48)) && !(await page.locator("#chat-container .chat-jump").isVisible()) && (await page.locator('#chat-container .ci-assistant[data-id="a:mb"]').count()) === 1), "…the jump lands at the bottom, pill gone");
+  appendFileSync(transcript, user("再来") + asst("mb2", { type: "text", text: "还在底部。" }, { stop_reason: "end_turn" }));
+  r.ok(await until(async () => (await page.locator('#chat-container .ci-assistant[data-id="a:mb2"]').count()) === 1 && (await sc3.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 48)) && !(await page.locator("#chat-container .chat-jump").isVisible())), "…and the view follows the next exchange, no phantom pill");
+
+  // ── a multi-screen reply lands the reader at its START, not its end ──
+  const long = Array.from({ length: 60 }, (_, i) => `第 ${i + 1} 段：这是一段很长的中文回答，用来把视口撑开，看看阅读是不是从头开始。`).join("\n\n");
+  appendFileSync(transcript, user("写长一点") + asst("ml", { type: "text", text: long }, { stop_reason: "end_turn" }));
+  const ml = page.locator('#chat-container .ci-assistant[data-id="a:ml"]');
+  r.ok(await until(async () => (await ml.count()) === 1 && (await page.locator("#chat-container .chat-jump").isVisible())), "a reply taller than the view lands → the ↓ pill is up (reader paused at its start)");
+  const mlTop = await page.locator("#chat-container .ci-user", { hasText: "写长一点" }).evaluate((el) => el.getBoundingClientRect().top - el.closest(".chat-scroll").getBoundingClientRect().top);
+  r.ok(mlTop >= 0 && mlTop < 40 && (await sc3.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)) > 400, `…the arrival (its prompt first) starts at the top of the view (${Math.round(mlTop)}px), the reply's end is below the fold`);
+  r.ok((await page.locator("#chat-container .chat-jump").textContent()) === "↓", "…the pill offers the latest without a count (nothing arrived since)");
+  await page.locator("#chat-container .chat-jump").click();
+  r.ok(await until(async () => (await sc3.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 48))), "…click → bottom");
+
+  // ── a message that grows while the reader is away counts, and keeps its nodes ──
+  await sc3.evaluate((el) => { el.scrollTop = 0; });
+  await sc3.dispatchEvent("scroll");
+  r.ok(await until(async () => (await page.locator("#chat-container .chat-jump").isVisible())), "scrolled up again");
+  appendFileSync(transcript, user("想一下") + asst("mg", { type: "thinking", thinking: "thinking first, a long answer follows" }));
+  r.ok(await until(async () => (await page.locator("#chat-container .chat-jump").textContent()) === "↓ 2 new"), `a prompt + a Thinking-only reply count 2 (${await page.locator("#chat-container .chat-jump").textContent()})`);
+  const mg = page.locator('#chat-container .ci-assistant[data-id="a:mg"]');
+  await mg.locator(".ci-think").evaluate((el) => { el.dataset.mark = "kept"; });
+  appendFileSync(transcript, asst("mg", { type: "text", text: "答案来了。" }, { stop_reason: "end_turn" }));
+  r.ok(await until(async () => (await mg.locator(".ci-md").count()) === 1 && (await page.locator("#chat-container .chat-jump").textContent()) === "↓ 3 new"), `…the text block landing on the SAME message counts once more (${await page.locator("#chat-container .chat-jump").textContent()})`);
+  r.ok((await mg.locator(".ci-think").getAttribute("data-mark")) === "kept", "…and the Thinking node was kept, not rebuilt (a selection in it would survive)");
+  // an empty thinking block renders no node; the blocks after it must still be matched by index, not position
+  appendFileSync(transcript, asst("me", { type: "thinking", thinking: "" }) + asst("me", { type: "text", text: "第一段。" }));
+  const me = page.locator('#chat-container .ci-assistant[data-id="a:me"]');
+  r.ok(await until(async () => (await me.locator(".ci-md").count()) === 1), "a reply with an empty Thinking block then text paints the text");
+  await me.locator(".ci-md").evaluate((el) => { el.dataset.mark = "kept"; });
+  appendFileSync(transcript, asst("me", { type: "text", text: "第二段。" }, { stop_reason: "end_turn" }));
+  r.ok(await until(async () => (await me.locator(".ci-md").count()) === 2), "…a second text block lands");
+  r.ok((await me.locator(".ci-md").first().getAttribute("data-mark")) === "kept", "…and the first text node was kept (empty block before it did not shift the match)");
+  r.ok((await me.locator(".ci-md").first().textContent()).includes("第一段") && (await me.locator(".ci-md").nth(1).textContent()).includes("第二段"), "…in order");
+  await page.locator("#chat-container .chat-jump").click();
+  r.ok(await until(async () => (await sc3.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 48))), "…jump → bottom");
+
+  // ── honest state: blocked hands over to the terminal and is NOT acked from the chat ──
+  const sessOf = async () => (await (await api("GET", "/api/sessions")).json()).find((x) => x.id === "alpha");
+  await api("PATCH", "/api/sessions/alpha", { state: "blocked", blockReason: "permission" });
+  const live = page.locator("#chat-container .chat-live");
+  r.ok(await until(async () => (await live.isVisible()) && /Needs input — permission/.test(await live.textContent()) && (await live.locator(".chat-open-primary").count()) === 1), `blocked → "Needs input — permission · Open Primary" in the chat (${(await live.textContent()).trim()})`);
+  await wait(2500);
+  let s0 = await sessOf();
+  r.ok(s0.attentionRev > (s0.ackRev || 0), `…2.5 s on the chat tab did NOT ack it (attentionRev ${s0.attentionRev}, ackRev ${s0.ackRev}) — the dialog is in the terminal`);
+  await live.locator(".chat-open-primary").click();
+  r.ok(await until(async () => (await page.locator(".wh-tab.active").textContent()).includes("Primary")), "…Open Primary switches to the terminal tab");
+  r.ok(await until(async () => { const x = await sessOf(); return x.ackRev === x.attentionRev; }, 6000), "…where the dwell acks it");
+  await page.locator("#af-chat-btn").click();
+  await api("PATCH", "/api/sessions/alpha", { state: "working" });
+  appendFileSync(transcript, user("跑一下") + asst("mw", { type: "tool_use", id: "t-w", name: "Bash", input: { command: "ls -la" } }));
+  r.ok(await until(async () => (await live.isVisible()) && /Working · last activity \d+s ago · running: Bash ls -la/.test(await live.textContent())), `working → "last activity Ns ago · running: Bash ls -la" (${(await live.textContent()).trim()})`);
+  const stW = page.locator('#chat-container .ci-assistant[data-id="a:mw"] .ci-tool-st');
+  const glyph = async () => stW.evaluate((el) => getComputedStyle(el, "::before").content);
+  r.ok((await glyph()) === '"…"', `…the result-less tool card shows "…" while the pane works (${await glyph()})`);
+  appendFileSync(transcript, result("t-w", "total 0"));
+  r.ok(await until(async () => /· Bash ✓$/.test((await live.textContent()).trim())), `…the result landing turns the activity into "Bash ✓" (${(await live.textContent()).trim()})`);
+  appendFileSync(transcript, asst("mw", { type: "tool_use", id: "t-w2", name: "Bash", input: { command: "pwd" } }));
+  const stW2 = page.locator('#chat-container .ci-assistant[data-id="a:mw"] [data-tool="t-w2"] .ci-tool-st');
+  r.ok(await until(async () => (await stW2.count()) === 1 && (await stW2.evaluate((el) => getComputedStyle(el, "::before").content)) === '"…"'), "a second call without a result: …");
+  await api("PATCH", "/api/sessions/alpha", { state: "done" });
+  r.ok(await until(async () => (await stW2.evaluate((el) => getComputedStyle(el, "::before").content)) === '"–"' && !(await live.isVisible())), `…done → the glyph is "–" without the message being re-rendered, no live line (${await stW2.evaluate((el) => getComputedStyle(el, "::before").content)})`);
+  r.ok(await until(async () => { const x = await sessOf(); return x.ackRev === x.attentionRev && x.attentionRev > s0.attentionRev; }, 6000), "…and done with the latest on screen IS acked from the chat tab");
+
+  // ── offline: a banner, no live claim ──
+  await api("PATCH", "/api/sessions/alpha", { state: "working" });
+  r.ok(await until(async () => await live.isVisible()), "working again → live line");
+  await page.route("**/conversation*", (route) => route.abort());
+  const bannerEl = page.locator("#chat-container .chat-banner");
+  r.ok(await until(async () => (await bannerEl.isVisible()) && /^Offline/.test(await bannerEl.textContent()) && !(await live.isVisible())), `the server unreachable → an Offline banner and the live line is gone (${await bannerEl.textContent()})`);
+  r.ok((await page.locator('#chat-container .ci-assistant[data-id="a:mw"]').count()) === 1, "…the last picture stays");
+  await page.unroute("**/conversation*");
+  r.ok(await until(async () => !(await bannerEl.isVisible()) && (await live.isVisible())), "…reachable again → banner gone, live line back");
+  await api("PATCH", "/api/sessions/alpha", { state: "idle" });
 
   // ── a catch-up longer than one tick's pages loses nothing ──
+  // (the offline spell above outlasted the server's idle cache: the picture
+  // was rebuilt as a last page — bring the earlier items back first so the
+  // count below is the whole conversation)
+  const earlierBtn = page.locator("#chat-container .chat-earlier");
+  if (await earlierBtn.isVisible()) { await earlierBtn.click(); await until(async () => !(await earlierBtn.isVisible())); }
   let big = "";
   for (let i = 0; i < 600; i++) big += user(`大 ${i}`) + asst(`g${i}`, { type: "text", text: `回 ${i}` }, { stop_reason: "end_turn" });
   appendFileSync(transcript, big);
   const ci = page.locator("#chat-container .ci");
   let wireN = 0;
   r.ok(await until(async () => { wireN = (await (await api("GET", "/api/sessions/alpha/conversation")).json()).count; return wireN > 1400 && (await ci.count()) === wireN; }, 20000), `1200 records appended at once (more than 5 pages): every item arrives (${await ci.count()} of ${wireN})`);
+  r.ok((await page.locator("#chat-container .chat-jump").isVisible()) && /^↓ \d+ new$/.test(await page.locator("#chat-container .chat-jump").textContent()), `…the reader was left at the start of the arrival with the rest counted on the pill (${await page.locator("#chat-container .chat-jump").textContent()})`);
+  const g0 = page.locator('#chat-container .ci-assistant[data-id="a:g0"]');
+  r.ok((await g0.evaluate((el) => { const s = el.closest(".chat-scroll"); return s.scrollTop >= 0 && s.scrollHeight - s.scrollTop - s.clientHeight > 400; })), "…not at the bottom");
+  await page.locator("#chat-container .chat-jump").click();
+  r.ok(await until(async () => (await sc3.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 48))), "…jump → bottom");
 
   // ── the server rebuilt its cache while the chat was not polled: nothing is lost ──
   const genBefore = (await (await api("GET", "/api/sessions/alpha/conversation")).json()).generation;
@@ -234,6 +333,21 @@ try {
   r.ok(await until(async () => (await page.locator('#chat-container .ci-assistant[data-id="a:ma"]').count()) === 1 && (await ci.count()) === 200 && (await page.locator("#chat-container .chat-earlier").textContent()) === `Load earlier (${wireN + 2 - 200} more)`, 15000), `back after the cache was rebuilt: the exchange written meanwhile is there on a fresh last page, the rest offered as "Load earlier" (${await ci.count()} shown, ${await page.locator("#chat-container .chat-earlier").textContent()})`);
   const genAfter = (await (await api("GET", "/api/sessions/alpha/conversation")).json()).generation;
   r.ok(genAfter !== genBefore, `…the wire's generation is a new one (${genBefore} → ${genAfter})`);
+
+  // ── the same, with the reader scrolled up: the place survives the rebuild ──
+  const sc4 = page.locator("#chat-container .chat-scroll");
+  await sc4.evaluate((el) => { el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - 1500); });
+  await sc4.dispatchEvent("scroll");
+  r.ok(await until(async () => (await page.locator("#chat-container .chat-jump").isVisible())), "scrolled up in the rebuilt picture → pill");
+  const keepId = await sc4.evaluate((el) => { const top = el.getBoundingClientRect().top; return [...el.querySelectorAll(".ci")].find((c) => c.getBoundingClientRect().bottom > top).dataset.id; });
+  const keepY = await page.locator(`#chat-container .ci[data-id="${keepId}"]`).evaluate((el) => el.getBoundingClientRect().top);
+  await page.locator(".wh-tab", { hasText: "Primary" }).click();
+  appendFileSync(transcript, user("又离开了") + asst("mc", { type: "text", text: "又写了一句。" }, { stop_reason: "end_turn" }));
+  await wait(4000);
+  await page.locator("#af-chat-btn").click();
+  r.ok(await until(async () => (await page.locator('#chat-container .ci-assistant[data-id="a:mc"]').count()) === 1 && Math.abs((await page.locator(`#chat-container .ci[data-id="${keepId}"]`).evaluate((el) => el.getBoundingClientRect().top)) - keepY) < 4 && (await page.locator("#chat-container .chat-jump").textContent()) === "↓ 2 new", 15000), `back after a rebuild while scrolled up: the item the reader was on is where it was and the exchange written meanwhile is counted (${await page.locator("#chat-container .chat-jump").textContent()})`);
+  await page.locator("#chat-container .chat-jump").click();
+  r.ok(await until(async () => (await sc4.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 48))), "…jump → bottom");
 
   // ── a new conversation id (adopt / resume / clear) paints the new conversation ──
   const SID2 = randomUUID();

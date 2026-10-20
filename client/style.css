@@ -2937,7 +2937,9 @@ mark.ann-mark.ann-mark-flash { background: rgba(210, 153, 34, .8); outline: 1px 
 .chat-title { font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 50%; }
 .chat-mode { font-family: 'JetBrains Mono', Menlo, monospace; color: var(--yellow); }
 .chat-note { margin-left: auto; color: var(--text3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.chat-note-warn { color: var(--yellow); }
+
+.chat-banner { flex-shrink: 0; padding: 5px 12px; font-size: 12px; color: var(--yellow); background: rgba(210, 153, 34, 0.10); border-bottom: 1px solid var(--border); }
+.chat-banner[hidden] { display: none; }
 .chat-tools { cursor: pointer; color: var(--text3); white-space: nowrap; }
 .chat-tools:hover { color: var(--text); }
 .chat-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 12px 0 24px; overscroll-behavior: contain; }
@@ -2947,7 +2949,10 @@ mark.ann-mark.ann-mark-flash { background: rgba(210, 153, 34, .8); outline: 1px 
 .chat-empty { padding: 40px 0; text-align: center; color: var(--text3); }
 .chat-live[hidden], .chat-jump[hidden], .chat-earlier[hidden] { display: none; }
 .chat-live { max-width: 860px; margin: 8px auto 0; padding: 4px 20px; color: var(--text2); font-size: 12px; display: flex; align-items: center; gap: 6px; }
-.chat-live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--blue); animation: chat-pulse 1.2s ease-in-out infinite; }
+.chat-live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--blue); animation: chat-pulse 1.2s ease-in-out infinite; flex-shrink: 0; }
+.chat-live-blocked { color: var(--yellow); }
+.chat-live-dot-warn { background: var(--yellow); animation: none; }
+.chat-open-primary { color: var(--blue); cursor: pointer; text-decoration: underline; white-space: nowrap; }
 .chat-live-act { font-family: 'JetBrains Mono', Menlo, monospace; color: var(--text3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 60%; }
 @keyframes chat-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
 .chat-jump { position: absolute; right: 24px; bottom: 16px; padding: 5px 11px; border-radius: 14px; background: var(--bg3); border: 1px solid var(--border); color: var(--text); font-size: 12px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.4); z-index: 2; }
@@ -2971,12 +2976,15 @@ mark.ann-mark.ann-mark-flash { background: rgba(210, 153, 34, .8); outline: 1px 
 .ci-think summary, .ci-out summary, .ci-boundary summary { cursor: pointer; color: var(--text3); list-style: none; user-select: none; }
 .ci-think summary::before, .ci-out summary::before, .ci-boundary summary::before { content: "▸ "; }
 .ci-think[open] summary::before, .ci-out[open] summary::before, .ci-boundary[open] summary::before { content: "▾ "; }
-.ci-think-body { white-space: pre-wrap; word-break: break-word; border-left: 2px solid var(--border); padding: 4px 10px; margin-top: 4px; color: var(--text2); font-style: italic; }
+.ci-think-body { white-space: pre-wrap; word-break: break-word; border-left: 2px solid var(--border); padding: 4px 10px; margin-top: 4px; color: var(--text2); }
 .ci-tool { margin: 4px 0 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg2); font-size: 12px; overflow: hidden; }
 .ci-tool-hd { display: flex; align-items: center; gap: 8px; padding: 4px 10px; cursor: pointer; user-select: none; white-space: nowrap; }
 .ci-tool-hd:hover { background: var(--bg3); }
 .ci-tool-st { width: 12px; text-align: center; flex-shrink: 0; font-weight: 700; }
-.ci-tool-st-ok { color: var(--green); } .ci-tool-st-err { color: var(--red); } .ci-tool-st-run { color: var(--blue); } .ci-tool-st-none { color: var(--text3); }
+.ci-tool-st-ok { color: var(--green); } .ci-tool-st-err { color: var(--red); }
+/* a call without a result: "…" only while the pane is working right now (the class follows /api/sessions every tick), "–" otherwise */
+.ci-tool-st-pending { color: var(--text3); } .ci-tool-st-pending::before { content: "–"; }
+.chat-working .ci-tool-st-pending { color: var(--blue); } .chat-working .ci-tool-st-pending::before { content: "…"; }
 .ci-tool-name { font-weight: 600; color: var(--text); flex-shrink: 0; }
 .ci-tool-sum { font-family: 'JetBrains Mono', Menlo, monospace; color: var(--text2); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .ci-tool-sum[data-open-path]:hover { color: var(--blue); text-decoration: underline; }

@@ -639,8 +639,28 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                            transcript (generation moved) drops the picture; more than a page → "Load earlier (N more)" prepends
 #                            with the reader's place kept; View → Chat View First (chatFirst, persisted) lands every agent on its
 #                            chat with the terminal still the Primary tab, a shell agent's chat says it has no conversation; the
-#                            live "Working · Ns · <tool>" line shows only while the agent is working; reading the chat counts as
-#                            looking at the agent for the M21 dwell ack. Review-driven: the paging cursor advances only as far
+#                            live line shows only while the agent is working. Stable reading (astra's FIX FIRST pass, G2b): the
+#                            reader's place is an anchor {id, offset} taken on every reader scroll while paused — Primary and
+#                            back puts the item they were on where it was with the pill still up, a new exchange counts on it
+#                            ("↓ 2 new") without moving them; a reply taller than the view lands the reader at the START of the
+#                            arrival (its prompt first) paused with a "↓" pill, never at its end (landAt: growth > 0.8 viewport
+#                            while following; the 1200-record catch-up leaves "↓ 1000 new"); an assistant message is patched
+#                            block by block (data-sig = length + FNV-1a of the block, chatRenderAssistant; nodes matched by block index — an empty thinking block renders no node) so a text block
+#                            landing on the same message keeps its Thinking node (a selection in it would survive) AND counts
+#                            on the pill (added + grew); hidden items (turn without duration, queue dequeue) never count; a
+#                            same-conversation cache rebuild keeps a scrolled-up reader's place (finishRebuild: earlier pages
+#                            loaded, bounded, until the anchored item is back) and counts what was written meanwhile by ord,
+#                            only a different conversationId goes to the bottom. Honest state: "Working · last activity Ns ago
+#                            · running: Bash ls -la" / "· Bash ✓" (the age of the last RECORDED item, never the turn's length);
+#                            blocked → "Needs input — <blockReason> · Open Primary" (click → terminal tab) and the chat tab does
+#                            NOT ack attention (chatAttentionVisible, read by app.js terminalOnScreen: not while scrolled up,
+#                            offline, mid-rebuild or blocked — done with the latest on screen IS acked); a result-less tool
+#                            card's "…"/"–" glyph is CSS from .chat-working, so it follows the pane's state every tick without a
+#                            re-render; the server unreachable → an "Offline — …" banner (chat-banner, never the ellipsized
+#                            header slot) and no live claim, the last picture stays; a refresh in flight is never overlapped by
+#                            the next tick (busy); a tail page's `more` (earlier items) is not paged forward; queue items read
+#                            "claude queue · …" (claude's own historical queue, not G3's outbox); Thinking is not italic.
+#                            Review-driven: the paging cursor advances only as far
 #                            as the pages applied (1200 records appended at once — more than CHAT_PAGES_PER_TICK pages — all
 #                            arrive; with `m.rev = data.rev` the client stalled 200 behind for good); a page fetched with a cursor
 #                            the conversation does not honour (adopted/resumed/cleared conversationId, or rev went backwards)
@@ -652,8 +672,7 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                            script/iframe/object/style/form dropped, on* handlers and javascript:/data: URLs stripped, data:image/
 #                            on <img> kept) for the chat AND the .md artifact preview — a reply quoting <img onerror> / <script> /
 #                            [x](javascript:) renders inert; an open Thinking survives its message's rev moving (m.open keyed
-#                            `<id>:think:<i>`); scrolled up then Primary and back → at the bottom, following, no phantom pill; an
-#                            unchanged tick never scrolls; Collapse tools closes the hand-opened card too; chatExpandAll persists
+#                            `<id>:think:<i>`); an unchanged tick never scrolls; Collapse tools closes the hand-opened card too; chatExpandAll persists
 #                            in the ui state; chatModels is an LRU of 6 pictures; a path is offered as a link only under the
 #                            agent's cwd or the workspace)
 ```

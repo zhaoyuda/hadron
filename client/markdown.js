@@ -34,7 +34,9 @@ function mdSanitize(html) {
     if (MD_DROP_TAGS.has(tag)) { drop.push(n); continue; }
     for (const a of [...n.attributes]) {
       const name = a.name.toLowerCase();
-      if (name.startsWith("on") || name === "srcdoc" || name === "style" && /expression|url\s*\(/i.test(a.value)) { n.removeAttribute(a.name); continue; }
+      // style= is dropped whole: a fixed full-viewport layer from transcript or
+      // artifact text would cover the dashboard (clickjacking, no script needed).
+      if (name.startsWith("on") || name === "srcdoc" || name === "style") { n.removeAttribute(a.name); continue; }
       if (!MD_URL_ATTRS.has(name)) continue;
       const v = a.value.replace(/[\u0000-\u0020\u007f-\u009f\u200b-\u200f\u2028\u2029\ufeff]/g, "").toLowerCase();
       const scheme = /^([a-z][a-z0-9+.-]*):/.exec(v);
