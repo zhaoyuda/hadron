@@ -1071,7 +1071,12 @@ app.get("/api/sessions/:id/files", (req, res) => {
 // requests: `complete:false` says "ask again"). Token-gated like the transcript;
 // no session id on the wire (conversationId is a hash of it). Caches idle for
 // CONVERSATION_IDLE_MS are dropped; a changed session id or file starts fresh.
-const CONVERSATION_IDLE_MS = 10 * 60 * 1000;
+// A fresh cache's `generation` is seeded from the clock, so a client that kept
+// polling across a drop + rebuild (or a server restart) sees a generation it has
+// never held and re-pages from the tail — with a counter restarting at 0 the
+// rebuild was invisible and the client's cursor outran the new revs (items
+// written while it was away were never delivered).
+const CONVERSATION_IDLE_MS = Number(process.env.HADRON_CONVERSATION_IDLE_MS) > 0 ? Number(process.env.HADRON_CONVERSATION_IDLE_MS) : 10 * 60 * 1000; // env: tests only
 const CONVERSATION_READ_BUDGET_MS = 250;
 const CONVERSATION_CACHE_MAX = 8; // conversations held at once (each up to MAX_ITEMS items — one per agent clicked through, not per agent)
 const conversationCaches = new Map(); // agent id → { file, conv, usedAt }
@@ -1082,6 +1087,7 @@ function conversationFor(s) {
   let c = conversationCaches.get(s.id);
   if (!c || c.file !== file) {
     c = { file, conv: createConversation() };
+    c.conv.generation = Math.max(Date.now(), (conversationCaches.get(s.id)?.conv.generation ?? 0) + 1);
     conversationCaches.set(s.id, c);
     if (conversationCaches.size > CONVERSATION_CACHE_MAX) { // least recently used goes
       let lru = null;
@@ -1111,7 +1117,7 @@ function conversationFor(s) {
 const conversationSweep = setInterval(() => {
   const cut = Date.now() - CONVERSATION_IDLE_MS;
   for (const [id, c] of conversationCaches) if (c.usedAt < cut) conversationCaches.delete(id);
-}, 60_000);
+}, Math.min(60_000, CONVERSATION_IDLE_MS));
 conversationSweep.unref();
 const intParam = (v) => (v === undefined ? undefined : typeof v === "string" && /^\d{1,12}$/.test(v) ? Number(v) : NaN);
 app.get("/api/sessions/:id/conversation", (req, res) => {

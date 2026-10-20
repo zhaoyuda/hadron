@@ -17,6 +17,40 @@ if (typeof marked !== 'undefined') {
   });
 }
 
+// Markdown → HTML through a DOM sanitizer. marked ships none, and the dashboard
+// origin holds the API token: a transcript (chat view) or a .md artifact quoting
+// fetched/hostile content must never run script here. Active elements are
+// dropped, on* handlers and javascript:/data: URLs stripped (data:image/ on an
+// <img> stays — markdown previews embed images that way). Parsing happens in an
+// inert DOMParser document, so nothing executes on the way through.
+const MD_DROP_TAGS = new Set(["SCRIPT", "IFRAME", "OBJECT", "EMBED", "FRAME", "FRAMESET", "LINK", "META", "BASE", "STYLE", "FORM", "TEMPLATE", "APPLET", "NOSCRIPT"]);
+const MD_URL_ATTRS = new Set(["href", "src", "xlink:href", "action", "formaction", "poster", "data", "background", "cite", "longdesc", "usemap"]);
+function mdSanitize(html) {
+  const doc = new DOMParser().parseFromString(String(html), "text/html");
+  const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_ELEMENT);
+  const drop = [];
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    const tag = n.tagName.toUpperCase();
+    if (MD_DROP_TAGS.has(tag)) { drop.push(n); continue; }
+    for (const a of [...n.attributes]) {
+      const name = a.name.toLowerCase();
+      if (name.startsWith("on") || name === "srcdoc" || name === "style" && /expression|url\s*\(/i.test(a.value)) { n.removeAttribute(a.name); continue; }
+      if (!MD_URL_ATTRS.has(name)) continue;
+      const v = a.value.replace(/[\u0000-\u0020\u007f-\u009f\u200b-\u200f\u2028\u2029\ufeff]/g, "").toLowerCase();
+      const scheme = /^([a-z][a-z0-9+.-]*):/.exec(v);
+      if (!scheme) continue;
+      const okImage = name === "src" && tag === "IMG" && /^data:image\/(png|jpe?g|gif|webp|bmp|avif)[;,]/.test(v);
+      if (!["http", "https", "mailto", "tel"].includes(scheme[1]) && !okImage) n.removeAttribute(a.name);
+    }
+  }
+  for (const n of drop) n.remove();
+  return doc.body.innerHTML;
+}
+function mdRender(text) {
+  const src = String(text == null ? "" : text);
+  try { return typeof marked !== "undefined" ? mdSanitize(marked.parse(src)) : esc(src); } catch { return esc(src); }
+}
+
 function isMarkdownFile(filePath) {
   if (!filePath) return false;
   const lower = filePath.toLowerCase();
@@ -80,7 +114,7 @@ function renderMarkdownArtifact(container, text, filePath) {
   container.dataset.mdRaw = content;
   container.dataset.mdMode = "preview";
   const note = dirty ? `<span class="md-toggle-draftnote">unsaved changes</span>` : "";
-  const html = typeof marked !== 'undefined' ? marked.parse(content) : esc(content);
+  const html = mdRender(content);
   container.innerHTML = `<div class="md-toggle" onclick="toggleEditMode(this.parentElement)">Preview ${note}<span class="md-toggle-key">${navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'}+Shift+E</span></div><div class="md-preview">${html}</div>`;
   rewriteRelativeImages(container.querySelector(".md-preview"), filePath);
   if (typeof annotationsOnPreviewRendered === "function") annotationsOnPreviewRendered(container, filePath);
@@ -260,7 +294,7 @@ function toggleEditMode(container) {
       container.dataset.mdRaw = text;
       const key = navigator.platform.includes('Mac') ? '⌘' : 'Ctrl';
       const note = draftNote ? `<span class="md-toggle-draftnote">unsaved changes</span>` : "";
-      const html = typeof marked !== 'undefined' ? marked.parse(text) : esc(text);
+      const html = mdRender(text);
       container.innerHTML = `<div class="md-toggle" onclick="toggleEditMode(this.parentElement)">Preview ${note}<span class="md-toggle-key">${key}+Shift+E</span></div><div class="md-preview">${html}</div>`;
       rewriteRelativeImages(container.querySelector(".md-preview"), filePath);
       // Same hook as the initial render path — without it an edit→preview

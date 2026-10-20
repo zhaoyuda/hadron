@@ -42,6 +42,7 @@ let deckStaleAfter = "3d"; // "1d" | "3d" | "7d" | "never" — fold quiet agents
 const QUOTA_SHOW_FROM = [0, 30, 50]; // View → Quota: a window shows once this much of it is used
 let quotaShowFrom = 30;
 let deckShowStale = false; // View → Show Stale Agents: every group's stale row stays open
+let chatFirst = false; // View → Chat View First: an agent opens on its conversation, the terminal stays a tab
 let deckStaleOpen = new Set(); // group keys whose stale row the operator opened (persisted)
 let currentTheme = "default"; // "default", "exploration"
 let notifyLevel = "all"; // "all" (sound+banner+flash), "banner" (banner+flash), "off"
@@ -586,6 +587,9 @@ function renderWorkContent() {
   const changesContainer = document.getElementById("changes-container");
   changesContainer.classList.remove("active");
   if (activeTab !== "changes" || layoutMode !== "tabs") stopChangesPoll(changesContainer);
+  const chatContainer = document.getElementById("chat-container");
+  chatContainer.classList.remove("active");
+  if (activeTab !== "chat" || layoutMode !== "tabs") stopChatPoll(chatContainer);
 
   // Stash cached artifacts to pool before cleaning up
   stashArtifacts();
@@ -627,6 +631,9 @@ function renderWorkContent() {
     } else if (activeTab === "changes") {
       changesContainer.classList.add("active");
       renderChangesView(changesContainer, s);
+    } else if (activeTab === "chat") {
+      chatContainer.classList.add("active");
+      renderChatView(chatContainer, s);
     } else if (activeTab.startsWith("artifact:") || activeTab.startsWith("file:")) {
       showArtifactInContainer(artContainer, s, activeTab);
     } else if (activeTab.startsWith("shell:")) {
@@ -683,6 +690,7 @@ function renderWorkContent() {
         const pane = document.createElement("div");
         pane.className = "split-pane";
         if (tab.id === "changes") renderChangesView(pane, s);
+        else if (tab.id === "chat") renderChatView(pane, s);
         else renderPaneContent(pane, tab.id, s);
         wrap.appendChild(pane);
         const x = document.createElement("div");
@@ -800,6 +808,9 @@ function getOpenTabs(session) {
 
   if (open.has("notes") || activeTab === "notes") {
     tabs.push({ id: "notes", label: "Notes" });
+  }
+  if (open.has("chat") || activeTab === "chat") {
+    tabs.push({ id: "chat", label: "Chat" });
   }
   if (open.has("changes") || activeTab === "changes") {
     tabs.push({ id: "changes", label: "Changes" });
@@ -1425,6 +1436,8 @@ function renderRightPanel() {
 
   const chgBtn = document.getElementById("af-changes-btn");
   if (chgBtn) chgBtn.addEventListener("click", () => switchTab("changes"));
+  const chatBtn = document.getElementById("af-chat-btn");
+  if (chatBtn) chatBtn.addEventListener("click", () => switchTab("chat"));
   const addBtn = document.getElementById("af-add-btn");
   if (addBtn) {
     addBtn.addEventListener("click", (e) => showArtifactPopover(e));
@@ -1809,6 +1822,7 @@ function buildArtifactsSection(activeSession) {
   });
 
   html += `<div class="af-add" id="af-add-btn" tabindex="0">+ pin a file</div>`;
+  html += `<div class="af-add af-chat-btn" id="af-chat-btn" tabindex="0" title="The conversation as claude recorded it: prompts, replies, tool calls with their results (read-only; the terminal stays the Primary tab)">💬 Chat</div>`;
   html += `<div class="af-add af-changes-btn" id="af-changes-btn" tabindex="0" title="What git sees in this agent's directory: changed files with +/− and a diff per file (read-only)">⎇ Changes</div>`;
 
 
@@ -2484,7 +2498,7 @@ function switchSession(sessionId) {
   activeSessionId = sessionId;
 
   // Restore target session's tab/layout state
-  activeTab = perSessionTab[sessionId] || "terminal";
+  activeTab = perSessionTab[sessionId] || (chatFirst ? "chat" : "terminal");
   layoutMode = perSessionLayout[sessionId] || "tabs";
 
   // Lay the TARGET agent out first and fit the terminal to it, so the size on
@@ -2513,7 +2527,7 @@ const pendingAcks = new Map(); // id → rev PATCHed, applied over polled data u
 const ackRetryAt = new Map(); // id → time before which a failed ack is not retried (warned once)
 
 function terminalOnScreen() {
-  return layoutMode !== "tabs" || activeTab === "terminal";
+  return layoutMode !== "tabs" || activeTab === "terminal" || activeTab === "chat"; // reading the conversation is looking at the agent
 }
 
 function ackTick() {
@@ -3097,6 +3111,7 @@ async function showMenu(menuId, anchorEl) {
       menuItem("Only Agents That Need Me", "toggle-needs-filter", { checked: deckFilter === "needs" }),
       menuItem("Fold Stale After", "", { submenu: staleSub }),
       menuItem("Show Stale Agents", "toggle-show-stale", { checked: deckShowStale }),
+      menuItem("Chat View First", "toggle-chat-first", { checked: chatFirst }),
       menuItem("Show Quota", "", { submenu: quotaSub }),
       menuItem("Theme", "", { submenu: themeSub }),
       menuItem("Editor", "", { submenu: editorSub }),
@@ -3178,6 +3193,14 @@ async function handleMenuAction(action, item) {
     deckShowStale = !deckShowStale;
     renderDeck();
     saveUIState();
+  } else if (action === "toggle-chat-first") {
+    chatFirst = !chatFirst;
+    // Agents remembered on the old default follow the new one; a tab chosen
+    // on purpose (an artifact, a shell) is kept.
+    const was = chatFirst ? "terminal" : "chat";
+    for (const k of Object.keys(perSessionTab)) if (perSessionTab[k] === was) delete perSessionTab[k];
+    if (layoutMode === "tabs" && activeTab === was) switchTab(chatFirst ? "chat" : "terminal");
+    else saveUIState();
   } else if (action === "set-quota-from") {
     const pct = Number(item.dataset.quotaFrom);
     quotaShowFrom = QUOTA_SHOW_FROM.includes(pct) ? pct : 30;

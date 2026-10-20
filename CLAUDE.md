@@ -43,6 +43,7 @@ server/
 client/
   index.html          # Single page app shell
   app.js              # All frontend logic (vanilla JS, no framework)
+  chat.js             # Chat view (tab "chat"): the conversation from claude's transcript, polled via /conversation
   style.css           # Dark theme styles
 examples/             # Demo artifact files (md, py, csv, sql, ipynb) + sample-agent.json
 scripts/
@@ -626,6 +627,35 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                            boot paints a card named by its id with a ⚠ badge whose tooltip names the quarantined
 #                            <id>.json.corrupt-<stamp>; the healthy sibling has no badge; on disk a valid placeholder with
 #                            recoveredFrom beside the untouched original)
+#   + test/e2e/m32-chat-view.js (chat view — client/chat.js over GET /api/sessions/:id/conversation (server/conversation.js,
+#                            test-conversation.js): "💬 Chat" in the file panel opens a Chat tab beside Primary: the prompt as a
+#                            bubble (Chinese verbatim), the reply's markdown rendered, a code block with a sticky header (language +
+#                            Copy), Thinking one collapsed line, tool cards one line (name + path relative to the cwd, ✓/✗ from the
+#                            result; Edit expands to a −/+ diff of old/new with the error text; "Expand tools" opens all), the
+#                            turn's duration; an appended exchange lands within the 1-s poll by PATCHING the DOM (elements already
+#                            on screen keep their identity — a marker survives — so a selection and the reader's place do) and the
+#                            view follows the tail only while the reader is at the bottom; scrolled up, a "↓ N new" pill counts
+#                            arrivals and a click jumps down (autoScrollPaused; programmatic scrolls flagged); a replaced shorter
+#                            transcript (generation moved) drops the picture; more than a page → "Load earlier (N more)" prepends
+#                            with the reader's place kept; View → Chat View First (chatFirst, persisted) lands every agent on its
+#                            chat with the terminal still the Primary tab, a shell agent's chat says it has no conversation; the
+#                            live "Working · Ns · <tool>" line shows only while the agent is working; reading the chat counts as
+#                            looking at the agent for the M21 dwell ack. Review-driven: the paging cursor advances only as far
+#                            as the pages applied (1200 records appended at once — more than CHAT_PAGES_PER_TICK pages — all
+#                            arrive; with `m.rev = data.rev` the client stalled 200 behind for good); a page fetched with a cursor
+#                            the conversation does not honour (adopted/resumed/cleared conversationId, or rev went backwards)
+#                            drops the picture and refetches the tail in the same tick (an adopted second session id paints the
+#                            new conversation, never a blank one); a server-side cache rebuild (HADRON_CONVERSATION_IDLE_MS=1500
+#                            in the test, prod 10 min; a fresh cache's generation is seeded from the clock, index.js
+#                            conversationFor) is a new generation → fresh last page + "Load earlier", nothing silently extended
+#                            past a hole; markdown goes through markdown.js mdRender = marked + mdSanitize (DOMParser walk:
+#                            script/iframe/object/style/form dropped, on* handlers and javascript:/data: URLs stripped, data:image/
+#                            on <img> kept) for the chat AND the .md artifact preview — a reply quoting <img onerror> / <script> /
+#                            [x](javascript:) renders inert; an open Thinking survives its message's rev moving (m.open keyed
+#                            `<id>:think:<i>`); scrolled up then Primary and back → at the bottom, following, no phantom pill; an
+#                            unchanged tick never scrolls; Collapse tools closes the hand-opened card too; chatExpandAll persists
+#                            in the ui state; chatModels is an LRU of 6 pictures; a path is offered as a link only under the
+#                            agent's cwd or the workspace)
 ```
 
 `npm run test:e2e` runs `test/e2e/run-all.js`, which executes every `m*.js`

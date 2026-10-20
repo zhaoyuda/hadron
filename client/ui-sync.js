@@ -58,6 +58,8 @@ function saveUIState() {
     // would otherwise live in localStorage forever and pre-open a later namesake.
     deckStaleOpen: [...deckStaleOpen].filter((k) => liveStaleKeys().has(k)),
     deckShowStale,
+    chatFirst,
+    chatExpandAll,
     quotaShowFrom,
     currentTheme,
     notifyLevel,
@@ -135,11 +137,13 @@ function restoreUIState() {
     // an old value is dropped, not read as a group key.
     if (Array.isArray(state.deckStaleOpen)) deckStaleOpen = new Set(state.deckStaleOpen.filter((k) => typeof k === "string" && k.length <= 200));
     if (typeof state.deckShowStale === "boolean") deckShowStale = state.deckShowStale;
+    if (typeof state.chatFirst === "boolean") chatFirst = state.chatFirst;
+    if (typeof state.chatExpandAll === "boolean") chatExpandAll = state.chatExpandAll;
     if (Array.isArray(QUOTA_SHOW_FROM) && QUOTA_SHOW_FROM.includes(state.quotaShowFrom)) quotaShowFrom = state.quotaShowFrom;
     if (state.currentTheme) currentTheme = state.currentTheme;
     if (state.notifyLevel) notifyLevel = state.notifyLevel;
     if (typeof state.sysNotify === "boolean") sysNotify = state.sysNotify;
-    activeTab = perSessionTab[activeSessionId] || "terminal";
+    activeTab = perSessionTab[activeSessionId] || (chatFirst ? "chat" : "terminal");
     layoutMode = perSessionLayout[activeSessionId] || "tabs";
   } catch {}
 }

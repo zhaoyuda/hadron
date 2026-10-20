@@ -184,7 +184,7 @@ const DIR = mkdtempSync(join(tmpdir(), "hadron-convtest-"));
   while (!c3.complete && guard++ < 50) readConversation(huge, c3, { chunkBytes: 1024, maxLine: 4096 });
   ok(c3.skipped === 1 && c3.complete === true && c3.items.some((i) => i.text === "b") && !c3.byMsgId.has("H"), `a record over maxLine is skipped and counted, the next record read (skipped ${c3.skipped}, items ${c3.items.map((i) => i.kind).join(",")})`);
   const ws = conversationWire(c3);
-  ok(ws.skipped === 1 && ws.orphanResults === 0 && ws.evicted === 0 && ws.generation === 0, "skipped / orphanResults / evicted / generation are counts on the wire");
+  ok(ws.skipped === 1 && ws.orphanResults === 0 && ws.evicted === 0 && Number.isInteger(ws.generation), "skipped / orphanResults / evicted / generation are counts on the wire");
   // A torn tail reads true with no progress — the server's budget loop must
   // stop on that (it spun on stat+read for the whole budget before).
   const torn = join(DIR, "torn.jsonl");
@@ -305,7 +305,7 @@ async function main() {
   ok(c.conversationId === conversationIdFor(SID) && c.items.length === 2 && c.items[1].blocks.length === 2 && c.items[1].blocks[1].text === "你好！" && c.complete === true, `seeded transcript → 2 items (${c.items.map((i) => i.kind).join(",")})`);
   ok((await get("/api/sessions/talker/conversation?limit=0")).status === 400 && (await get("/api/sessions/talker/conversation?limit=5000")).status === 400, "limit out of range → 400");
   ok((await get("/api/sessions/talker/conversation?limit=abc")).status === 400 && (await get("/api/sessions/talker/conversation?after=x")).status === 400 && (await get("/api/sessions/talker/conversation?before=-1")).status === 400, "garbage limit/after/before → 400, never a silent default");
-  ok(c.readable === true && c.generation === 0 && c.nextAfter === c.rev && c.skipped === 0 && c.orphanResults === 0, "readable:true, generation, nextAfter, counts on the wire");
+  ok(c.readable === true && Number.isInteger(c.generation) && c.generation > 1e12 && c.nextAfter === c.rev && c.skipped === 0 && c.orphanResults === 0, "readable:true, generation, nextAfter, counts on the wire");
   // A torn tail (claude mid-write): the request returns at once, not after the read budget.
   appendFileSync(TFILE, JSON.stringify(user("半", 9)).slice(0, 25));
   const t0 = Date.now();
