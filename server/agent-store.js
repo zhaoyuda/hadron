@@ -184,6 +184,8 @@ export function saveAgent(agent) {
   if (Array.isArray(agent.coreDismissed) && agent.coreDismissed.length) data.coreDismissed = agent.coreDismissed;
   // The agent's own handoff checkpoint (goal/next/blocked/outputs/at) — absent unless set.
   if (agent.checkpoint && typeof agent.checkpoint === "object" && !Array.isArray(agent.checkpoint)) data.checkpoint = agent.checkpoint;
+  // The composer draft (chat view) — absent unless set; cleared by an empty PATCH.
+  if (agent.draft && typeof agent.draft === "object" && !Array.isArray(agent.draft)) data.draft = agent.draft;
   if (sortOrder !== undefined && sortOrder !== null) data.sortOrder = sortOrder;
   if (archived) data.archived = true;
   if (archived && archivedAt) data.archivedAt = archivedAt;

@@ -440,6 +440,31 @@ npm test
 #                            max/5xx sorted by count, slow tmux calls per command with the timeout count, terminal
 #                            connect → first byte; garbage --since exits 1 with the grammar; malformed lines are counted
 #                            and skipped)
+#   + test-conversation.js  (chat view foundation — server/conversation.js: the whole conversation rebuilt
+#                            incrementally from claude's transcript (byte cursor, torn tail waits, replaced/shrunken
+#                            file restarts with the rev/ord counters kept and `generation` bumped so a stale
+#                            after= cursor still gets every new item and the client knows to drop its picture,
+#                            over-long record read whole up to MAX_LINE else skipped WHOLE and counted); items in file
+#                            order with `ord` (position) and `rev` (change counter): user / command (<command-name>
+#                            envelope → name+args) / output (<local-command-stdout>) / meta / assistant (blocks
+#                            thinking|text|tool_use grouped by message.id across records, tool_result paired onto its
+#                            block — rev bumped, ord kept) / summary (isCompactSummary) / compact (compact_boundary)
+#                            / turn (turn_duration) / system / queue (queue-operation); sidechain ignored, uuids
+#                            deduped, text/input/result clipped with `truncated`, MAX_ITEMS eviction flags the
+#                            conversation; GET /api/sessions/:id/conversation (token; tail page, ?before=ord pages
+#                            back, ?after=rev returns every item changed since in REV order with `nextAfter` as the
+#                            cursor for a truncated page — a result bumps an old item, so ord order is no prefix;
+#                            garbage params 400; the per-request read budget stops on a read that moved nothing (a
+#                            torn tail spun for the whole budget); `readable:false` = cached picture served stale,
+#                            distinct from complete:false "ask again"; skipped/orphanResults/evicted are counts on
+#                            the wire, warnOnce per agent and a yellow `hadron doctor` note "chat view is a floor";
+#                            a shell agent is {conversationId:null}; conversationId is a hash, no session id in any
+#                            body; BLOCKS_MAX blocks per assistant message; at most 8 conversations cached); the
+#                            composer draft GET/PATCH /api/sessions/:id/draft {text, attachments[{id,pos}], deviceId,
+#                            revision, conversationId} — revision must match (0 = none) else 409 with the stored
+#                            draft, empty clears, persisted on the record, short form (no text) on the token list;
+#                            `stale:true` (computed) when its conversationId is not the agent's current one; the
+#                            JSON body cap is 1 MB so a DRAFT_TEXT_MAX CJK draft fits)
 ```
 
 ### Reliability gate

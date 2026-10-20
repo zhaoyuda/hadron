@@ -28,6 +28,7 @@ import { gitChanges, gitDiffFile } from "./changes.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { readQuota } from "./quota.js";
 import { validateCheckpoint, safeCheckpoint, verifyHookClaim, applyHookClaim } from "./checkpoint.js";
+import { createConversation, readConversation, conversationWire, conversationIdFor, validateDraftPatch, safeDraft, draftEmpty, PAGE_MAX, MAX_LINE } from "./conversation.js";
 import {
   listAnnotations, createAnnotation, updateAnnotation, deleteAnnotation,
   sendAnnotations, resolveAnnotation, reopenAnnotations, retryDispatch,
@@ -105,7 +106,9 @@ app.use("/jupyter-proxy/:port", proxyGuard, (req, res) => {
 });
 
 // JSON body parsing
-app.use(express.json());
+// 1 MB: a composer draft of DRAFT_TEXT_MAX CJK characters is ~768 KB of JSON
+// (express's default 100 KB turned a long pasted draft into a 413).
+app.use(express.json({ limit: "1mb" }));
 
 // The workspace's display name, for the manifest and the installed app's title.
 // Only the name is read — never the whole config (groups, kernels…) into a
@@ -917,6 +920,16 @@ app.get("/api/doctor", async (req, res) => {
     // A placeholder written over an unreadable record (agent-store loadAgents):
     // the agent is back but its name/task/artifacts/notes are gone. Never a
     // silent green — at least yellow, with the quarantined file named.
+    // The chat view's picture of this agent is a floor when records were
+    // skipped or tool results found no owner (silent-failure rule).
+    const cc = conversationCaches.get(session.id);
+    if (cc && (cc.conv.skipped || (cc.conv.orphanResults && !cc.conv.evicted))) {
+      const parts = [];
+      if (cc.conv.skipped) parts.push(`${cc.conv.skipped} transcript record(s) over ${MAX_LINE >> 20} MB skipped`);
+      if (cc.conv.orphanResults && !cc.conv.evicted) parts.push(`${cc.conv.orphanResults} tool result(s) unpaired`);
+      finding.message += ` · chat view is a floor: ${parts.join(", ")}`;
+      if (finding.level !== "red") finding.level = "yellow";
+    }
     const recovered = safeRecoveredFrom(session.recoveredFrom, now);
     if (recovered) {
       const note = `record was unreadable at boot (${recovered.bytes === null ? "?" : recovered.bytes} bytes) — placeholder written, name/task/artifacts/notes lost; original kept as .hadron/agents/${recovered.file}`;
@@ -1050,6 +1063,108 @@ app.get("/api/sessions/:id/files", (req, res) => {
   if (!s.files) return res.json(null);
   res.json({ files: s.files.files.map((e) => ({ ...e, path: sessionFilePath(s, e.path) })), complete: s.files.complete });
 });
+
+// ═══ Conversation (chat view) ═══
+// The whole conversation rebuilt from claude's transcript (server/conversation.js),
+// read on demand — the cache per agent is built on the first request and
+// advanced by every later one (a long transcript catches up over a few
+// requests: `complete:false` says "ask again"). Token-gated like the transcript;
+// no session id on the wire (conversationId is a hash of it). Caches idle for
+// CONVERSATION_IDLE_MS are dropped; a changed session id or file starts fresh.
+const CONVERSATION_IDLE_MS = 10 * 60 * 1000;
+const CONVERSATION_READ_BUDGET_MS = 250;
+const CONVERSATION_CACHE_MAX = 8; // conversations held at once (each up to MAX_ITEMS items — one per agent clicked through, not per agent)
+const conversationCaches = new Map(); // agent id → { file, conv, usedAt }
+function conversationFor(s) {
+  const sid = s.runtime?.sessionId;
+  if (s.archived || !s.cwd || typeof sid !== "string" || !UUID_RE.test(sid)) { conversationCaches.delete(s.id); return null; }
+  const file = transcriptPath(s.cwd, sid);
+  let c = conversationCaches.get(s.id);
+  if (!c || c.file !== file) {
+    c = { file, conv: createConversation() };
+    conversationCaches.set(s.id, c);
+    if (conversationCaches.size > CONVERSATION_CACHE_MAX) { // least recently used goes
+      let lru = null;
+      for (const [id, e] of conversationCaches) if (id !== s.id && (!lru || e.usedAt < lru.usedAt)) lru = { id, usedAt: e.usedAt };
+      if (lru) conversationCaches.delete(lru.id);
+    }
+  }
+  c.usedAt = Date.now();
+  // Catch up in chunks within a time budget per request (a 185 MB transcript
+  // is ~45 chunks, ~2 s cold): the response is never held longer than this,
+  // `complete:false` tells the client to ask again.
+  // A read that moved nothing (a torn tail claude is still writing) ends the
+  // loop at once — re-entering would spin on stat+read for the whole budget.
+  let readable = true;
+  const deadline = Date.now() + CONVERSATION_READ_BUDGET_MS;
+  do {
+    const before = c.conv.offset, gen = c.conv.generation;
+    readable = readConversation(file, c.conv);
+    if (c.conv.offset === before && c.conv.generation === gen) break;
+  } while (readable && !c.conv.complete && Date.now() < deadline);
+  if (c.conv.skipped && c.conv.skipped !== c.warnedSkipped) { c.warnedSkipped = c.conv.skipped; warnOnce(`conversation-skipped:${s.id}:${c.conv.skipped}`, `[${s.id}] ${c.conv.skipped} transcript record(s) longer than ${MAX_LINE >> 20} MB skipped — the chat view is a floor (\`hadron doctor\` has the row)`); }
+  if (c.conv.orphanResults && !c.conv.evicted && c.conv.orphanResults !== c.warnedOrphans) { c.warnedOrphans = c.conv.orphanResults; warnOnce(`conversation-orphan:${s.id}:${c.conv.orphanResults}`, `[${s.id}] ${c.conv.orphanResults} tool result(s) found no tool_use in the transcript — those blocks show no result (\`hadron doctor\` has the row)`); }
+  if (!readable && !c.warnedUnreadable) { c.warnedUnreadable = true; warnOnce(`conversation-unreadable:${s.id}`, `[${s.id}] transcript unreadable while the chat view is open — the cached picture is served as stale`); }
+  else if (readable) c.warnedUnreadable = false;
+  return { conv: c.conv, conversationId: conversationIdFor(sid), readable };
+}
+const conversationSweep = setInterval(() => {
+  const cut = Date.now() - CONVERSATION_IDLE_MS;
+  for (const [id, c] of conversationCaches) if (c.usedAt < cut) conversationCaches.delete(id);
+}, 60_000);
+conversationSweep.unref();
+const intParam = (v) => (v === undefined ? undefined : typeof v === "string" && /^\d{1,12}$/.test(v) ? Number(v) : NaN);
+app.get("/api/sessions/:id/conversation", (req, res) => {
+  if (!tokenPresent(req)) return res.status(401).json({ error: "invalid or missing token" });
+  const s = sessions.get(req.params.id);
+  if (!s || s.archived) return res.status(404).json({ error: "agent not found" });
+  const after = intParam(req.query.after), before = intParam(req.query.before), limit = intParam(req.query.limit);
+  if (Number.isNaN(after) || Number.isNaN(before)) return res.status(400).json({ error: "after/before must be non-negative integers" });
+  if (limit !== undefined && !(limit >= 1 && limit <= PAGE_MAX)) return res.status(400).json({ error: `limit must be 1-${PAGE_MAX}` });
+  const r = conversationFor(s);
+  if (!r) return res.json({ conversationId: null, reason: "no session", items: [] });
+  if (!r.readable && r.conv.items.length === 0) return res.json({ conversationId: r.conversationId, reason: "transcript unreadable", items: [] });
+  // `readable:false` = the transcript could not be read on this request and
+  // the page is the cached picture (stale) — distinct from complete:false
+  // ("ask again"), which would otherwise poll forever.
+  res.json({ ...conversationWire(r.conv, { conversationId: r.conversationId, after, before, limit }), readable: r.readable });
+});
+
+// The composer's draft, one per agent, shared across devices: GET returns it
+// (null when none); PATCH {text, attachments, deviceId, revision, conversationId}
+// stores it as revision+1 when `revision` is the one on the server (0 = none),
+// else 409 with the stored draft so the client can show both. An empty draft
+// (no text, no attachments) clears it — the next PATCH expects revision 0.
+app.get("/api/sessions/:id/draft", (req, res) => {
+  if (!tokenPresent(req)) return res.status(401).json({ error: "invalid or missing token" });
+  const s = sessions.get(req.params.id);
+  if (!s || s.archived) return res.status(404).json({ error: "agent not found" });
+  res.json({ draft: draftOut(s) });
+});
+// A draft written for a conversation the agent no longer runs (/clear, resume
+// of another session) is served with `stale:true` — the composer offers it
+// instead of silently extending it under the new conversation.
+function draftOut(s) {
+  const d = safeDraft(s.draft);
+  if (!d) return null;
+  const sid = s.runtime?.sessionId;
+  const cur = typeof sid === "string" && UUID_RE.test(sid) ? conversationIdFor(sid) : null;
+  return d.conversationId && cur && d.conversationId !== cur ? { ...d, stale: true } : d;
+}
+app.patch("/api/sessions/:id/draft", async (req, res) => {
+  if (!tokenPresent(req)) return res.status(401).json({ error: "invalid or missing token" });
+  const s = sessions.get(req.params.id);
+  if (!s || s.archived) return res.status(404).json({ error: "agent not found" });
+  const v = validateDraftPatch(req.body);
+  if (v.error) return res.status(400).json({ error: v.error });
+  const current = safeDraft(s.draft);
+  const currentRev = current ? current.revision : 0;
+  if (v.draft.revision !== currentRev) return res.status(409).json({ error: "draft changed on another device", draft: current });
+  if (draftEmpty(v.draft)) delete s.draft;
+  else s.draft = { ...v.draft, revision: currentRev + 1, updatedAt: new Date().toISOString() };
+  try { await saveAgentLocked(s); } catch (e) { return res.status(500).json({ error: `could not save: ${e.message}` }); }
+  res.json({ draft: draftOut(s) });
+});
 // The Changes view: git's picture of the agent's cwd (server/changes.js), with
 // `touched` = this session's transcript wrote the file. Token-gated like the
 // transcript (paths are the agent's business). Cached per agent for a few
@@ -1164,7 +1279,8 @@ function safeRecoveredFrom(rf, now = Date.now()) {
   return { file: String(rf.file || "").replace(/[^\w.@-]/g, "").slice(0, 200), at: safeTimestamp(rf.at, now), bytes: Number.isInteger(rf.bytes) && rf.bytes >= 0 ? rf.bytes : null };
 }
 function resolvedSession(s, { authenticated = false } = {}) {
-  const { transcript, contextPct, files, coreDismissed, checkpoint, recoveredFrom, ...rest } = s;
+  const { transcript, contextPct, files, coreDismissed, checkpoint, recoveredFrom, draft, ...rest } = s;
+  const dr = authenticated ? draftOut(s) : null;
   if (recoveredFrom) rest.recoveredFrom = safeRecoveredFrom(recoveredFrom);
   const context = contextWire(s);
   const cp = safeCheckpoint(checkpoint);
@@ -1186,6 +1302,10 @@ function resolvedSession(s, { authenticated = false } = {}) {
     // transcript named — same class as `files`, token-bearing readers only.
     ...(authenticated && Array.isArray(coreDismissed) && coreDismissed.length ? { coreDismissed } : {}),
     ...(authenticated && transcript ? { transcript: transcriptWire(transcript) } : {}),
+    // The composer draft rides the list in its short form (which revision, from
+    // which device, when) so another device learns of it without polling
+    // /draft; the text itself is GET /api/sessions/:id/draft.
+    ...(dr ? { draft: { revision: dr.revision, deviceId: dr.deviceId, updatedAt: dr.updatedAt, conversationId: dr.conversationId, chars: dr.text.length, attachments: dr.attachments.length, ...(dr.stale ? { stale: true } : {}) } } : {}),
     // `files` (what the session edited — file paths, not conversation, but
     // still the agent's private business): token-bearing readers only. A path
     // is whatever claude was given; an agent that Reads a transcript under
