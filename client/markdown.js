@@ -742,7 +742,7 @@ function showSaveConflictDialog({ filePath, container, draftContent, diskContent
 // through untouched. The dispatched "input" event is what keeps the host textarea's
 // own contract intact — it fires the editor's dirty-flag listener and the notes
 // textareas' inline oninput autosave exactly as typing would.
-const IMAGE_PASTE_TARGETS = ".text-edit-area, #notes-textarea, #rp-notes-textarea, .split-pane-notes";
+const IMAGE_PASTE_TARGETS = ".text-edit-area, #notes-textarea, #rp-notes-textarea, .split-pane-notes, .chat-input";
 
 function imagePasteInsert(ta, text, start, end) {
   ta.setRangeText(text, start, end, "end");
@@ -760,7 +760,10 @@ function handleImagePaste(e) {
   if (!file || !activeSessionId) return; // non-image paste (or no agent) falls through untouched
   e.preventDefault();
 
-  const placeholder = "![uploading…]()";
+  // The chat composer gets the bare path (claude reads the file from its
+  // prompt); the markdown surfaces get an image tag.
+  const bare = ta.matches(".chat-input");
+  const placeholder = bare ? "[uploading image…]" : "![uploading…]()";
   imagePasteInsert(ta, placeholder, ta.selectionStart, ta.selectionEnd);
 
   const swap = (replacement) => {
@@ -775,7 +778,7 @@ function handleImagePaste(e) {
     body: file,
   })
     .then((r) => r.ok ? r.json() : Promise.reject(new Error(`upload failed (${r.status})`)))
-    .then((j) => swap(`![screenshot](${j.path})`))
+    .then((j) => swap(bare ? `${j.path} ` : `![screenshot](${j.path})`))
     .catch(() => swap(""));
 }
 

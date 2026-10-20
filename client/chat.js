@@ -55,7 +55,11 @@ function chatFreshModel(sessionId) {
     rebuild: null, // during a same-conversation cache rebuild: { anchor, lastOrd } to restore once the tail is back
   };
 }
-function stopChatPoll(el) { const t = chatPolls.get(el); if (t) { clearInterval(t); chatPolls.delete(el); } }
+const chatTeardown = new WeakMap(); // container → fn run when the view is left (flushes the draft)
+function stopChatPoll(el) {
+  const t = chatPolls.get(el); if (t) { clearInterval(t); chatPolls.delete(el); }
+  const td = chatTeardown.get(el); if (td) { chatTeardown.delete(el); try { td(); } catch {} }
+}
 // Is the conversation's latest content on screen for this agent? app.js's dwell
 // ack counts the chat tab as "looking at the agent" only when this holds: a
 // reader scrolled up, a picture the server stopped answering for, or a pane
@@ -78,6 +82,9 @@ function renderChatView(el, s) {
     <div class="chat-banner" hidden></div>
     <div class="chat-scroll"><div class="chat-earlier" hidden></div><div class="chat-list"></div><div class="chat-live" hidden></div></div>
     <div class="chat-jump" hidden>↓</div>
+    <div class="chat-notice" hidden></div>
+    <div class="chat-outbox" hidden></div>
+    <div class="chat-composer"><textarea class="chat-input" rows="1" placeholder="Message claude — Enter to send, Shift+Enter for a new line"></textarea><button class="chat-send" title="Send (Enter)">↑</button><div class="chat-draft-st"></div></div>
   </div>`;
   const scroll = el.querySelector(".chat-scroll"), list = el.querySelector(".chat-list"), jump = el.querySelector(".chat-jump"), live = el.querySelector(".chat-live");
   // A programmatic scroll is consumed by the first scroll event that finds the
@@ -227,7 +234,7 @@ function renderChatView(el, s) {
       // blank by then): the pending rebuild carries over, never a new one.
       const rebuild = same ? { anchor: m.paused ? m.anchor : null, unseen: m.unseen, lastOrd: chatLastItem(m)?.ord ?? null } : (m.conversationId === null ? m.rebuild : null);
       const fresh = chatFreshModel(sessionId);
-      Object.assign(m, fresh, { open: m.open, rebuild });
+      Object.assign(m, fresh, { open: m.open, rebuild, outbox: m.outbox, outboxGone: m.outboxGone });
       list.innerHTML = "";
       if (fromCursor) return false;
     }
@@ -300,7 +307,10 @@ function renderChatView(el, s) {
     if (m.rebuild && !m.offline && after === null) { try { await finishRebuild(); } catch {} }
     if (!el.isConnected) return;
     drawHeader(); drawLive(); drawEmpty();
+    try { await composer.tick(); } catch {}
   };
+  const composer = chatComposer(el, m, sessionId, { list });
+  chatTeardown.set(el, () => { composer.flush(); if (chatActiveComposer === composer) chatActiveComposer = null; });
   // Draw what the model already holds (back from another tab) before the first
   // poll — at the reader's place when they had scrolled up, with the pill.
   if (m.items.size) {
@@ -310,6 +320,7 @@ function renderChatView(el, s) {
   }
   refresh();
   chatPolls.set(el, setInterval(refresh, CHAT_POLL_MS));
+  composer.focus();
 }
 
 function chatFirstOrd(m) { let f = null; for (const it of m.items.values()) if (f === null || it.ord < f) f = it.ord; return f; }
@@ -546,3 +557,297 @@ function chatDecorateCode(root) {
     wrap.appendChild(pre);
   });
 }
+
+// ── The composer: drafts, sending, the outbox ─────────────────────────────
+// Drafts live in two places: localStorage (every keystroke, this device) and
+// the agent record (PATCH /draft, debounced, every device). The server keeps a
+// revision; a PATCH names the revision it last saw and is refused 409 when
+// another device moved on — both versions are then offered, never merged.
+// Sending hands the text to the outbox: POST /message with a request id (a
+// retry can never paste twice), `when: auto` (queued on the record while the
+// pane is working or blocked, delivered by the server once it is at its
+// prompt). Rows under the composer follow the entry's state until claude
+// records the turn (the user bubble appears) — or say honestly that it has
+// not. An uncertain send (no answer from the server) is never resent on its own.
+const CHAT_DRAFT_DEBOUNCE_MS = 500, CHAT_DRAFT_MAX_WAIT_MS = 3000, CHAT_DRAFT_RETRY_MS = 5000;
+const CHAT_HANDED_WARN_MS = 20000; // handed, no user turn seen for this long → "check Primary"
+const CHAT_OUTBOX_GONE_MS = 10000; // a row removed here is ignored on the (3-s old) sessions list for this long
+let chatActiveComposer = null;
+function chatDeviceId() {
+  try {
+    let d = localStorage.getItem("hadron-device-id");
+    if (!d || !/^[A-Za-z0-9._:-]{1,128}$/.test(d)) { d = `d-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`; localStorage.setItem("hadron-device-id", d); }
+    return d;
+  } catch { return "d-mem"; }
+}
+function chatLocalDraft(sessionId) {
+  try { const v = JSON.parse(localStorage.getItem(`hadron-draft-${sessionId}`) || "null"); return v && typeof v.text === "string" && Number.isInteger(v.revision) ? v : null; } catch { return null; }
+}
+function chatSaveLocalDraft(sessionId, d) {
+  try { if (d) localStorage.setItem(`hadron-draft-${sessionId}`, JSON.stringify(d)); else localStorage.removeItem(`hadron-draft-${sessionId}`); } catch {}
+}
+const chatRequestId = () => `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+// Has claude recorded this handed message as a user turn? Same text (a clipped
+// bubble matches its prefix), recorded no earlier than the send.
+function chatObserved(m, row) {
+  const t0 = Date.parse(row.at || "") - 5000;
+  for (const it of m.items.values()) {
+    if (it.kind !== "user" || typeof it.text !== "string") continue;
+    if (Number.isFinite(t0) && it.at && Date.parse(it.at) < t0) continue;
+    if (it.text === row.text || (it.truncated && row.text.startsWith(it.text)) || (row.truncated && it.text.startsWith(row.text))) return true;
+  }
+  return false;
+}
+
+function chatComposer(el, m, sessionId, { list }) {
+  const root = el.querySelector(".chat"), ta = el.querySelector(".chat-input"), sendBtn = el.querySelector(".chat-send");
+  const status = el.querySelector(".chat-draft-st"), notice = el.querySelector(".chat-notice"), obEl = el.querySelector(".chat-outbox");
+  const deviceId = chatDeviceId();
+  const api = (path) => `/api/sessions/${encodeURIComponent(sessionId)}${path}`;
+  const sess = () => (typeof sessions !== "undefined" ? sessions : []).find((x) => x.id === sessionId);
+
+  // ── draft ──
+  let local = chatLocalDraft(sessionId); // { text, revision, conversationId, synced, at }
+  let touched = false, timer = null, firstEdit = 0, inflight = false, offline = false, lastTry = 0, conflict = null;
+  const autosize = () => {
+    ta.style.height = "auto";
+    const max = Math.max(80, Math.floor((root.clientHeight || 600) * 0.4));
+    ta.style.height = `${Math.min(ta.scrollHeight, max)}px`;
+    ta.style.overflowY = ta.scrollHeight > max ? "auto" : "hidden";
+  };
+  const drawStatus = () => {
+    let t = "";
+    if (conflict) t = "";
+    else if (local && (local.text || !local.synced)) t = inflight ? "Saving draft…" : local.synced ? "Draft synced" : offline ? "Offline — draft saved locally" : "Draft saved locally";
+    status.textContent = t;
+    status.className = `chat-draft-st${offline && local && !local.synced ? " chat-draft-off" : ""}`;
+  };
+  const drawNotice = () => {
+    notice.innerHTML = ""; notice.hidden = !conflict;
+    if (!conflict) return;
+    const c = conflict;
+    const span = document.createElement("span"); span.className = "chat-notice-txt";
+    if (c.kind === "stale") span.textContent = `Draft from an earlier conversation: “${c.draft.text.slice(0, 80)}${c.draft.text.length > 80 ? "…" : ""}”`;
+    else span.textContent = `Draft changed on another device: “${(c.draft?.text || "").slice(0, 80)}${(c.draft?.text || "").length > 80 ? "…" : ""}”`;
+    notice.appendChild(span);
+    const btn = (label, title, fn) => { const b = document.createElement("span"); b.className = "chat-notice-btn"; b.textContent = label; b.title = title; b.addEventListener("click", fn); notice.appendChild(b); };
+    if (c.kind === "stale") {
+      btn("Restore", "Put that draft in the composer, for this conversation", () => { conflict = null; ta.value = c.draft.text; touched = true; local = { text: c.draft.text, revision: c.draft.revision, conversationId: m.conversationId || null, synced: false, at: Date.now() }; chatSaveLocalDraft(sessionId, local); autosize(); drawNotice(); sync(); });
+      btn("Discard", "Forget that draft", () => { conflict = null; local = { text: "", revision: c.draft.revision, conversationId: null, synced: false, at: Date.now() }; drawNotice(); sync(); });
+    } else {
+      btn("Use this device", "Keep what is in the composer here; the other device's draft is replaced", () => { conflict = null; local = { ...(local || { text: ta.value, conversationId: m.conversationId || null }), revision: c.draft ? c.draft.revision : 0, synced: false, at: Date.now() }; chatSaveLocalDraft(sessionId, local); drawNotice(); sync(); });
+      btn("Use other device", "Replace the composer with the other device's draft", () => { conflict = null; const d = c.draft; ta.value = d ? d.text : ""; local = d ? { text: d.text, revision: d.revision, conversationId: d.conversationId || null, synced: true, at: Date.now() } : null; chatSaveLocalDraft(sessionId, local); autosize(); drawNotice(); drawStatus(); });
+    }
+  };
+  const schedule = () => {
+    if (!firstEdit) firstEdit = Date.now();
+    clearTimeout(timer);
+    const wait = Math.max(0, Math.min(CHAT_DRAFT_DEBOUNCE_MS, firstEdit + CHAT_DRAFT_MAX_WAIT_MS - Date.now()));
+    timer = setTimeout(() => { timer = null; sync(); }, wait);
+  };
+  const sync = async () => {
+    clearTimeout(timer); timer = null; firstEdit = 0;
+    if (inflight || conflict || !local || local.synced) return;
+    inflight = true; lastTry = Date.now(); drawStatus();
+    const snap = { ...local };
+    let r = null, j = null;
+    try {
+      r = await fetch(api("/draft"), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: snap.text, attachments: [], deviceId, revision: snap.revision, conversationId: snap.conversationId || m.conversationId || null }) });
+      j = await r.json().catch(() => ({}));
+    } catch { r = null; }
+    inflight = false;
+    if (!el.isConnected) return;
+    if (!r) { offline = true; drawStatus(); return; }
+    offline = false;
+    if (r.ok) {
+      const rev = j.draft ? j.draft.revision : 0;
+      if (local && local.text === snap.text) local = rev ? { ...local, revision: rev, synced: true } : null;
+      else if (local) { local.revision = rev; schedule(); }
+      chatSaveLocalDraft(sessionId, local);
+    } else if (r.status === 409) {
+      const d = j.draft || null;
+      if (!d) { if (local) { local.revision = 0; schedule(); } } // cleared on another device (sent, probably): our newer typing stands
+      else if (local && d.text === snap.text) { local = { ...local, revision: d.revision, synced: local.text === snap.text }; if (!local.synced) schedule(); chatSaveLocalDraft(sessionId, local); }
+      else { conflict = { kind: "conflict", draft: d }; drawNotice(); }
+    } else if (r.status === 401) { offline = true; }
+    drawStatus();
+  };
+  const onInput = () => {
+    touched = true;
+    local = { text: ta.value, revision: local ? local.revision : 0, conversationId: m.conversationId || null, synced: false, at: Date.now() };
+    if (!local.text && !local.revision) local = null;
+    chatSaveLocalDraft(sessionId, local);
+    autosize(); drawStatus();
+    if (local) schedule();
+  };
+  ta.addEventListener("input", onInput);
+  // What the server has, once, when the composer opens: a newer draft from
+  // another device fills an untouched composer; one for an earlier
+  // conversation is offered, not pasted in; unsynced local typing is sent.
+  const load = async () => {
+    let d;
+    try { const r = await fetch(api("/draft")); if (!r.ok) { if (r.status !== 401) offline = true; drawStatus(); return; } d = (await r.json()).draft; } catch { offline = true; drawStatus(); return; }
+    if (!el.isConnected) return;
+    offline = false;
+    if (!d) {
+      if (local && !local.synced && local.text) sync();
+      else if (local && local.synced) { local = null; chatSaveLocalDraft(sessionId, null); if (!touched) { ta.value = ""; autosize(); } }
+    } else if (d.stale) {
+      if (!ta.value.trim() && !conflict) { conflict = { kind: "stale", draft: d }; drawNotice(); }
+    } else if (!local || d.revision > local.revision) {
+      if (!local || (local.synced && !touched) || !ta.value) {
+        ta.value = d.text; local = { text: d.text, revision: d.revision, conversationId: d.conversationId || null, synced: true, at: Date.now() };
+        chatSaveLocalDraft(sessionId, local); autosize();
+      } else if (local.text === d.text) { local = { ...local, revision: d.revision, synced: true }; chatSaveLocalDraft(sessionId, local); }
+      else { conflict = { kind: "conflict", draft: d }; drawNotice(); }
+    } else if (!local.synced) sync();
+    drawStatus();
+  };
+  if (local && local.text) ta.value = local.text;
+  autosize(); drawStatus();
+  load();
+
+  // ── outbox ──
+  if (!m.outbox) m.outbox = new Map();
+  if (!m.outboxGone) m.outboxGone = new Map();
+  let obSig = "";
+  const label = (row) => {
+    switch (row.state) {
+      case "pending": case "sending": return "Sending…";
+      case "queued": return row.stale ? "Written for an earlier conversation — held" : "Send after this turn";
+      case "handed":
+        if (m.readable === false || !m.conversationId) return "Handed to the terminal"; // no transcript to see it recorded in
+        return Date.now() - Date.parse(row.handedAt || row.at || 0) > CHAT_HANDED_WARN_MS ? "Handed to the terminal, not seen by claude yet — check Primary" : "Sent · waiting for claude…";
+      case "failed": return `Not delivered — ${row.error || "refused"}`;
+      case "uncertain": return `Not sure this was sent — ${row.error || "the server did not answer"}`;
+      default: return row.state;
+    }
+  };
+  const drawOutbox = () => {
+    const rows = [...m.outbox.values()].sort((a, b) => Date.parse(a.at || 0) - Date.parse(b.at || 0));
+    const sig = rows.map((r) => `${r.id}:${r.state}:${r.text.length}:${label(r)}`).join("|");
+    if (sig === obSig) return;
+    obSig = sig;
+    obEl.innerHTML = "";
+    obEl.hidden = !rows.length;
+    for (const row of rows) {
+      const div = document.createElement("div");
+      div.className = `ob-row ob-${row.state}${row.stale ? " ob-stale" : ""}`; div.dataset.oid = row.id;
+      const text = document.createElement("div"); text.className = "ob-text"; text.textContent = row.text; text.title = row.text.length > 200 ? row.text.slice(0, 2000) : "";
+      const meta = document.createElement("div"); meta.className = "ob-meta";
+      const st = document.createElement("span"); st.className = "ob-st"; st.textContent = label(row);
+      meta.appendChild(st);
+      const act = (name, lbl, title) => { const b = document.createElement("span"); b.className = "ob-act"; b.dataset.act = name; b.textContent = lbl; b.title = title; b.addEventListener("click", () => action(name, row)); meta.appendChild(b); };
+      if (row.state === "queued") { act("edit", "Edit", row.stale ? "Take it back into the composer, for this conversation" : "Take it back into the composer"); act("cancel", "×", "Cancel — not sent"); }
+      if (row.state === "failed") { act("retry", "Retry", "Send it again"); act("discard", "Discard", "Forget it"); }
+      if (row.state === "uncertain") { act("retry", "Send again", "Send it again — if the first one did land, claude gets it twice"); act("discard", "Discard", "Forget it"); }
+      div.appendChild(text); div.appendChild(meta);
+      obEl.appendChild(div);
+    }
+  };
+  // The record may hold the entry even when this tab never heard so (a POST
+  // without an answer): the DELETE is always tried; 409 = being delivered now.
+  const remove = (row, del) => {
+    m.outbox.delete(row.id); m.outboxGone.set(row.id, Date.now());
+    if (del) fetch(api(`/outbox/${encodeURIComponent(row.id)}`), { method: "DELETE" }).catch(() => {});
+    drawOutbox();
+  };
+  const lookup = async (row) => {
+    try { const g = await fetch(api("/outbox")); if (g.ok) return ((await g.json()).outbox || []).find((e) => e.id === row.id) || null; } catch {}
+    return null;
+  };
+  const post = async (row) => {
+    row.state = "pending"; delete row.error; drawOutbox();
+    let r = null, j = {};
+    try {
+      r = await fetch(api("/message"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: row.text, requestId: row.id, when: "auto", deviceId }) });
+      j = await r.json().catch(() => ({}));
+    } catch { r = null; }
+    if (!m.outbox.has(row.id)) return; // removed meanwhile
+    if (r && j.entry) { Object.assign(row, { state: j.entry.state, error: j.entry.error, handedAt: j.entry.handedAt, at: j.entry.at || row.at, stale: j.entry.stale, server: true }); }
+    else {
+      // No entry in the answer (or no answer): the POST may still have landed.
+      // Ask the record before claiming anything.
+      const found = await lookup(row);
+      if (found) Object.assign(row, { state: found.state, error: found.error, handedAt: found.handedAt, at: found.at, stale: found.stale, server: true });
+      else if (r) { row.state = "failed"; row.error = j.error || `HTTP ${r.status}`; row.server = false; }
+      else { row.state = "uncertain"; row.error = "the server could not be reached"; row.server = false; }
+    }
+    drawOutbox();
+  };
+  const action = async (name, row) => {
+    if (name === "cancel" || name === "edit") {
+      let r = null;
+      try { r = await fetch(api(`/outbox/${encodeURIComponent(row.id)}`), { method: "DELETE" }); } catch {}
+      if (r && r.status === 409) { row.state = "sending"; drawOutbox(); return; } // being delivered right now
+      if (r && !r.ok && r.status !== 404) return;
+      m.outbox.delete(row.id); m.outboxGone.set(row.id, Date.now()); drawOutbox();
+      if (name === "edit") { ta.value = ta.value.trim() ? `${row.text}\n${ta.value}` : row.text; onInput(); ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+    } else if (name === "retry") {
+      let r = null;
+      try { r = await fetch(api(`/outbox/${encodeURIComponent(row.id)}`), { method: "DELETE" }); } catch {}
+      if (r && r.status === 409) { row.state = "sending"; drawOutbox(); return; } // the first one IS going out
+      m.outbox.delete(row.id); m.outboxGone.set(row.id, Date.now());
+      const fresh = { id: chatRequestId(), text: row.text, state: "pending", at: new Date().toISOString(), server: false };
+      m.outbox.set(fresh.id, fresh); post(fresh);
+    } else if (name === "discard") remove(row, true);
+  };
+  const send = () => {
+    const text = ta.value.replace(/\s+$/, "");
+    if (!text) return;
+    if (text.includes("[uploading image…]")) { status.textContent = "Wait for the image to upload…"; return; }
+    // The draft is cleared on this device at once and on the record right after;
+    // the message is a separate thing from here on.
+    ta.value = ""; touched = true; autosize();
+    const rev = local ? local.revision : 0;
+    local = rev ? { text: "", revision: rev, conversationId: null, synced: false, at: Date.now() } : null;
+    chatSaveLocalDraft(sessionId, local); drawStatus();
+    if (rev) sync();
+    const row = { id: chatRequestId(), text, state: "pending", at: new Date().toISOString(), server: false };
+    m.outbox.set(row.id, row);
+    post(row);
+    ta.focus();
+  };
+  ta.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    if (e.isComposing || e.keyCode === 229) return; // the IME is composing: Enter commits the candidate, never sends
+    if (e.shiftKey) return; // newline
+    e.preventDefault();
+    send();
+  });
+  sendBtn.addEventListener("click", send);
+  // Each tick: the record's picture (fresh while anything is in flight, else
+  // the sessions list for entries made elsewhere), handed rows that claude has
+  // recorded since are done, a draft that could not sync is tried again.
+  const tick = async () => {
+    const wire = sess()?.outbox;
+    let fresh = null;
+    if (m.outbox.size) { try { const g = await fetch(api("/outbox")); if (g.ok) fresh = (await g.json()).outbox || []; } catch {} }
+    if (!el.isConnected) return;
+    const src = fresh || (Array.isArray(wire) ? wire : null);
+    if (src) {
+      const now = Date.now();
+      for (const [id, t] of m.outboxGone) if (now - t > CHAT_OUTBOX_GONE_MS) m.outboxGone.delete(id);
+      const seen = new Set();
+      for (const e of src) {
+        seen.add(e.id);
+        if (m.outboxGone.has(e.id)) continue;
+        const row = m.outbox.get(e.id);
+        if (row) { if (row.state !== "pending") Object.assign(row, { state: e.state, error: e.error, handedAt: e.handedAt, at: e.at, stale: e.stale, server: true }, fresh ? { text: e.text, truncated: false } : {}); }
+        else m.outbox.set(e.id, { id: e.id, text: e.text, truncated: !fresh && Boolean(e.truncated), state: e.state, at: e.at, error: e.error, handedAt: e.handedAt, stale: e.stale, server: true });
+      }
+      if (fresh) for (const row of m.outbox.values()) if (row.server && row.state !== "pending" && !seen.has(row.id)) m.outbox.delete(row.id);
+    }
+    for (const row of m.outbox.values()) if (row.state === "handed" && chatObserved(m, row)) remove(row, true);
+    drawOutbox();
+    if (local && !local.synced && !inflight && !timer && !conflict && Date.now() - lastTry > CHAT_DRAFT_RETRY_MS) sync();
+  };
+  const flush = () => { clearTimeout(timer); timer = null; if (local && !local.synced) sync(); };
+  const focus = () => { try { if (!matchMedia("(pointer: coarse)").matches) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } } catch {} };
+  drawOutbox();
+  const c = { tick, flush, focus };
+  chatActiveComposer = c;
+  return c;
+}
+document.addEventListener("visibilitychange", () => { if (document.hidden && chatActiveComposer) chatActiveComposer.flush(); });
+window.addEventListener("pagehide", () => { if (chatActiveComposer) chatActiveComposer.flush(); });

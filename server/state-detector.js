@@ -998,6 +998,7 @@ export class StateDetector {
   }
 
   _applySnap(cmd, snap, contentChanged) {
+    this.verdictSeen = true; // the detector has looked at this pane since boot (the outbox dispatcher waits for it)
     // Build a machine view over this detector's counters, run the pure reducer,
     // then write counters back and apply the decision through _setState (the
     // single mutation point, which keeps its own min-duration / override guards).

@@ -29,6 +29,7 @@ import { startHeartbeat } from "./heartbeat.js";
 import { readQuota } from "./quota.js";
 import { validateCheckpoint, safeCheckpoint, verifyHookClaim, applyHookClaim } from "./checkpoint.js";
 import { createConversation, readConversation, conversationWire, conversationIdFor, validateDraftPatch, safeDraft, draftEmpty, PAGE_MAX, MAX_LINE } from "./conversation.js";
+import { validateEntry as validateOutboxEntry, safeOutbox, pruneOutbox, makeRoom as outboxMakeRoom, withPaneLock, outboxWire, atPrompt, dispatchable as outboxDispatchable, entryStale as outboxEntryStale, OUTBOX_MAX } from "./outbox.js";
 import {
   listAnnotations, createAnnotation, updateAnnotation, deleteAnnotation,
   sendAnnotations, resolveAnnotation, reopenAnnotations, retryDispatch,
@@ -1150,12 +1151,21 @@ app.get("/api/sessions/:id/draft", (req, res) => {
 // A draft written for a conversation the agent no longer runs (/clear, resume
 // of another session) is served with `stale:true` — the composer offers it
 // instead of silently extending it under the new conversation.
+function currentConversationId(s) {
+  const sid = s.runtime?.sessionId;
+  return typeof sid === "string" && UUID_RE.test(sid) ? conversationIdFor(sid) : null;
+}
 function draftOut(s) {
   const d = safeDraft(s.draft);
   if (!d) return null;
-  const sid = s.runtime?.sessionId;
-  const cur = typeof sid === "string" && UUID_RE.test(sid) ? conversationIdFor(sid) : null;
+  const cur = currentConversationId(s);
   return d.conversationId && cur && d.conversationId !== cur ? { ...d, stale: true } : d;
+}
+// The outbox as the client sees it: a queued entry written for another
+// conversation is `stale` (held, offered back), see outbox.js.
+function outboxOut(s) {
+  const cur = currentConversationId(s);
+  return safeOutbox(s.outbox).map((e) => (e.state === "queued" && outboxEntryStale(e, cur) ? { ...e, stale: true } : e));
 }
 app.patch("/api/sessions/:id/draft", async (req, res) => {
   if (!tokenPresent(req)) return res.status(401).json({ error: "invalid or missing token" });
@@ -1285,7 +1295,7 @@ function safeRecoveredFrom(rf, now = Date.now()) {
   return { file: String(rf.file || "").replace(/[^\w.@-]/g, "").slice(0, 200), at: safeTimestamp(rf.at, now), bytes: Number.isInteger(rf.bytes) && rf.bytes >= 0 ? rf.bytes : null };
 }
 function resolvedSession(s, { authenticated = false } = {}) {
-  const { transcript, contextPct, files, coreDismissed, checkpoint, recoveredFrom, draft, ...rest } = s;
+  const { transcript, contextPct, files, coreDismissed, checkpoint, recoveredFrom, draft, outbox, ...rest } = s;
   const dr = authenticated ? draftOut(s) : null;
   if (recoveredFrom) rest.recoveredFrom = safeRecoveredFrom(recoveredFrom);
   const context = contextWire(s);
@@ -1311,6 +1321,9 @@ function resolvedSession(s, { authenticated = false } = {}) {
     // The composer draft rides the list in its short form (which revision, from
     // which device, when) so another device learns of it without polling
     // /draft; the text itself is GET /api/sessions/:id/draft.
+    // The outbox (queued / sent / failed messages from the composer) rides the
+    // list with its text clipped; GET /api/sessions/:id/outbox has it whole.
+    ...(authenticated && Array.isArray(s.outbox) && s.outbox.length ? { outbox: outboxWire(outboxOut(s)) } : {}),
     ...(dr ? { draft: { revision: dr.revision, deviceId: dr.deviceId, updatedAt: dr.updatedAt, conversationId: dr.conversationId, chars: dr.text.length, attachments: dr.attachments.length, ...(dr.stale ? { stale: true } : {}) } } : {}),
     // `files` (what the session edited — file paths, not conversation, but
     // still the agent's private business): token-bearing readers only. A path
@@ -1795,8 +1808,10 @@ app.post("/api/sessions/:id/send-keys", async (req, res) => {
   if (typeof keys !== "string") return res.status(400).json({ error: "keys (string) required" });
   const tmuxName = tmuxSessionName(id);
   try {
-    await tmuxAsync(["send-keys", "-t", tmuxName, "-l", "--", keys]);
-    if (enter) await tmuxAsync(["send-keys", "-t", tmuxName, "Enter"]);
+    await withPaneLock(id, async () => { // never between an outbox paste and its Enter
+      await tmuxAsync(["send-keys", "-t", tmuxName, "-l", "--", keys]);
+      if (enter) await tmuxAsync(["send-keys", "-t", tmuxName, "Enter"]);
+    });
     monitors.get(id)?.wake();   // input landed: capture at full rate again
     res.json({ ok: true });
   } catch (e) {
@@ -1813,11 +1828,44 @@ app.post("/api/sessions/:id/message", async (req, res) => {
   const { id } = req.params;
   if (!isValidId(id)) return res.status(400).json({ error: "invalid id" });
   if (!sessions.has(id)) return res.status(404).json({ error: "session not found" });
-  const { text, enter = true, force = false } = req.body;
+  const { text, enter = true, force = false, requestId, when = "now", deviceId } = req.body;
   if (typeof text !== "string" || text.length === 0) {
     return res.status(400).json({ error: "text (non-empty string) required" });
   }
   if (typeof force !== "boolean") return res.status(400).json({ error: "force must be a boolean" });
+  // The composer's form: a request id makes the delivery an outbox entry —
+  // idempotent (a retry with the same id is answered with the entry it made,
+  // never a second paste), visible to every device, and queued until the agent
+  // is at its prompt when `when` is "auto" and the pane is working or blocked.
+  if (requestId !== undefined) {
+    if (enter !== true || force !== false) return res.status(400).json({ error: "a requestId delivery always presses Enter and never pastes into a shell" });
+    if (when !== "now" && when !== "auto") return res.status(400).json({ error: "when must be \"now\" or \"auto\"" });
+    const v = validateOutboxEntry({ text, requestId, deviceId });
+    if (v.error) return res.status(400).json({ error: v.error });
+    const s = sessions.get(id);
+    // The live list is mutated in place (entries are shared with in-flight
+    // deliveries) — it was validated at boot; only new entries are added here.
+    if (!Array.isArray(s.outbox)) s.outbox = [];
+    const existing = s.outbox.find((e) => e.id === requestId);
+    if (existing) return res.status(existing.state === "queued" ? 202 : existing.state === "failed" ? 409 : 200).json({ ok: existing.state === "handed" || existing.state === "sending" || existing.state === "queued", replay: true, entry: existing, ...(existing.error ? { error: existing.error } : {}) });
+    if (!outboxMakeRoom(s.outbox)) return res.status(429).json({ error: `outbox full (${OUTBOX_MAX} entries) — cancel or dismiss some first` });
+    const entry = v.entry;
+    const curConv = currentConversationId(s);
+    if (curConv) entry.conversationId = curConv;
+    s.outbox.push(entry);
+    if (when === "auto" && !outboxDispatchable(s, monitors.get(s.id)?.verdictSeen)) {
+      // Not persisted = not queued: a 500 must not be followed by a delivery.
+      try { await saveAgentLocked(s); } catch (e) {
+        s.outbox.splice(s.outbox.indexOf(entry), 1);
+        return res.status(500).json({ error: `could not save the record (${e.code || "error"}) — not queued` });
+      }
+      return res.status(202).json({ ok: true, queued: true, entry });
+    }
+    entry.state = "sending";
+    const done = await withPaneLock(id, () => deliverOutboxEntry(s, entry));
+    if (done.state !== "handed") return res.status(409).json({ error: done.error, entry: done });
+    return res.json({ ok: true, bytes: Buffer.byteLength(text), entry: done });
+  }
   const tmuxName = tmuxSessionName(id);
   if (tmuxSafe(["has-session", "-t", tmuxName]) === null) {
     return res.status(409).json({ error: `agent tmux session ${tmuxName} is not running` });
@@ -1830,22 +1878,94 @@ app.post("/api/sessions/:id/message", async (req, res) => {
   // Fails closed: an unreadable foreground command is treated like a shell.
   // Re-checked right before the paste (guard) — the agent can exit between
   // the first look and the buffer landing.
-  const shellCheck = () => {
-    const fg = (tmuxSafe(["display-message", "-t", tmuxName, "-p", "#{pane_current_command}"]) || "").trim();
-    return !fg || isShellCmd(fg) ? fg || "(unknown)" : null;
-  };
+  const shellCheck = paneShellCheck(tmuxName);
   const shell = force ? null : shellCheck();
   if (shell) {
     return res.status(409).json({ error: `agent is not running — its pane is at a ${shell} prompt (pass force to paste into the shell anyway)`, shell });
   }
   try {
-    await deliverToPane(tmuxName, text, enter, force ? null : shellCheck);
+    // Serialised with the outbox: two deliveries never interleave paste + Enter.
+    await withPaneLock(id, () => deliverToPane(tmuxName, text, enter, force ? null : shellCheck));
     monitors.get(id)?.wake();   // input landed: capture at full rate again
   } catch (e) {
     if (e.shell) return res.status(409).json({ error: `agent exited while the message was in flight — pane is now a ${e.shell} prompt; nothing pasted`, shell: e.shell });
     return res.status(500).json({ error: e.message });
   }
   res.json({ ok: true, bytes: Buffer.byteLength(text) });
+});
+
+function paneShellCheck(tmuxName) {
+  return () => {
+    const fg = (tmuxSafe(["display-message", "-t", tmuxName, "-p", "#{pane_current_command}"]) || "").trim();
+    return !fg || isShellCmd(fg) ? fg || "(unknown)" : null;
+  };
+}
+
+// One outbox entry into the pane. Runs under the agent's pane lock; the entry
+// is already marked `sending` by the caller (synchronously, so a dispatcher
+// tick cannot pick it a second time while the lock is held by someone else).
+// Ends `handed` (pasted + Enter) or `failed` with the reason; saved both ways.
+async function deliverOutboxEntry(s, entry) {
+  const tmuxName = tmuxSessionName(s.id);
+  delete entry.error;
+  try { await saveAgentLocked(s); } catch {}
+  try {
+    if (tmuxSafe(["has-session", "-t", tmuxName]) === null) throw new Error("agent tmux session is not running");
+    const shellCheck = paneShellCheck(tmuxName);
+    const shell = shellCheck();
+    if (shell) throw Object.assign(new Error(`agent is not running — its pane is at a ${shell} prompt`), { shell });
+    await deliverToPane(tmuxName, entry.text, true, shellCheck);
+    monitors.get(s.id)?.wake();
+    entry.state = "handed"; entry.handedAt = new Date().toISOString();
+  } catch (e) {
+    if (e.pasted) { entry.state = "uncertain"; entry.error = "the text was pasted but Enter may not have landed — check Primary"; }
+    else { entry.state = "failed"; entry.error = e.shell ? `agent is not running — its pane is at a ${e.shell} prompt` : e.message; }
+  }
+  try { await saveAgentLocked(s); } catch (e) { console.error(`[outbox] ${s.id}: could not save: ${e.message}`); }
+  return entry;
+}
+
+// Queued entries go out, oldest first, once the agent is at its prompt; handed
+// ones are forgotten after their TTL. One timer for every agent.
+function startOutboxDispatcher() {
+  setInterval(() => {
+    for (const s of sessions.values()) {
+      if (!Array.isArray(s.outbox) || !s.outbox.length) continue;
+      const pruned = pruneOutbox(s.outbox);
+      if (pruned.length !== s.outbox.length) {
+        if (pruned.length) s.outbox = pruned; else delete s.outbox;
+        saveAgentLocked(s).catch((e) => console.error(`[outbox] ${s.id}: could not save: ${e.message}`));
+        if (!s.outbox) continue;
+      }
+      if (s.outbox.some((e) => e.state === "sending")) continue;
+      const cur = currentConversationId(s);
+      const next = s.outbox.find((e) => e.state === "queued" && !outboxEntryStale(e, cur));
+      if (!next || !outboxDispatchable(s, monitors.get(s.id)?.verdictSeen)) continue;
+      next.state = "sending";
+      withPaneLock(s.id, () => deliverOutboxEntry(s, next)).catch((e) => console.error(`[outbox] ${s.id}: ${e.message}`));
+    }
+  }, 1000).unref();
+}
+
+// The outbox whole (text unclipped) and cancel/dismiss of one entry.
+app.get("/api/sessions/:id/outbox", (req, res) => {
+  if (!tokenPresent(req)) return res.status(401).json({ error: "invalid or missing token" });
+  const s = sessions.get(req.params.id);
+  if (!s || s.archived) return res.status(404).json({ error: "agent not found" });
+  res.json({ outbox: outboxOut(s) });
+});
+app.delete("/api/sessions/:id/outbox/:entryId", async (req, res) => {
+  if (!tokenPresent(req)) return res.status(401).json({ error: "invalid or missing token" });
+  const s = sessions.get(req.params.id);
+  if (!s || s.archived) return res.status(404).json({ error: "agent not found" });
+  const list = Array.isArray(s.outbox) ? s.outbox : [];
+  const entry = list.find((e) => e.id === req.params.entryId);
+  if (!entry) return res.status(404).json({ error: "no such outbox entry" });
+  if (entry.state === "sending") return res.status(409).json({ error: "this message is being delivered right now" });
+  const rest = list.filter((e) => e !== entry);
+  if (rest.length) s.outbox = rest; else delete s.outbox;
+  try { await saveAgentLocked(s); } catch (e) { return res.status(500).json({ error: `could not save: ${e.message}` }); }
+  res.json({ ok: true, removed: entry.state });
 });
 
 // The text reaches tmux via a temp file (load-buffer), never argv or a shell —
@@ -1873,7 +1993,9 @@ async function deliverToPane(tmuxName, text, enter = true, guard = null) {
   }
   if (enter) {
     await new Promise((r) => setTimeout(r, 250));
-    await tmuxAsync(["send-keys", "-t", tmuxName, "Enter"]);
+    // The text is in claude's input box from here on: a failure now is NOT
+    // "not delivered" — a retry would paste it a second time, concatenated.
+    try { await tmuxAsync(["send-keys", "-t", tmuxName, "Enter"]); } catch (e) { throw Object.assign(e, { pasted: true }); }
   }
 }
 
@@ -2921,7 +3043,7 @@ function startMonitor(sessionId, { ensured = null } = {}) {
     // the provider config); non-claude/unknown launchers fall back to bare claude.
     const launcher = getLaunchers()[session.launchCommand];
     const launchArgv = launcher?.kind === "claude" ? launcher.argv : ["claude"];
-    performResume(session, tmuxSessionName(sessionId), { deliver: deliverToPane, save: (s) => saveAgent(s), launchArgv })
+    performResume(session, tmuxSessionName(sessionId), { deliver: (...a) => withPaneLock(sessionId, () => deliverToPane(...a)), save: (s) => saveAgent(s), launchArgv })
       .then((r) => { if (r.reason) console.log(`[resume] ${sessionId}: skip — ${r.reason}`); })
       .catch((e) => console.error(`[resume] ${sessionId}: ${e.message}`));
   }
@@ -3487,10 +3609,14 @@ server.listen(PORT, HADRON_HOST, () => {
       continue;
     }
     agent.tmuxSession = tmuxSessionName(id);
+    // A `sending` entry at boot is the restart case: the paste may have landed.
+    const ob = safeOutbox(agent.outbox, { boot: true });
+    if (ob.length) agent.outbox = ob; else delete agent.outbox;
     sessions.set(id, agent);
     activeCount++;
   }
   console.log(`Loaded ${activeCount} active agents, ${archivedCount} archived`);
+  startOutboxDispatcher();
   migrateFolderPins();
   ensureDefaults();
   detectOrphanedTmuxSessions();

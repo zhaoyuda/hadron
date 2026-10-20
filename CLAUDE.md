@@ -50,7 +50,7 @@ scripts/
   setup-workspace.js  # Interactive workspace initializer
 test/
   unit/               # detectState/nextState fixtures + security HTTP suite (npm test)
-  e2e/                # Playwright browser modules M1-M31 (npm run test:e2e)
+  e2e/                # Playwright browser modules M1-M33 (npm run test:e2e)
 ```
 
 ## Conventions
@@ -466,6 +466,28 @@ npm test
 #                            draft, empty clears, persisted on the record, short form (no text) on the token list;
 #                            `stale:true` (computed) when its conversationId is not the agent's current one; the
 #                            JSON body cap is 1 MB so a DRAFT_TEXT_MAX CJK draft fits)
+#   + test-outbox.js        (the composer's outbox — server/outbox.js at the REAL tmux boundary (private socket + a
+#                            process named claude logging what it is typed): POST /api/sessions/:id/message with a
+#                            `requestId` (+ when "now"|"auto", deviceId; enter/force fixed → 400) is an outbox entry on
+#                            the record {id, text, at, state, deviceId, handedAt?, error?}: the same id again is a REPLAY
+#                            (nothing pasted twice, 200/202/409 by its state); `when:auto` while the pane is working or
+#                            blocked → 202 queued, delivered by the 1-s dispatcher once the detector reads the prompt
+#                            (head of the list, never into a dialog), `when:now` goes at once; deliveries are
+#                            serialised per pane (withPaneLock — five concurrent multi-line sends arrive in order, the
+#                            legacy no-requestId path takes the same lock); a shell pane → 409 `failed` with the error
+#                            on the entry; handed entries are forgotten after HADRON_OUTBOX_HANDED_TTL_MS (15 min); 20
+#                            entries max → 429; GET …/outbox (token) and DELETE …/outbox/:entryId (404 unknown, 409
+#                            while sending) — a queued one cancelled is never typed; a restart keeps queued entries and
+#                            delivers them, turns a `sending` one into `uncertain` (never re-delivered), drops malformed
+#                            ones; wire form on the token list `outbox` (text clipped to 500 + chars/truncated), absent
+#                            when empty; an entry stamped with the conversation id it was written for is `stale:true` once
+#                            the pane's conversation changed (never dispatched); a failed/uncertain entry gives way at the cap
+#                            (makeRoom) and is pruned after a day; an Enter lost after the paste (pane renamed away inside the
+#                            250-ms window) is `uncertain` with "Enter may not have landed" — never "failed" (a retry would
+#                            paste it twice) and the operator's Enter in Primary submits it once; a record that cannot be
+#                            saved (agents dir 0o500) → 500 "not queued", nothing on the record, never delivered; dispatch
+#                            waits for the detector's first post-boot verdict (detector.verdictSeen);
+#                            no tmux buffers / temp files / token left behind)
 ```
 
 ### Reliability gate
@@ -675,6 +697,30 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                            `<id>:think:<i>`); an unchanged tick never scrolls; Collapse tools closes the hand-opened card too; chatExpandAll persists
 #                            in the ui state; chatModels is an LRU of 6 pictures; a path is offered as a link only under the
 #                            agent's cwd or the workspace)
+#   + test/e2e/m33-composer.js (the composer under the chat view — chat.js chatComposer over /draft + /message +
+#                            /outbox, against a fixture process NAMED claude exec'd into the agent's pane after boot
+#                            (test/e2e/fixtures/claude-m33.sh: bracketed paste on, logs what it is typed, appends a user
+#                            record to the seeded transcript per paste, ❯ prompt): the composer is focused on open; typing
+#                            Chinese is saved locally (localStorage hadron-draft-<id>) then PATCHed with the revision
+#                            (500 ms debounce, 3 s max wait, flushed on leaving the tab / hiding the page) — status line
+#                            "Draft saved locally" → "Draft synced", a reload restores it, a second browser context sees
+#                            it; another device advancing the revision → the next PATCH's 409 becomes "Draft changed on
+#                            another device" with Use this device / Use other device, nothing merged, the composer keeps
+#                            its text; a draft for an earlier conversation (`stale`) is offered Restore / Discard, never
+#                            pasted in; Enter with isComposing / keyCode 229 (the IME committing) sends nothing,
+#                            Shift+Enter is a newline, Enter sends: the composer is cleared at once, the draft cleared on
+#                            the record, a row under the composer with a fresh requestId → POST {when:"auto"}; the row
+#                            follows the entry (Sending… / Send after this turn + Edit + × / Sent · waiting for claude…
+#                            / Not delivered — <error> + Retry + Discard / Not sure this was sent + Send again +
+#                            Discard, textContent only) and goes — the entry DELETEd — once claude recorded the same
+#                            text as a user bubble; a multi-line Chinese message reaches claude as one paste; typing
+#                            right after Send stays in the composer and is the draft; working/blocked → "Send after
+#                            this turn" on the record, nothing typed into the pane or the dialog, delivered once idle,
+#                            × cancels it for good, Edit takes it back, the queued row survives switching to another
+#                            agent and back; the POST aborted on the wire → "Not sure this was sent" after GET /outbox
+#                            finds nothing, never resent on its own, "Send again" delivers exactly once; an image pasted
+#                            into .chat-input is uploaded and its bare path inserted (markdown.js IMAGE_PASTE_TARGETS);
+#                            a handed row not seen as a bubble for 20 s says so and points at Primary)
 ```
 
 `npm run test:e2e` runs `test/e2e/run-all.js`, which executes every `m*.js`

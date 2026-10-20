@@ -2955,7 +2955,7 @@ mark.ann-mark.ann-mark-flash { background: rgba(210, 153, 34, .8); outline: 1px 
 .chat-open-primary { color: var(--blue); cursor: pointer; text-decoration: underline; white-space: nowrap; }
 .chat-live-act { font-family: 'JetBrains Mono', Menlo, monospace; color: var(--text3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 60%; }
 @keyframes chat-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
-.chat-jump { position: absolute; right: 24px; bottom: 16px; padding: 5px 11px; border-radius: 14px; background: var(--bg3); border: 1px solid var(--border); color: var(--text); font-size: 12px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.4); z-index: 2; }
+.chat-jump { position: absolute; right: 24px; bottom: 76px; padding: 5px 11px; border-radius: 14px; background: var(--bg3); border: 1px solid var(--border); color: var(--text); font-size: 12px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.4); z-index: 2; }
 .chat-jump:hover { border-color: var(--blue); }
 
 .ci { position: relative; margin: 0 0 14px; line-height: 1.55; }
@@ -3016,3 +3016,29 @@ mark.ann-mark.ann-mark-flash { background: rgba(210, 153, 34, .8); outline: 1px 
 .ci-code-copy { cursor: pointer; color: var(--text2); }
 .ci-code-copy:hover { color: var(--text); }
 .ci-md.md-preview .ci-code pre { margin: 0; border: none; border-radius: 0; }
+
+/* the composer (G3): drafts + outbox rows under the conversation */
+.chat-notice { flex-shrink: 0; margin: 0 auto; width: 100%; max-width: 860px; box-sizing: border-box; padding: 5px 20px; font-size: 12px; color: var(--yellow); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.chat-notice[hidden], .chat-outbox[hidden] { display: none; }
+.chat-notice-txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.chat-notice-btn { cursor: pointer; color: var(--blue); text-decoration: underline; white-space: nowrap; }
+.chat-outbox { flex-shrink: 0; margin: 0 auto; width: 100%; max-width: 860px; box-sizing: border-box; padding: 0 20px; max-height: 30%; overflow-y: auto; }
+.ob-row { display: flex; align-items: baseline; gap: 10px; padding: 5px 10px; margin: 0 0 4px; border: 1px dashed var(--border); border-radius: 10px; color: var(--text2); font-size: 13px; background: var(--bg2); }
+.ob-text { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; max-height: 4.5em; overflow: hidden; }
+.ob-meta { display: flex; gap: 8px; align-items: baseline; white-space: nowrap; font-size: 11px; color: var(--text3); flex-shrink: 0; }
+.ob-act { cursor: pointer; color: var(--blue); }
+.ob-act:hover { text-decoration: underline; }
+.ob-pending .ob-st, .ob-sending .ob-st { color: var(--text3); }
+.ob-queued { border-style: solid; }
+.ob-stale { border-color: var(--yellow); } .ob-stale .ob-st { color: var(--yellow); }
+.ob-handed { opacity: 0.75; }
+.ob-failed { border-color: var(--red); } .ob-failed .ob-st { color: var(--red); }
+.ob-uncertain { border-color: var(--yellow); } .ob-uncertain .ob-st { color: var(--yellow); }
+.chat-composer { flex-shrink: 0; position: relative; margin: 6px auto 0; width: 100%; max-width: 860px; box-sizing: border-box; padding: 0 20px 8px; display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: end; }
+.chat-input { width: 100%; box-sizing: border-box; resize: none; min-height: 38px; max-height: 40vh; padding: 9px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg2); color: var(--text); font: inherit; font-size: 14px; line-height: 1.45; outline: none; }
+.chat-input:focus { border-color: var(--blue); }
+.chat-send { width: 34px; height: 34px; margin-bottom: 2px; border-radius: 50%; border: none; background: var(--blue); color: #fff; font-size: 16px; cursor: pointer; }
+.chat-send:hover { filter: brightness(1.1); }
+.chat-draft-st { grid-column: 1 / -1; min-height: 14px; font-size: 11px; color: var(--text3); padding: 0 4px; }
+.chat-draft-off { color: var(--yellow); }
+@media (max-width: 700px) { .chat-list, .chat-composer, .chat-outbox, .chat-notice { padding-left: 10px; padding-right: 10px; } }
