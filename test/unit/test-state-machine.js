@@ -23,6 +23,8 @@ function machine(current = "idle", extra = {}) {
 // snaps
 const sToolStrong = { state: "working", stale: false, promptVisible: true, substatus: { type: "tool", tool: "Bash" } };
 const sThinkStale = { state: "working", stale: true, promptVisible: true, substatus: { type: "thinking" } };
+// a "Waiting for N background agents" line with the prompt visible: stale the same way
+const sAgentsStale = { state: "working", stale: true, promptVisible: true, substatus: { type: "agents" } };
 // API retry: strong (stale:false) even with the prompt visible — the on-screen
 // thinking timer freezes mid-retry, so content stops changing, but the agent is
 // very much working. Must flip idle→working without a content change.
@@ -81,6 +83,8 @@ console.log("\n[stale thinking vs strong indicator at idle]");
 {
   const m = machine("idle");
   ok(T(m, { cmd: "node", snap: sThinkStale, contentChanged: false }) === null, "stale thinking + stable content → stays idle");
+  ok(T(m, { cmd: "node", snap: sAgentsStale, contentChanged: false }) === null, "a static \"Waiting for N background agents\" line + stable content → stays idle");
+  ok(T(m, { cmd: "node", snap: sAgentsStale, contentChanged: true })?.state === "working", "…and the same line with the content moving → working");
 }
 {
   const m = machine("idle");

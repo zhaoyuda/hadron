@@ -73,6 +73,20 @@ const EXPECTED = {
   // …and local agents sharing the chrome line with a shell still mean working.
   "working-local-agents-with-shell":       { state: "working", substatus: { type: "agents", count: 3 } },
   "working-dynamic-workflow":              { state: "working", substatus: { type: "agents" } },
+  // The "Waiting for N background agents" line stays in the scrollback after the
+  // agents end (prod 2026-10-28: a stopped session read "working · agents" for 20 h).
+  // A report ("⏺ Agent … finished" / "› Message from @…") BELOW the last waiting
+  // line ends the wait: the prompt is idle, an error under it is the block …
+  "idle-waiting-line-agent-finished":      { state: null, promptVisible: true },
+  "blocked-context-full-after-agents":     { state: "blocked", blockReason: "Context full" },
+  // … while a waiting line with nothing under it is still the wait (stale with the
+  // prompt visible: the content-change gate in nextState decides, like a spinner),
+  // and a waiting line REDRAWN under one agent's report means the others are out.
+  "working-background-agents-spinner-prompt": { state: "working", promptVisible: true, substatus: { type: "agents" } },
+  "working-background-agents-one-finished":   { state: "working", promptVisible: true, substatus: { type: "agents" } },
+  // claude's own prose about its agents ("● Agent 1 finished; agent 2 is still …")
+  // is not the report — the rendered report is `⏺ Agent "<name>" finished · <dur>`
+  "working-agents-narration-finished":        { state: "working", promptVisible: true, substatus: { type: "agents" } },
   "working-local-agents":                  { state: "working", substatus: { type: "agents" } },
   "working-task-progress":                 { state: "working", substatus: { type: "agents" } },
 
@@ -188,6 +202,18 @@ const EXPECTED = {
   "blocked-model-issue-wrapped-45":    { state: "blocked", blockReason: "Model unavailable" },
   // /goal notice, prefixed by a goal-spinner frame (∴ ∷ ∵): the API-caused pauses count
   "blocked-goal-paused-rate-limited":  { state: "blocked", blockReason: "Usage limit" },
+  // the window is full: claude refuses the turn locally ("<synthetic>" record) and draws
+  // "⎿  Context limit reached · /compact or /clear to continue" or "Prompt is too long";
+  // "Context full", never "Usage limit" (the text carries "limit reached")
+  "blocked-prompt-too-long":           { state: "blocked", blockReason: "Context full" },
+  // …but the phrases as tool output (an agent grepping its logs — a ⎿ line is tool
+  // output unless it carries claude's full "· /compact or /clear" suffix on the ⎿
+  // line itself) or quoted in prose are not the block
+  "idle-context-limit-in-tool-output": { state: null },
+  // …and even the byte-exact banner under a tool-call bullet ("● Bash(cat fixture)")
+  // is that tool's output (findApiError: underToolCall) — the real one never is
+  "idle-context-banner-in-tool-output": { state: null },
+  "idle-prompt-too-long-in-prose":     { state: null },
 
   // ── Inconclusive (no prompt, no recognized indicators) ──
   "inconclusive-mid-output":           { state: "inconclusive" },

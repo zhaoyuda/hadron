@@ -1,0 +1,7 @@
+● The fixture named blocked-prompt-too-long.txt covers the case where claude prints
+  Prompt is too long. I also checked the wrapped variant.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  auto-router(xhigh)  |  ctx [████████░░] 82% (200k)

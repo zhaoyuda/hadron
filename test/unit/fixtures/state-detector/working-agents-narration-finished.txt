@@ -1,0 +1,10 @@
+✻ Waiting for 2 background agents to finish
+
+● Agent 1 finished; agent 2 is still scanning the vendor list.
+
+✶ Waiting for 2 background agents to finish
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  auto-router(xhigh)  |  ctx [████████░░] 82% (200k)

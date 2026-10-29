@@ -1,0 +1,10 @@
+● Bash(tail -4 test/unit/fixtures/state-detector/blocked-context-full-after-agents.txt)
+  ⎿  Context limit reached · /compact or /clear to continue
+     ⏺ Agent "Build exact reference CSV" finished · 45m 2s
+
+● That is the banner the fixture pins.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  auto-router(xhigh)  |  ctx [████████░░] 82% (200k)

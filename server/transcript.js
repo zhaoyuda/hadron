@@ -94,7 +94,13 @@ export function summarizeRecords(records) {
       if (t) lastPrompt = { text: clip(t), at };
       continue;
     }
-    const usage = usageTokens(rec.message?.usage);
+    // claude's own local refusal ("Prompt is too long" when the window is full)
+    // is an assistant record with model "<synthetic>", isApiErrorMessage and
+    // every counter 0 — no API call was made, so it says nothing about the
+    // context; the previous reading stands (prod 2026-10-28: the badge fell
+    // from 82% to 0% at the moment the context was fullest)
+    const synthetic = rec.isApiErrorMessage === true || rec.message?.model === "<synthetic>";
+    const usage = synthetic ? null : usageTokens(rec.message?.usage);
     if (usage !== null) context = { tokens: usage, window: contextWindowFor(rec.message?.model), at };
     const t = blockText(rec.message?.content);
     if (!t.trim()) continue; // thinking / tool_use-only records

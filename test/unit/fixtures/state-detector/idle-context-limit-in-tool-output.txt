@@ -1,0 +1,11 @@
+● Bash(grep -n "Context limit" .hadron/server.log | tail -3)
+  ⎿  Context limit reached
+     Prompt is too long.
+     Context limit reached · see /compact
+
+● Those are the three lines from yesterday's incident, all from agent t369.
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  auto-router(xhigh)  |  ctx [████████░░] 82% (200k)
