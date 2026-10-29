@@ -1,0 +1,11 @@
+✻ Waiting for 1 background agent to finish
+
+› Message from @general-purpose (ctrl+o to expand)
+  ⎿  Context limit reached · /compact or /clear to continue
+
+⏺ Agent "Build exact reference CSV" finished · 45m 2s
+
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  auto-router(xhigh)  |  ctx [████████░░] 82% (200k)

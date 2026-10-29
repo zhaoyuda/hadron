@@ -98,7 +98,12 @@ npm test
 #   = test-state-eval.js   (detectState snapshot fixtures; a background shell at an empty prompt is idle
 #                            with substatus {type:"shell",count} — not working — and a permission dialog
 #                            with a shell in the chrome is blocked; an API error's blockReason names what to DO —
-#                            "Login needed" / "Usage limit" / "Model unavailable" / transient "API error";
+#                            "Login needed" / "Usage limit" / "Model unavailable" / "Context full" (claude's own
+#                            "⎿  Context limit reached · /compact or /clear" or "Prompt is too long" — the turn was refused
+#                            locally, nothing retries it) / transient "API error"; a "Waiting for N background agents" line
+#                            with an "Agent … finished" / "Message from @…" report BELOW it is a finished wait (idle, or the
+#                            error under it), with nothing below it a stale working verdict when the prompt shows (prod
+#                            2026-10-28: a stopped session read "working · agents" for 20 h);
 #                            the environment-managed auth family (AWS / Google Cloud / Microsoft Foundry /
 #                            "Gateway refused the request") is Login needed — "OAuth authentication failed" is an
 #                            MCP server's callback error, a tool result, deliberately not an API block
@@ -308,7 +313,8 @@ npm test
 #                            transcriptWire clips to WIRE_TEXT + `truncated`; `context` = the last assistant
 #                            usage (input + cache-creation + cache-read) against claude's window for the model
 #                            (contextWindowFor: 1M for "[1m]", else 200k), sidechain ignored, carried forward,
-#                            numbers only — the card badge's fallback (contextFromPane in test-state-eval
+#                            numbers only, a "<synthetic>" / isApiErrorMessage record (claude's local "Prompt is too
+#                            long" refusal, every counter 0) never moves it — the card badge's fallback (contextFromPane in test-state-eval
 #                            reads claude's own "N% context used" / "N% until auto-compact" / "Context low
 #                            (N% remaining)" footer, bottom-most line wins, null when absent). The wire-form contract
 #                            (`transcript` on /api/sessions only for a token-bearing GET and only for an

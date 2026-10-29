@@ -219,6 +219,17 @@ const TOOL_CALL_INDENT_RE = /^\s+(Read|Edit|Write|Bash|Agent|Skill|NotebookEdit|
 
 // Waiting for background agents or dynamic workflows
 const BACKGROUND_AGENTS_RE = /Waiting for \d+ (?:background agents?|dynamic workflows?) to finish/;
+// The report that ends such a wait: claude prints it BELOW the waiting line and
+// redraws the waiting line under it while agents are still out — so a report
+// under the LAST waiting line means the wait is over (the line itself stays in
+// the scrollback; prod 2026-10-28: a session read "working · agents" for 20 h)
+// Pinned to the rendered shape (quoted name, " · " duration; "(ctrl+o to
+// expand)" on the inbox line): claude's own prose about its agents ("● Agent 1
+// finished; agent 2 is still scanning") must not end a live wait. Both shapes
+// are claude 2.1.3xx strings — if a release rewords them the 20-hour false
+// wait comes back silently; fixture idle-waiting-line-agent-finished is the
+// canary to recapture at the next claude bump.
+const AGENT_FINISHED_RE = /^[⏺●]\s+(?:Agent|Workflow) ".+" finished ·|^›\s+Message from @\S+ \(ctrl\+o to expand\)/;
 
 // Background shell(s) still running
 const SHELL_RUNNING_RE = /(\d+) shells? still running/;
@@ -341,7 +352,19 @@ const API_ERROR_LINE_RE = new RegExp(
 const RETRY_ERROR_LINE_RE = new RegExp(
   "^✻\\s+(?!API error\\s*·)(?!No response from the API\\b)\\S.*?·\\s*Retrying in " + RETRY_DELAY,
 );
-const isApiErrorLine = (l) => API_ERROR_LINE_RE.test(l) || RETRY_ERROR_LINE_RE.test(l);
+// The context-window error is local (claude refuses the turn itself, the
+// transcript gets a "<synthetic>" assistant record) and is drawn as a tool-result
+// style line — "  ⎿  Context limit reached · /compact or /clear to continue" — or
+// as the synthetic message's text ("Prompt is too long"). Nothing claude does
+// on its own gets past it: the operator has to /compact or /clear, so it is a
+// block with its own reason, "Context full" (prod 2026-10-28, issue: a stopped
+// session showed "agent running" for 20 h). The ⎿ form is admitted ONLY with
+// claude's full "· /compact or /clear" suffix — a ⎿ line is otherwise tool
+// output (findApiError excludes it for that reason), and the same bytes in an
+// agent's grep over its logs must not block a healthy agent; the bullet forms
+// carry the bullet, like every other head above.
+const CONTEXT_FULL_RE = /^(?:[●⏺⚠]\uFE0F? ?(?:Context limit reached(?: ·|$)|Prompt is too long(?: ·|\.|$))| {0,2}⎿\s+Context limit reached · \/compact or \/clear\b)/;
+const isApiErrorLine = (l) => API_ERROR_LINE_RE.test(l) || RETRY_ERROR_LINE_RE.test(l) || CONTEXT_FULL_RE.test(l);
 // A message wraps at spaces on narrow panes (text width is columns − 10), so on a
 // 45-column pane the head itself splits: "● There's an issue with the selected" /
 // "  model (claude-…)". Re-join each bullet line with its 2-space continuation lines
@@ -353,8 +376,20 @@ const isApiErrorLine = (l) => API_ERROR_LINE_RE.test(l) || RETRY_ERROR_LINE_RE.t
 // or null. Scanned from the bottom, line and block interleaved by position: the
 // tail can still hold an earlier "API Error: 500" above a later "Login expired",
 // and the reason shown must be the current one (Opus review of the split).
+// The ⎿ form of CONTEXT_FULL_RE is the one head that reads 2-indented text, so
+// it is the one an agent can trip by echoing claude's own bytes (cat of a
+// fixture, grep over server.log): under a tool-call bullet it is that tool's
+// output, not the banner — the real banner sits under "› Message from @…" or a
+// report line, never under "● Bash(".
+function underToolCall(lines, i) {
+  for (let j = i - 1; j >= 0; j--) {
+    if (/^[●⏺›✻✶✢✳✽·]/.test(lines[j]) || /^❯/.test(lines[j].trim())) return TOOL_CALL_RE.test(lines[j]) || TOOL_CALL_INDENT_RE.test(lines[j]);
+  }
+  return false;
+}
 function findApiError(lines) {
   for (let i = lines.length - 1; i >= 0; i--) {
+    if (/^ {0,2}⎿/.test(lines[i]) && underToolCall(lines, i)) continue;
     if (isApiErrorLine(lines[i])) return lines[i];
     if (!/^[●⏺⚠∴∷∵]/.test(lines[i])) continue;
     let block = lines[i];
@@ -375,6 +410,8 @@ const hasApiError = (lines) => findApiError(lines) !== null;
 //                         /goal paused for a limit)
 //   "Model unavailable" — the configured model: issue with the selected
 //                         model, not on this deployment, no healthy deployments
+//   "Context full"      — the window is full: claude refused the turn locally,
+//                         /compact or /clear (nothing retries this)
 //   "API error"         — transient: overloaded, high demand, 5xx, timeouts,
 //                         and anything not recognised above (claude retries)
 // Classification runs only on a line detection already accepted, so these
@@ -406,6 +443,9 @@ function truncatedLimitHead(line) {
 }
 export function apiErrorReason(line) {
   if (typeof line !== "string") return "API error";
+  // before the quota bucket on purpose: "Context limit reached" carries "limit
+  // reached" and would read "Usage limit"; a context-full head is never a quota
+  if (CONTEXT_FULL_RE.test(line)) return "Context full";
   for (const [reason, re] of API_ERROR_KIND_RES) if (re.test(line)) return reason;
   return RAW_LIMIT_HEAD_RE.test(line) || truncatedLimitHead(line) ? "Usage limit" : "API error";
 }
@@ -595,10 +635,19 @@ export function detectState(rawLines, opts = {}) {
 
   // ── Step 4: Background/concurrent work (always checked in tail) ──
 
-  // 4a. Background agents
+  // 4a. Background agents. The waiting line is a spinner that stays in the
+  // scrollback after the agents end: a report (AGENT_FINISHED_RE) under the
+  // LAST waiting line means the wait is over — fall through, so the prompt
+  // reads idle and an error under it (5d) reads blocked. With the prompt
+  // visible the verdict is stale like a thinking spinner: nextState's
+  // content-change gate decides, so a static leftover never flips idle→working.
+  // Both scans are confined to the 15-line tail on purpose — widen one and the
+  // rule flips (a report inside the tail under a waiting line above it).
   const tailText = tail.join("\n");
-  if (BACKGROUND_AGENTS_RE.test(tailText)) {
-    return { state: "working", substatus: { type: "agents" } };
+  let waitIdx = -1;
+  for (let i = tail.length - 1; i >= 0; i--) if (BACKGROUND_AGENTS_RE.test(tail[i])) { waitIdx = i; break; }
+  if (waitIdx >= 0 && !tail.slice(waitIdx + 1).some((l) => AGENT_FINISHED_RE.test(l))) {
+    return { state: "working", promptVisible: hasPrompt, stale: hasPrompt, substatus: { type: "agents" } };
   }
 
   // 4b. Background shells or local agents (check content + chrome status bar).

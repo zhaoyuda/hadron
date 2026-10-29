@@ -108,6 +108,17 @@ console.log("\n[context — last assistant usage against the model's window]");
   const partial = summarizeRecords([asst([{ type: "text", text: "a" }], 1, "m1", { message: { id: "m1", role: "assistant", usage: { input_tokens: 7, cache_read_input_tokens: "lots" }, content: [{ type: "text", text: "a" }] } })]);
   ok(partial.context.tokens === 7, "a non-numeric counter is skipped, the numeric ones still count");
   ok(!JSON.stringify(s).includes(SID) && !("model" in s.context), "context carries numbers only — no session id, no model string");
+  // the window is full: claude's local refusal is an assistant record with model
+  // "<synthetic>", isApiErrorMessage and every counter 0 — no call was made, the
+  // previous reading stands (prod 2026-10-28: the badge fell from 82% to 0%)
+  const full = summarizeRecords([
+    asst([{ type: "text", text: "on it" }], 3, "m1", { message: { id: "m1", role: "assistant", model: "claude-fable-5-1", usage: usage(1200, 2800, 160000), content: [{ type: "text", text: "on it" }] } }),
+    { type: "assistant", sessionId: SID, timestamp: T(4), isApiErrorMessage: true, message: { id: "e1", role: "assistant", model: "<synthetic>", usage: usage(0, 0, 0, { output_tokens: 0 }), content: [{ type: "text", text: "Prompt is too long" }] } },
+  ]);
+  ok(full.context && full.context.tokens === 164000 && full.context.at === T(3), `a "<synthetic>" / isApiErrorMessage record never moves the meter — 164k stands, not 0 (${full.context?.tokens})`);
+  ok(full.lastReply && full.lastReply.text === "Prompt is too long" && full.lastActivityAt === T(4), "…it is still the last reply and the last activity");
+  const onlySynthetic = summarizeRecords([{ type: "assistant", sessionId: SID, timestamp: T(1), message: { id: "e1", role: "assistant", model: "<synthetic>", usage: usage(0, 0, 0), content: [{ type: "text", text: "Prompt is too long" }] } }]);
+  ok(onlySynthetic.context === null, "a synthetic record alone → context null (never 0)");
 }
 
 console.log("\n[parseRecords]");
