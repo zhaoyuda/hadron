@@ -30,7 +30,7 @@ import { startHeartbeat } from "./heartbeat.js";
 import { readQuota } from "./quota.js";
 import { validateCheckpoint, safeCheckpoint, verifyHookClaim, applyHookClaim } from "./checkpoint.js";
 import { createConversation, readConversation, conversationWire, conversationIdFor, validateDraftPatch, safeDraft, draftEmpty, PAGE_MAX, MAX_LINE } from "./conversation.js";
-import { validateEntry as validateOutboxEntry, safeOutbox, pruneOutbox, makeRoom as outboxMakeRoom, withPaneLock, outboxWire, atPrompt, dispatchable as outboxDispatchable, entryStale as outboxEntryStale, OUTBOX_MAX } from "./outbox.js";
+import { validateEntry as validateOutboxEntry, safeOutbox, pruneOutbox, makeRoom as outboxMakeRoom, withPaneLock, outboxWire, dispatchable as outboxDispatchable, entryStale as outboxEntryStale, OUTBOX_MAX } from "./outbox.js";
 import {
   listAnnotations, createAnnotation, updateAnnotation, deleteAnnotation,
   sendAnnotations, resolveAnnotation, reopenAnnotations, retryDispatch,
@@ -941,6 +941,10 @@ app.get("/api/doctor", async (req, res) => {
     }
     // A "Needs input" screen the chat view could not read (dialog parser miss):
     // the card said "answer it in the terminal" — yellow, so the miss is seen.
+    if (session.outboxCaptureFails) {
+      finding.message += ` · the pane could not be captured ${session.outboxCaptureFails}× in a row — queued chat messages are held until it can (tmux busy? see the tmux row)`;
+      if (finding.level !== "red") finding.level = "yellow";
+    }
     if (session.dialogMisses) {
       finding.message += ` · ${session.dialogMisses} "Needs input" screen(s) the chat view could not read as a dialog — answer those in the terminal (a dialog shape server/dialog.js does not know?)`;
       if (finding.level !== "red") finding.level = "yellow";
@@ -1015,14 +1019,26 @@ app.get("/api/doctor", async (req, res) => {
   });
 });
 
+// Where an agent opens: its conversation ("chat") or its terminal
+// ("terminal"). A workspace setting — every browser and the Mac shell land the
+// same way — stored in .hadron/config.json; an absent or unknown value is
+// "chat" (the terminal is a tab the operator opens when a dialog or raw
+// output calls for it).
+const LANDING_TABS = ["chat", "terminal"];
+const LANDING_DEFAULT = "chat";
+function withLanding(config) {
+  if (!LANDING_TABS.includes(config.landing)) config.landing = LANDING_DEFAULT;
+  return config;
+}
+
 app.get("/api/workspace", (req, res) => {
   const configPath = join(getWorkspaceDir(), ".hadron", "config.json");
   try {
     const config = JSON.parse(readFileSync(configPath, "utf-8"));
     config.cwd = getWorkspaceDir();
-    res.json(config);
+    res.json(withLanding(config));
   } catch {
-    res.json({ name: "workspace", cwd: getWorkspaceDir() });
+    res.json(withLanding({ name: "workspace", cwd: getWorkspaceDir() }));
   }
 });
 
@@ -1030,9 +1046,13 @@ app.patch("/api/workspace", (req, res) => {
   const configPath = join(getWorkspaceDir(), ".hadron", "config.json");
   let config;
   try { config = JSON.parse(readFileSync(configPath, "utf-8")); } catch { config = { name: "workspace" }; }
-  const { groups, groupConfig: gc, tmuxAlerts } = req.body;
+  const { groups, groupConfig: gc, tmuxAlerts, landing } = req.body;
   if (groups !== undefined) config.groups = groups;
   if (gc !== undefined) config.groupConfig = gc;
+  if (landing !== undefined) {
+    if (!LANDING_TABS.includes(landing)) return res.status(400).json({ error: `landing must be one of ${LANDING_TABS.join(", ")}` });
+    config.landing = landing;
+  }
   // { ntfy: boolean } — the only alert channel so far. Default off: a push
   // to the operator's phone is opt-in per workspace, never a surprise.
   if (tmuxAlerts !== undefined) {
@@ -1043,7 +1063,7 @@ app.patch("/api/workspace", (req, res) => {
     ntfyStatusCache = { at: 0, value: null };   // /api/health must show the change at once
   }
   writeFileSync(configPath, JSON.stringify(config, null, 2));
-  res.json(config);
+  res.json(withLanding({ ...config }));
 });
 
 app.get("/api/sessions", (req, res) => {
@@ -1982,7 +2002,16 @@ app.post("/api/sessions/:id/message", async (req, res) => {
       return res.status(202).json({ ok: true, queued: true, entry });
     }
     entry.state = "sending";
-    const done = await withPaneLock(id, () => deliverOutboxEntry(s, entry));
+    const done = await withPaneLock(id, () => deliverOutboxEntry(s, entry, { auto: when === "auto" }));
+    if (done.state === "queued") {
+          if (done.saveError) {
+            const e = done.saveError; delete done.saveError;
+            s.outbox.splice(s.outbox.indexOf(done), 1);
+            saveAgentLocked(s).catch(() => {}); // best effort: the disk may still say `sending` from before the hold
+            return res.status(500).json({ error: `could not save the record (${e.code || "error"}) — not queued` });
+          }
+          return res.status(202).json({ ok: true, queued: true, entry: done });
+        }
     if (done.state !== "handed") return res.status(409).json({ error: done.error, entry: done });
     return res.json({ ok: true, bytes: Buffer.byteLength(text), entry: done });
   }
@@ -2025,7 +2054,12 @@ function paneShellCheck(tmuxName) {
 // is already marked `sending` by the caller (synchronously, so a dispatcher
 // tick cannot pick it a second time while the lock is held by someone else).
 // Ends `handed` (pasted + Enter) or `failed` with the reason; saved both ways.
-async function deliverOutboxEntry(s, entry) {
+// `auto` (the dispatcher and a when:"auto" POST): the pane is captured under
+// the lock and a dialog on it — one the detector has not read yet, its
+// verdict is up to a tick behind the screen — puts the entry back to `queued`
+// instead of pasting into the dialog's field. "Send now" and when:"now" skip
+// the check: the operator asked for it, dialog or not.
+async function deliverOutboxEntry(s, entry, { auto = false } = {}) {
   const tmuxName = tmuxSessionName(s.id);
   delete entry.error;
   try { await saveAgentLocked(s); } catch {}
@@ -2034,11 +2068,38 @@ async function deliverOutboxEntry(s, entry) {
     const shellCheck = paneShellCheck(tmuxName);
     const shell = shellCheck();
     if (shell) throw Object.assign(new Error(`agent is not running — its pane is at a ${shell} prompt`), { shell });
+    if (auto) {
+      // The detector's verdict is a tick behind and a quiet pane is captured only
+      // every 5th tick: read the screen now. A dialog holds the entry — and so
+      // does a tmux that does not answer: an unknown screen is never pasted into
+      // and never a failure, the dispatcher asks again next second.
+      let lines = null;
+      try { lines = (await tmuxAsync(["capture-pane", "-t", tmuxName, "-p"], { timeout: 2000 })).split("\n"); }
+      catch (e) {
+        // Silent-failure rule: a capture that keeps failing holds every auto
+        // message for this agent — say so (log + doctor) and ask less often.
+        s.outboxCaptureFails = (s.outboxCaptureFails || 0) + 1;
+        s.outboxCaptureRetryAt = Date.now() + Math.min(30000, 1000 * 2 ** Math.min(s.outboxCaptureFails, 5));
+        warnOnce(`outbox-capture:${s.id}`, `[outbox] ${s.id}: the pane could not be captured (${e.message}) — queued messages are held until it can; \`hadron doctor\` has the note`);
+      }
+      if (lines) { delete s.outboxCaptureFails; delete s.outboxCaptureRetryAt; }
+      if (!lines || parseDialog(lines)) {
+        entry.state = "queued";
+        // Not persisted = not queued (same rule as the non-dispatchable branch):
+        // the caller decides what a failed save means on its path.
+        try { await saveAgentLocked(s); } catch (e) { entry.saveError = e; }
+        return entry;
+      }
+    }
     await deliverToPane(tmuxName, entry.text, true, shellCheck);
     monitors.get(s.id)?.wake();
     entry.state = "handed"; entry.handedAt = new Date().toISOString();
+    // Pasted into a working pane: claude takes it with its next step and
+    // records it as a prompt then (staging 2026-11-08) — the chat view words
+    // the wait by this.
+    entry.handedWhile = s.state === "working" ? "working" : "prompt";
   } catch (e) {
-    if (e.pasted) { entry.state = "uncertain"; entry.error = "the text was pasted but Enter may not have landed — check Primary"; }
+    if (e.pasted) { entry.state = "uncertain"; entry.error = "the text was pasted but Enter may not have landed — the terminal (Primary) shows whether it went"; }
     else { entry.state = "failed"; entry.error = e.shell ? `agent is not running — its pane is at a ${e.shell} prompt` : e.message; }
   }
   try { await saveAgentLocked(s); } catch (e) { console.error(`[outbox] ${s.id}: could not save: ${e.message}`); }
@@ -2061,8 +2122,11 @@ function startOutboxDispatcher() {
       const cur = currentConversationId(s);
       const next = s.outbox.find((e) => e.state === "queued" && !outboxEntryStale(e, cur));
       if (!next || !outboxDispatchable(s, monitors.get(s.id)?.verdictSeen)) continue;
+      if (s.outboxCaptureRetryAt && Date.now() < s.outboxCaptureRetryAt) continue; // capture failing: backed off
       next.state = "sending";
-      withPaneLock(s.id, () => deliverOutboxEntry(s, next)).catch((e) => console.error(`[outbox] ${s.id}: ${e.message}`));
+      withPaneLock(s.id, () => deliverOutboxEntry(s, next, { auto: true }))
+        .then((e) => { if (e?.saveError) { console.error(`[outbox] ${s.id}: held entry not saved: ${e.saveError.message}`); delete e.saveError; } }) // still queued in memory and on disk from before — retried next tick
+        .catch((e) => console.error(`[outbox] ${s.id}: ${e.message}`));
     }
   }, 1000).unref();
 }
@@ -2074,6 +2138,25 @@ app.get("/api/sessions/:id/outbox", (req, res) => {
   if (!s || s.archived) return res.status(404).json({ error: "agent not found" });
   res.json({ outbox: outboxOut(s) });
 });
+// "Send now": a queued entry (held while the pane shows a dialog) goes out at
+// the operator's word, whatever the pane shows — into a dialog the text lands
+// wherever its cursor is, which the button's title says. Answers like
+// POST /message: 200 handed, 409 failed with the entry.
+app.post("/api/sessions/:id/outbox/:entryId/send", async (req, res) => {
+  if (!tokenPresent(req)) return res.status(401).json({ error: "invalid or missing token" });
+  const id = req.params.id;
+  const s = sessions.get(id);
+  if (!s || s.archived) return res.status(404).json({ error: "agent not found" });
+  const entry = (Array.isArray(s.outbox) ? s.outbox : []).find((e) => e.id === req.params.entryId);
+  if (!entry) return res.status(404).json({ error: "no such outbox entry" });
+  if (entry.state !== "queued") return res.status(409).json({ error: `this message is ${entry.state}, not queued`, entry });
+  if (outboxEntryStale(entry, currentConversationId(s))) return res.status(409).json({ error: "this message was written for an earlier conversation — take it back into the composer first", entry: { ...entry, stale: true } });
+  entry.state = "sending";
+  const done = await withPaneLock(id, () => deliverOutboxEntry(s, entry));
+  if (done.state !== "handed") return res.status(409).json({ error: done.error, entry: done });
+  res.json({ ok: true, entry: done });
+});
+
 app.delete("/api/sessions/:id/outbox/:entryId", async (req, res) => {
   if (!tokenPresent(req)) return res.status(401).json({ error: "invalid or missing token" });
   const s = sessions.get(req.params.id);

@@ -434,7 +434,9 @@ npm test
 #                            latencyP95Ms, rssMb, swapMb, swapGrowthMb, memError, history, ntfy:{enabled, topicReadable}} next to the call stats;
 #                            SIGSTOP → down (server stays up), SIGCONT → ok on the next probe; PATCH /api/workspace
 #                            tmuxAlerts = { ntfy: boolean } only (400 otherwise, persisted in .hadron/config.json, View →
-#                            Notifications → "tmux Alerts via ntfy", DEFAULT OFF); with it on, one POST to
+#                            Notifications → "tmux Alerts via ntfy", DEFAULT OFF); PATCH landing = "chat"|"terminal"
+#                            (400 otherwise; a config without the key reads "chat" on GET — the chat view is the default
+#                            landing for every agent in every browser, View → "Chat View First"); with it on, one POST to
 #                            HADRON_NTFY_URL/<topic> per level change (Title/Priority/Tags headers, body names `hadron
 #                            doctor` and says nothing was killed, ≤ 1 per level per 30 min, a recovery push only after a
 #                            sent push), none while off; the topic (~/.ntfy_topic_log, HADRON_NTFY_TOPIC_FILE in tests) is
@@ -484,9 +486,16 @@ npm test
 #                            process named claude logging what it is typed): POST /api/sessions/:id/message with a
 #                            `requestId` (+ when "now"|"auto", deviceId; enter/force fixed → 400) is an outbox entry on
 #                            the record {id, text, at, state, deviceId, handedAt?, error?}: the same id again is a REPLAY
-#                            (nothing pasted twice, 200/202/409 by its state); `when:auto` while the pane is working or
-#                            blocked → 202 queued, delivered by the 1-s dispatcher once the detector reads the prompt
-#                            (head of the list, never into a dialog), `when:now` goes at once; deliveries are
+#                            (nothing pasted twice, 200/202/409 by its state); `when:auto` while the pane is working is
+#                            pasted at once (claude queues mid-turn input itself; the entry is stamped handedWhile:
+#                            "working", else "prompt") — only while blocked → 202 queued, delivered by the 1-s dispatcher
+#                            once the detector reads the prompt (head of the list; the pane is captured again under the
+#                            pane lock right before the paste and a dialog on it — one the detector's verdict is still a
+#                            tick behind — puts the entry back to `queued`, nothing typed into the field; a capture tmux does not
+#                            answer holds it the same way, never `failed` (warnOnce + a yellow doctor note, retried with backoff up to 30 s); a hold that cannot be saved → 500 "not queued",
+#                            off the record, never delivered), `when:now` goes
+#                            at once; POST …/outbox/:entryId/send forces a queued entry out now (200 handed / 409 unless
+#                            queued or when the entry is `stale` / 404) — the chat's "Send now"; deliveries are
 #                            serialised per pane (withPaneLock — five concurrent multi-line sends arrive in order, the
 #                            legacy no-requestId path takes the same lock); a shell pane → 409 `failed` with the error
 #                            on the entry; handed entries are forgotten after HADRON_OUTBOX_HANDED_TTL_MS (15 min); 20
@@ -594,7 +603,7 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #   + test/e2e/m14-group-case.js (agent groups are case-insensitive: "Workers"/"workers" merge into one deck group; rename re-tags every casing)
 #   + test/e2e/m15-md-links.js (clicking a link in a rendered .md preview opens the target as an artifact tab; external → new tab; missing → flash)
 #   + test/e2e/m16-editor-drafts.js (editor draft model: preview renders draft, reload restores it, agent-write → Save 409s with Compare/Overwrite/Cancel, Discard confirms)
-#   + test/e2e/m17-annotation-ux.js (annotation UX: FAB follows the selection; cross-block/formatted/duplicate/overlapping selections anchor + paint honestly; hover card edit, sent read-only; CLI excerpt for formatted anchors; marks survive auto-reload — runs at a <560px preview so the P0 surfaces stay authoritative)
+#   + test/e2e/m17-annotation-ux.js (annotation UX: FAB follows the selection; cross-block/formatted/duplicate/overlapping selections anchor + paint honestly; hover card edit (a click pins the card and cancels the hover timer the mark's focus armed on mousedown — before, that timer repainted the pinned editor as the read-only hover card 150 ms later), sent read-only; CLI excerpt for formatted anchors; marks survive auto-reload — runs at a <560px preview so the P0 surfaces stay authoritative)
 #   + test/e2e/m18-comment-rail.js (comment rail: cards permanently visible at ≥560px previews (width-adaptive 190-260px — split panes qualify), aligned with highlights; rail composer + in-rail edit/delete; mark↔card two-way linking; orphan + doc sections; annRailBusy edit guard; split-layout context derivation; <560px falls back to the P0 hover card)
 #   + test/e2e/m19-artifacts-ux.js (artifacts add/remove UX: Browse popover survives folder clicks (pointerdown close model) + keyboard nav + hidden-files toggle; atomic add with canonical de-dupe; URL validation + escaped labels; remove with 409 drift recovery; dir artifacts — live folder groups where new on-disk files appear automatically; ephemeral file: tabs; add concurrency; viewport clamp; two pinned folders named alike with a file pinned inside each → one group per folder titled `retro — A` / `retro — B` (full path in the tooltip), each file once inside its own group open (📌 row) or collapsed (`1📌` in the header), no extra display group, collapsing one leaves the other; POST answers `coveredBy` / `covers`)
 #   + test/e2e/m20-agent-ops.js  (agent ops: context-menu Pin → "📌 Pinned" section first in BOTH deck modes, card moved not duplicated, survives 3s refresh + reload; `hadron pin <name>`; `hadron close <name>` → tmux dead + JSON archived + ls --archived + restore, with the dashboard left ON the closed agent: its WS is refused (4404), no reconnect loop, record not blanked/resurrected; in-pane `hadron message` sender attribution + --raw; ambiguous names exit 1, nothing delivered)
@@ -710,14 +719,25 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                            view follows the tail only while the reader is at the bottom; scrolled up, a "↓ N new" pill counts
 #                            arrivals and a click jumps down (autoScrollPaused; programmatic scrolls flagged); a replaced shorter
 #                            transcript (generation moved) drops the picture; more than a page → "Load earlier (N more)" prepends
-#                            with the reader's place kept; View → Chat View First (chatFirst, persisted) lands every agent on its
-#                            chat with the terminal still the Primary tab, a shell agent's chat says it has no conversation; the
+#                            with the reader's place kept; View → Chat View First (the workspace's `landing`, default chat, PATCHed
+#                            to /api/workspace) lands every agent on its chat with the Primary tab HIDDEN — the file panel's
+#                            "⌨ Primary" opens it as a closable tab, the landing tab has no × — in a split layout the terminal
+#                            is a pane already, so Primary has no × there and the chat is an ordinary closable tab (a chat landing
+#                            is always in the agent's open set — opened for the agent actually shown, a fresh browser with no ui
+#                            state included, and by the View toggle in a split too; a terminal landing adds no entry — so a split
+#                            straight from the cold landing shows terminal + chat;
+#                            the terminal a split forces is never saved as the agent's tab, and back in tabs the tab active
+#                            before the split returns); a ui state
+#                            written before the workspace landing (every agent on "terminal") is migrated once
+#                            (landingMigrated) so the new default shows, and the last-seen landing is cached in it for a load
+#                            where GET /api/workspace fails — a shell agent's chat says it has no
+#                            conversation; legacy modules boot with landing: "terminal" via the harness; the
 #                            live line shows only while the agent is working. Stable reading (astra's FIX FIRST pass, G2b): the
 #                            reader's place is an anchor {id, offset} taken on every reader scroll while paused — Primary and
 #                            back puts the item they were on where it was with the pill still up, a new exchange counts on it
-#                            ("↓ 2 new") without moving them; a reply taller than the view lands the reader at the START of the
-#                            arrival (its prompt first) paused with a "↓" pill, never at its end (landAt: growth > 0.8 viewport
-#                            while following; the 1200-record catch-up leaves "↓ 1000 new"); an assistant message is patched
+#                            ("↓ 2 new") without moving them; while following, EVERY arrival lands the reader at the bottom, a
+#                            multi-screen reply included (the operator's rule 2026-11-08: only an explicit scroll up pauses it;
+#                            the 1200-record catch-up while paused leaves "↓ 1000 new"); an assistant message is patched
 #                            block by block (data-sig = length + FNV-1a of the block, chatRenderAssistant; nodes matched by block index — an empty thinking block renders no node) so a text block
 #                            landing on the same message keeps its Thinking node (a selection in it would survive) AND counts
 #                            on the pill (added + grew); hidden items (turn without duration, queue dequeue) never count; a
@@ -761,9 +781,19 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                            pasted in; Enter with isComposing / keyCode 229 (the IME committing) sends nothing,
 #                            Shift+Enter is a newline, Enter sends: the composer is cleared at once, the draft cleared on
 #                            the record, a row under the composer with a fresh requestId → POST {when:"auto"}; the row
-#                            follows the entry (Sending… / Send after this turn + Edit + × / Sent · waiting for claude…
-#                            / Not delivered — <error> + Retry + Discard / Not sure this was sent + Send again +
-#                            Discard, textContent only) and goes — the entry DELETEd — once claude recorded the same
+#                            follows the entry (Sending… / Send after this turn + Send now (not on a stale row) + Edit + × / Sent ·
+#                            waiting for claude… / Delivered mid-turn · claude reads it with its next step (handedWhile working:
+#                            claude records it as a prompt when it takes it at its next step — staging 2026-11-08, the bubble
+#                            came at the end of a 25-s tool call — so the row goes with the bubble like any other; once the
+#                            pane has left `working` it says "Delivered mid-turn · waiting for claude…" and after 20 s
+#                            "Delivered mid-turn, not in the conversation — Primary shows what claude did with it": a lost
+#                            paste stays visible) / two or more queued → "Merge N into one message" (clipped
+#                            wire rows are filled from GET /outbox first — proven across a reload with a 600-char row —, each
+#                            DELETEd and folded in only when the DELETE says `removed: "queued"`, one new entry, texts joined
+#                            by a blank line; a DELETE the server does not answer stops the merge with what was taken off the
+#                            record put back into the composer, nothing reordered) / Not delivered — <error> + Retry + Edit +
+#                            Discard / Not sure this was sent + Send again + Edit + Discard, textContent only; Edit fills a
+#                            clipped row the same way) and goes — the entry DELETEd — once claude recorded the same
 #                            text as a user bubble; a multi-line Chinese message reaches claude as one paste; typing
 #                            right after Send stays in the composer and is the draft; working/blocked → "Send after
 #                            this turn" on the record, nothing typed into the pane or the dialog, delivered once idle,
@@ -771,7 +801,7 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                            agent and back; the POST aborted on the wire → "Not sure this was sent" after GET /outbox
 #                            finds nothing, never resent on its own, "Send again" delivers exactly once; an image pasted
 #                            into .chat-input is uploaded and its bare path inserted (markdown.js IMAGE_PASTE_TARGETS);
-#                            a handed row not seen as a bubble for 20 s says so and points at Primary)
+#                            a handed row not seen as a bubble for 20 s says "Handed to claude, not in the conversation yet" — no pointer to Primary by default)
 #   + test/e2e/m34-permission-cards.js (permission cards under the chat view — chat.js chatDialogCard reading
 #                            `dialog` off the 3-s sessions poll, against test/e2e/fixtures/claude-m34.sh exec'd into the
 #                            pane: a .chat-dialog card between the outbox and the composer with the kind badge + title,

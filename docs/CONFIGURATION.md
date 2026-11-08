@@ -32,6 +32,7 @@ This file controls the workspace name, group ordering, group-level attributes, a
 | `kernels` | object | Python environment paths for notebook runtimes (see [Kernel Config](#kernel-config)) |
 | `launchCommand` | string | Default launcher name for new agents (builtin or from `launchers`). Default `claude`. |
 | `launchers` | object | Custom launcher definitions (see below) |
+| `landing` | string | Which view every agent opens on: `"chat"` (default — the conversation view; the terminal is hidden until opened from the file panel's ⌨ Primary) or `"terminal"`. Set from View → "Chat View First"; applies to every browser. |
 
 **Custom launchers** (`launchers.<name>`): registers extra `launchCommand` names
 beyond the builtins (`claude`, `codex`, `shell`) — e.g. a wrapper script that

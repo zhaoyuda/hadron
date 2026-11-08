@@ -1,7 +1,7 @@
 /**
  * The composer's outbox (chat view, G3) at the REAL tmux boundary:
  * POST /api/sessions/:id/message with a requestId — idempotent, serialised per
- * pane, queued while the agent is working/blocked, handed/failed/uncertain on
+ * pane, pasted at once while working (claude queues it), queued while blocked, handed/failed/uncertain on
  * the record — plus GET/DELETE …/outbox and the list wire form.
  *
  * Private tmux server (HADRON_TMUX_SOCKET) + a process actually NAMED claude:
@@ -50,19 +50,41 @@ for (const d of [HOME, FIX, WS, join(WS, "a1"), join(WS, ".hadron")]) mkdirSync(
 writeFileSync(join(HOME, ".profile"), `export PATH="${FIX}:$PATH"\n`);
 writeFileSync(join(HOME, ".bashrc"), `export PATH="${FIX}:$PATH"\n`);
 const FIXTURE = join(FIX, "claude");
+const DLG = join(T, "dialog.txt");
+// claude's Bash permission dialog (the blocked-dialog-bash-v2 shape) — what the
+// fixture paints on a DIALOG line, pinned at the bottom like claude does.
+writeFileSync(DLG, `──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Bash command
+ Remove zz.txt
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ rm -f zz.txt
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and always allow access to
+      /home/user/proj
+      from this project
+   3. No
+
+ Esc to cancel · Tab to amend
+`);
 // A process named claude (exec -a) that logs every line typed at it and shows
 // a ❯ prompt — enough for pane_current_command, the shell guard and the state
 // detector. Bracketed-paste markers arrive as bytes in the line; stripped below.
 writeFileSync(FIXTURE, `#!/usr/bin/env bash
 if [ -z "$HADRON_FIX_REEXEC" ]; then HADRON_FIX_REEXEC=1 exec -a claude bash "$0" "$@"; fi
-LOG="$1"
+LOG="$1"; DLG="$2"
 printf '\\n❯ \\n'
-while IFS= read -r line; do printf '%s\\n' "$line" >> "$LOG"; printf '\\n❯ \\n'; done
+while IFS= read -r line; do
+  if [ "$line" = DIALOG ]; then printf '\\e[2J\\e[H'; yes '' | head -n 40; cat "$DLG"; continue; fi
+  if [ "$line" = IDLE ]; then printf '\\e[2J\\e[H\\n❯ \\n'; continue; fi
+  printf '%s\\n' "$line" >> "$LOG"; printf '\\n❯ \\n'
+done
 `);
 chmodSync(FIXTURE, 0o755);
 writeFileSync(join(WS, ".hadron", "config.json"), JSON.stringify({
   name: "outbox", groups: ["Workers"],
-  launchers: { "cc-fix": { argv: [FIXTURE, LOG], kind: "claude" } },
+  launchers: { "cc-fix": { argv: [FIXTURE, LOG, DLG], kind: "claude" } },
 }, null, 2));
 
 const tenv = { ...process.env, PATH: `${FIX}:${process.env.PATH}`, HOME };
@@ -141,21 +163,63 @@ async function main() {
   ok((await outbox(id)).some((e) => e.id === id1 && e.state === "handed"), "GET /outbox lists the handed entry");
   ok(onDisk(id).outbox?.some((e) => e.id === id1), "…and it is on the record");
 
-  console.log("\n2. queued while working, delivered once idle");
+  console.log("\n2. working: pasted at once (claude queues it for its next step)");
   await setState(id, "working");
+  const idw = rid();
+  a = await msg(id, { text: "干活时也发", requestId: idw, when: "auto" });
+  ok(a.status === 200 && a.json.entry?.state === "handed", `200 handed while working (${a.status})`);
+  ok(await until(() => typed().includes("干活时也发"), 2000), "…and the fixture received it at once");
+  ok(a.json.entry.handedWhile === "working" && (await outbox(id)).find((e) => e.id === idw)?.handedWhile === "working", "…stamped handedWhile: working, on the wire too (the chat view does not wait for a bubble)");
+  await setState(id, "idle");
+
+  console.log("\n2b. queued while blocked, delivered once the dialog is gone");
+  await setState(id, "blocked");
   const idq = rid();
   a = await msg(id, { text: "等一下再发", requestId: idq, when: "auto" });
-  ok(a.status === 202 && a.json.queued === true && a.json.entry?.state === "queued", `202 queued while working (${a.status})`);
+  ok(a.status === 202 && a.json.queued === true && a.json.entry?.state === "queued", `202 queued while blocked (${a.status})`);
   b = await msg(id, { text: "等一下再发", requestId: idq, when: "auto" });
   ok(b.status === 202 && b.json.replay === true, "replay of a queued entry is 202 again");
   await sleep(1500);
-  ok(!typed().includes("等一下再发") && (await outbox(id)).find((e) => e.id === idq)?.state === "queued", "nothing pasted while working; entry still queued");
+  ok(!typed().includes("等一下再发") && (await outbox(id)).find((e) => e.id === idq)?.state === "queued", "nothing pasted into the dialog; entry still queued");
   ok((await listed(id)).outbox?.find((e) => e.id === idq)?.state === "queued", "the sessions list carries the queued entry");
   await setState(id, "idle");
   ok(await until(async () => (await outbox(id)).find((e) => e.id === idq)?.state === "handed", 4000), "handed within a few seconds of idle");
   ok(await until(() => typed().includes("等一下再发"), 2000), "…and the fixture received it");
 
-  console.log("\n3. blocked waits too; `when: now` does not");
+  console.log("\n2c. a dialog on the screen the detector has not read yet: auto holds, nothing goes into its field");
+  // The fixture paints the dialog this instant; the detector's verdict follows
+  // within a tick. The POST lands in that window (most runs — the pane is read
+  // again under the pane lock, so the entry is held either way), and whichever
+  // path held it, the field never gets the text: that is the contract.
+  tmuxS(["send-keys", "-t", paneOf(id), "DIALOG", "Enter"]);
+  const idd = rid();
+  a = await msg(id, { text: "别进对话框", requestId: idd, when: "auto" });
+  ok(a.status === 202 && a.json.queued === true && a.json.entry?.state === "queued", `202 queued with the dialog on screen (${a.status}, ${a.json.entry?.state})`);
+  // A quiet pane is captured only every 5th tick and blocked latches after two
+  // snaps: up to ~10 s during which only the under-lock read protects the field.
+  ok(await until(async () => (await listed(id))?.state === "blocked", 15000), "the detector reads the dialog as blocked (quiet-pane throttle + hysteresis: up to 10 s)");
+  await new Promise((r) => setTimeout(r, 1500));
+  ok(!typed().includes("别进对话框") && (await outbox(id)).find((e) => e.id === idd)?.state === "queued", "…nothing typed into the dialog, the entry is still queued");
+  tmuxS(["send-keys", "-t", paneOf(id), "IDLE", "Enter"]);
+  ok(await until(() => typed().includes("别进对话框"), 8000), "…delivered once the dialog is gone");
+  ok(await until(async () => (await listed(id))?.state === "idle", 5000), "the detector reads the prompt again");
+
+  console.log("\n2d. a dialog hold that cannot be saved is not queued either (same rule as 12)");
+  tmuxS(["send-keys", "-t", paneOf(id), "DIALOG", "Enter"]);
+  await until(async () => (await listed(id))?.state === "blocked", 15000);
+  await setState(id, "idle"); // the detector's verdict says prompt; only the under-lock read sees the dialog
+  chmodSync(join(WS, ".hadron", "agents"), 0o500);
+  const idhs = rid();
+  const hs = await msg(id, { text: "HOLD-SAVE-FAIL", requestId: idhs, when: "auto" });
+  chmodSync(join(WS, ".hadron", "agents"), 0o755);
+  ok(hs.status === 500 && /not queued/.test(hs.json.error) && !hs.json.error.includes(WS), `→ 500 "${hs.json.error}", no path echoed`);
+  ok(!(await outbox(id)).some((e) => e.id === idhs), "…the entry is not on the record");
+  tmuxS(["send-keys", "-t", paneOf(id), "IDLE", "Enter"]);
+  await until(async () => (await listed(id))?.state === "idle", 8000);
+  await sleep(2500);
+  ok(!typed().includes("HOLD-SAVE-FAIL"), "…and it is never delivered");
+
+  console.log("\n3. `when: now` does not wait for the dialog");
   await setState(id, "blocked");
   const idb = rid();
   a = await msg(id, { text: "blocked-wait", requestId: idb, when: "auto" });
@@ -179,7 +243,7 @@ async function main() {
   ok(sec === 5, `each multiline paste kept its second line (${sec})`);
 
   console.log("\n5. cancel: a queued entry DELETEd never goes out; a sending/handed one is reported");
-  await setState(id, "working");
+  await setState(id, "blocked");
   const idc = rid();
   await msg(id, { text: "cancel-me", requestId: idc, when: "auto" });
   let d = await api("DELETE", `/api/sessions/${id}/outbox/${idc}`);
@@ -193,6 +257,19 @@ async function main() {
   await msg(id, { text: "dismiss-me", requestId: idh, when: "auto" });
   d = await api("DELETE", `/api/sessions/${id}/outbox/${idh}`);
   ok(d.status === 200 && d.json.removed === "handed", "a handed entry can be dismissed");
+
+  console.log("\n5b. send now: a queued entry goes out at the operator's word, dialog or not");
+  await setState(id, "blocked");
+  const idsn = rid();
+  await msg(id, { text: "马上发", requestId: idsn, when: "auto" });
+  let sn = await api("POST", `/api/sessions/${id}/outbox/nope/send`);
+  ok(sn.status === 404, `send of an unknown entry → 404 (${sn.status})`);
+  sn = await api("POST", `/api/sessions/${id}/outbox/${idsn}/send`);
+  ok(sn.status === 200 && sn.json.entry?.state === "handed" && sn.json.entry.handedWhile === "prompt", `send now while blocked → 200 handed (${sn.status}, ${sn.json.entry?.state})`);
+  ok(await until(() => typed().includes("马上发"), 2000), "…and the fixture received it");
+  sn = await api("POST", `/api/sessions/${id}/outbox/${idsn}/send`);
+  ok(sn.status === 409 && /handed/.test(sn.json.error), "send of a handed entry → 409");
+  await setState(id, "idle");
 
   console.log("\n6. validation");
   const bad = [
@@ -211,7 +288,7 @@ async function main() {
   ok(typed().filter((l) => l === "x").length === 0, "nothing pasted by the refused requests");
 
   console.log("\n7. cap + wire clipping + auth");
-  await setState(id, "working");
+  await setState(id, "blocked");
   const big = "字".repeat(600);
   const idbig = rid();
   a = await msg(id, { text: big, requestId: idbig, when: "auto" });
@@ -253,7 +330,7 @@ async function main() {
   ok(await until(() => !onDisk(id).outbox?.some((e) => e.id === idt), 2000, 250), "…on disk too");
 
   console.log("\n9. restart: queued survives, a `sending` entry becomes uncertain and is never delivered");
-  await setState(id, "working");
+  await setState(id, "blocked");
   const idq2 = rid();
   await msg(id, { text: "after-restart", requestId: idq2, when: "auto" });
   await killServer();
@@ -284,7 +361,7 @@ async function main() {
   ok(a.status === 409 && a.json.entry?.state === "failed" && /prompt/.test(a.json.error), `409 failed (${a.status}: ${a.json?.error})`);
   b = await msg(id, { text: "echo pwned", requestId: idf, when: "now" });
   ok(b.status === 409 && b.json.replay === true && b.json.entry?.state === "failed", "replay of a failed entry is 409 with the entry");
-  await setState(id, "working");
+  await setState(id, "blocked");
   const idf2 = rid();
   await msg(id, { text: "echo queued-pwned", requestId: idf2, when: "auto" });
   await setState(id, "idle");
@@ -311,7 +388,7 @@ async function main() {
   await api("DELETE", `/api/sessions/${id}/outbox/${idp}`);
 
   console.log("\n12. a record that cannot be saved is not queued (a 500 is never followed by a delivery)");
-  await setState(id, "working");
+  await setState(id, "blocked");
   chmodSync(join(WS, ".hadron", "agents"), 0o500);
   const idsf = rid();
   const sf = await msg(id, { text: "SAVE-FAIL", requestId: idsf, when: "auto" });

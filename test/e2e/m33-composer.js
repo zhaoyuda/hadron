@@ -16,10 +16,12 @@
  *     the user bubble appears, the row is gone, the entry deleted, the draft
  *     cleared; a multi-line Chinese paste reaches claude line by line;
  *     typing right after Send stays in the composer
- *   - working → "Send after this turn" (queued on the record, nothing typed),
- *     idle again → delivered; × cancels a queued one, nothing ever typed;
- *     switching to another agent and back keeps the queued row; blocked →
- *     queued, nothing typed into the dialog
+ *   - working → pasted at once (claude queues typed input during a turn and
+ *     reads it with its next step); blocked → "Send after this turn" (queued
+ *     on the record, nothing typed into the dialog), idle again → delivered;
+ *     × cancels a queued one, nothing ever typed; switching to another agent
+ *     and back keeps the queued row; two queued → "Merge" folds them into one
+ *     message; "Send now" forces a queued one out while blocked
  *   - the POST lost on the wire → "Not sure this was sent", never resent on
  *     its own, "Send again" delivers exactly once
  *   - an image pasted into the composer is uploaded and its path inserted
@@ -164,14 +166,22 @@ try {
   r.ok(await until(async () => (await draft())?.text === "接着打"), "…and is the draft now");
   r.ok(typed().join("\n").includes("第一条") && typed().join("\n").includes("第二行"), "claude's log has both lines");
 
-  // ── queued while working ──
+  // ── working: delivered at once (claude queues typed input during a turn) ──
   await ta.fill("");
   await api("PATCH", "/api/sessions/alpha", { state: "working" });
-  await ta.type("等一下再发", { delay: 20 });
+  await ta.type("干活时也发", { delay: 20 });
   await ta.press("Enter");
   const row = chat.locator(".ob-row");
-  r.ok(await until(async () => (await row.count()) === 1 && (await row.locator(".ob-st").textContent()) === "Send after this turn"), `while working the row says "${await row.locator(".ob-st").textContent().catch(() => "")}"`);
-  r.ok((await outbox())[0]?.state === "queued" && !typed().join("\n").includes("等一下再发"), "…queued on the record, nothing typed into the pane");
+  r.ok(await until(async () => typed().join("\n").includes("干活时也发"), 15000), "while working the message is pasted at once — claude reads it with its next step");
+  r.ok(await until(async () => (await row.count()) === 0 && (await chat.locator(".ci-user").count()) === before + 2), "…the bubble appears and the row goes");
+  await api("PATCH", "/api/sessions/alpha", { state: "idle" });
+
+  // ── queued while blocked (a dialog is up: a paste would land in it) ──
+  await api("PATCH", "/api/sessions/alpha", { state: "blocked" });
+  await ta.type("等一下再发", { delay: 20 });
+  await ta.press("Enter");
+  r.ok(await until(async () => (await row.count()) === 1 && (await row.locator(".ob-st").textContent()) === "Send after this turn"), `while blocked the row says "${await row.locator(".ob-st").textContent().catch(() => "")}"`);
+  r.ok((await outbox())[0]?.state === "queued" && !typed().join("\n").includes("等一下再发"), "…queued on the record, nothing typed into the dialog");
   // switching away and back keeps it
   await page.locator(`.dk[data-sid="beta"]`).first().click();
   await page.locator("#af-chat-btn").click();
@@ -181,10 +191,10 @@ try {
   r.ok(await until(async () => (await row.count()) === 1 && (await row.locator(".ob-text").textContent()) === "等一下再发"), "back on Alpha the queued row is still there");
   await api("PATCH", "/api/sessions/alpha", { state: "idle" });
   r.ok(await until(async () => typed().join("\n").includes("等一下再发"), 15000), "idle again → the server delivers it");
-  r.ok(await until(async () => (await row.count()) === 0 && (await chat.locator(".ci-user").count()) === before + 2), "…the bubble appears and the row goes");
+  r.ok(await until(async () => (await row.count()) === 0 && (await chat.locator(".ci-user").count()) === before + 3), "…the bubble appears and the row goes");
 
   // × cancels a queued one
-  await api("PATCH", "/api/sessions/alpha", { state: "working" });
+  await api("PATCH", "/api/sessions/alpha", { state: "blocked" });
   await ta.type("这条不要", { delay: 20 });
   await ta.press("Enter");
   r.ok(await until(async () => (await row.count()) === 1 && (await row.locator(".ob-st").textContent()) === "Send after this turn"), "a second queued message");
@@ -194,7 +204,7 @@ try {
   await wait(2500);
   r.ok(!typed().join("\n").includes("这条不要"), "…and it is never delivered");
 
-  // blocked → queued, not typed into the dialog
+  // blocked → queued, Edit takes it back
   await api("PATCH", "/api/sessions/alpha", { state: "blocked" });
   await ta.type("先别回答", { delay: 20 });
   await ta.press("Enter");
@@ -204,6 +214,27 @@ try {
   await row.locator(".ob-act[data-act=edit]").click();
   r.ok(await until(async () => (await row.count()) === 0 && (await ta.inputValue()) === "先别回答"), "Edit takes it back into the composer");
   await ta.fill("");
+
+  // two queued → Merge folds them into one; Send now forces it out while blocked
+  await api("PATCH", "/api/sessions/alpha", { state: "blocked" });
+  // The first one is longer than the wire clips to (500 chars): after a reload
+  // the rows come off the sessions list clipped, and Merge must still send
+  // the whole text.
+  const long = `第一句${"长".repeat(600)}`;
+  await ta.fill(long); await ta.press("Enter");
+  await ta.type("第二句", { delay: 20 }); await ta.press("Enter");
+  r.ok(await until(async () => (await chat.locator(".ob-row:not(.ob-merge)").count()) === 2 && (await chat.locator(".ob-act[data-act=merge]").count()) === 1), "two messages queued → a Merge button under them");
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.locator(`.dk[data-sid="alpha"]`).first().click();
+  await page.locator("#af-chat-btn").click();
+  await ta.waitFor({ state: "visible", timeout: 5000 });
+  r.ok(await until(async () => (await chat.locator(".ob-row:not(.ob-merge)").count()) === 2 && (await chat.locator(".ob-act[data-act=merge]").count()) === 1), "after a reload the rows come off the sessions list (the long one clipped on that wire) with the Merge button");
+  await chat.locator(".ob-act[data-act=merge]").click();
+  r.ok(await until(async () => (await chat.locator(".ob-row:not(.ob-merge)").count()) === 1 && (await outbox()).length === 1 && (await outbox())[0].state === "queued" && (await outbox())[0].text === `${long}\n\n第二句`), "Merge → one queued message with both whole texts, in order (the record has one entry)");
+  r.ok((await chat.locator(".ob-act[data-act=merge]").count()) === 0 && !typed().join("\n").includes("第一句"), "…no Merge button for one row, nothing typed yet");
+  await chat.locator(".ob-act[data-act=now]").click();
+  r.ok(await until(async () => typed().join("\n").includes(long) && typed().join("\n").includes("第二句"), 15000), "Send now → pasted at once although the pane is blocked, the long text whole");
+  r.ok(await until(async () => (await chat.locator(".ob-row").count()) === 0), "…the bubble appears and the row goes");
   await api("PATCH", "/api/sessions/alpha", { state: "idle" });
 
   // ── the POST lost on the wire ──

@@ -4,9 +4,12 @@
 // picture and a server restart loses nothing.
 //
 //   { id, text, at, state, deviceId?, handedAt?, error? }
-//   state: queued     waiting for the agent to be at its prompt (it was working
-//                     or blocked when the message arrived — a paste then would
-//                     land in claude's own queue or in a permission dialog)
+//   state: queued     waiting for the agent's dialog to go away (it was blocked
+//                     when the message arrived — a paste then would land in the
+//                     permission dialog). A WORKING pane is pasted at once:
+//                     claude queues input typed during a turn and reads it with
+//                     its next step (prod 2026-11-08: a turn of continuous tool
+//                     calls never showed the prompt, two messages waited an hour)
 //          sending    the paste is in flight right now
 //          handed     pasted + Enter pressed; the conversation will show it as
 //                     a user turn once claude records it (the client matches the
@@ -56,7 +59,10 @@ export function safeOutbox(list, { boot = false } = {}) {
     const clean = { id: e.id, text: e.text, at: safeAt(e.at) || new Date().toISOString(), state: e.state };
     if (typeof e.deviceId === "string" && ID_RE.test(e.deviceId)) clean.deviceId = e.deviceId;
     if (typeof e.conversationId === "string" && /^[a-f0-9]{8,64}$/.test(e.conversationId)) clean.conversationId = e.conversationId;
-    if (e.state === "handed") clean.handedAt = safeAt(e.handedAt) || clean.at; // never a handed entry that cannot age out
+    if (e.state === "handed") {
+      clean.handedAt = safeAt(e.handedAt) || clean.at; // never a handed entry that cannot age out
+      if (e.handedWhile === "working" || e.handedWhile === "prompt") clean.handedWhile = e.handedWhile;
+    }
     if ((e.state === "failed" || e.state === "uncertain") && typeof e.error === "string") clean.error = e.error.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 200);
     if (boot && clean.state === "sending") { clean.state = "uncertain"; clean.error = "the server restarted while this was being delivered — it may or may not have reached claude"; }
     out.push(clean);
@@ -109,9 +115,11 @@ export function outboxWire(list) {
   return list.map((e) => ({ ...e, text: e.text.length > WIRE_TEXT ? e.text.slice(0, WIRE_TEXT) : e.text, chars: e.text.length, ...(e.text.length > WIRE_TEXT ? { truncated: true } : {}) }));
 }
 
-// Is the agent at its prompt, where a paste becomes claude's next turn?
-// Unknown/unset states count as the prompt: only a pane KNOWN to be busy waits.
-export const atPrompt = (state) => state !== "working" && state !== "blocked";
+// Can a paste reach claude's input line? At the prompt it becomes the next
+// turn; while working claude queues it for its next step; only a dialog
+// (blocked) would swallow it. Unknown/unset states count as the prompt: only a
+// pane KNOWN to show a dialog waits.
+export const atPrompt = (state) => state !== "blocked";
 // …but only once the detector has looked at the pane since boot: `state` is
 // not persisted (every agent loads as idle), so for the first seconds after a
 // restart "idle" means nothing. A 5-s manual PATCH of the state (the override

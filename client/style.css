@@ -3028,6 +3028,7 @@ mark.ann-mark.ann-mark-flash { background: rgba(210, 153, 34, .8); outline: 1px 
 .ob-meta { display: flex; gap: 8px; align-items: baseline; white-space: nowrap; font-size: 11px; color: var(--text3); flex-shrink: 0; }
 .ob-act { cursor: pointer; color: var(--blue); }
 .ob-act:hover { text-decoration: underline; }
+.ob-merge { justify-content: center; border-style: solid; background: transparent; }
 .ob-pending .ob-st, .ob-sending .ob-st { color: var(--text3); }
 .ob-queued { border-style: solid; }
 .ob-stale { border-color: var(--yellow); } .ob-stale .ob-st { color: var(--yellow); }

@@ -43,7 +43,7 @@ function saveUIState() {
     openTabs[k] = [...(v instanceof Set ? v : [])];
   }
   // Save current session's state before persisting
-  perSessionTab[activeSessionId] = activeTab;
+  rememberTab();
   perSessionLayout[activeSessionId] = layoutMode;
   const state = {
     activeSessionId,
@@ -58,7 +58,8 @@ function saveUIState() {
     // would otherwise live in localStorage forever and pre-open a later namesake.
     deckStaleOpen: [...deckStaleOpen].filter((k) => liveStaleKeys().has(k)),
     deckShowStale,
-    chatFirst,
+    landingMigrated: true,
+    landing: chatFirst ? "chat" : "terminal",
     chatExpandAll,
     quotaShowFrom,
     currentTheme,
@@ -129,6 +130,18 @@ function restoreUIState() {
         openTabsPerSession[k] = new Set(v);
       }
     }
+    // The landing moved from the browser (chatFirst) to the workspace
+    // (`landing`, default chat). A state written before that has every agent
+    // on "terminal" — the old only landing, not a choice — which would hide
+    // the new default behind every card: forgotten once, then per-agent
+    // choices stand.
+    if (!state.landingMigrated) {
+      for (const [k, v] of Object.entries(perSessionTab)) if (v === "terminal") delete perSessionTab[k];
+      for (const set of Object.values(openTabsPerSession)) set.delete("terminal");
+    }
+    // GET /api/workspace failed this load: the landing seen last time stands
+    // instead of a silent default.
+    if (!landingKnown && (state.landing === "chat" || state.landing === "terminal")) chatFirst = state.landing === "chat";
     if (state.deckSortMode) deckSortMode = state.deckSortMode;
     if (state.deckGroupBy) deckGroupBy = state.deckGroupBy;
     if (state.deckFilter === "needs" || state.deckFilter === "all") deckFilter = state.deckFilter;
@@ -137,13 +150,13 @@ function restoreUIState() {
     // an old value is dropped, not read as a group key.
     if (Array.isArray(state.deckStaleOpen)) deckStaleOpen = new Set(state.deckStaleOpen.filter((k) => typeof k === "string" && k.length <= 200));
     if (typeof state.deckShowStale === "boolean") deckShowStale = state.deckShowStale;
-    if (typeof state.chatFirst === "boolean") chatFirst = state.chatFirst;
+    // chatFirst is the workspace's `landing` (fetched before restore), not browser state.
     if (typeof state.chatExpandAll === "boolean") chatExpandAll = state.chatExpandAll;
     if (Array.isArray(QUOTA_SHOW_FROM) && QUOTA_SHOW_FROM.includes(state.quotaShowFrom)) quotaShowFrom = state.quotaShowFrom;
     if (state.currentTheme) currentTheme = state.currentTheme;
     if (state.notifyLevel) notifyLevel = state.notifyLevel;
     if (typeof state.sysNotify === "boolean") sysNotify = state.sysNotify;
-    activeTab = perSessionTab[activeSessionId] || (chatFirst ? "chat" : "terminal");
     layoutMode = perSessionLayout[activeSessionId] || "tabs";
+    activeTab = perSessionTab[activeSessionId] || defaultTab();
   } catch {}
 }

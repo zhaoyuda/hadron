@@ -42,7 +42,8 @@ let deckStaleAfter = "3d"; // "1d" | "3d" | "7d" | "never" — fold quiet agents
 const QUOTA_SHOW_FROM = [0, 30, 50]; // View → Quota: a window shows once this much of it is used
 let quotaShowFrom = 30;
 let deckShowStale = false; // View → Show Stale Agents: every group's stale row stays open
-let chatFirst = false; // View → Chat View First: an agent opens on its conversation, the terminal stays a tab
+let chatFirst = true;
+let landingKnown = false; // GET /api/workspace answered this load (else the cached landing in the ui state stands) // workspace `landing` (GET /api/workspace): "chat" → an agent opens on its conversation and the terminal is a tab opened on demand; "terminal" → the old Primary-first layout
 let deckStaleOpen = new Set(); // group keys whose stale row the operator opened (persisted)
 let currentTheme = "default"; // "default", "exploration"
 let notifyLevel = "all"; // "all" (sound+banner+flash), "banner" (banner+flash), "off"
@@ -70,9 +71,14 @@ async function init() {
   await fetchWorkspace();
   await fetchSessions();
   restoreUIState();
+  // The agent actually shown first (a fresh browser has none saved, a saved one
+  // may be archived since), THEN its tab and landing — before, a fresh browser
+  // opened the landing for agent null and its first split lost the chat.
+  if (!sessions.find((s) => s.id === activeSessionId) && sessions.length > 0) activeSessionId = sessions[0].id;
+  activeTab = perSessionTab[activeSessionId] || defaultTab(); // no saved choice for this agent → the workspace landing
+  openLanding();
   renderQuota(); // the first /api/quota reply can land before the restored threshold
   applyTheme(currentTheme);
-  if (!sessions.find((s) => s.id === activeSessionId) && sessions.length > 0) activeSessionId = sessions[0].id;
   restoreShellTabs();
   syncGroupList();
   prevSessionStates = snapshotSessionStates();
@@ -97,7 +103,34 @@ async function fetchWorkspace() {
     if (config.groups) workspaceGroups = config.groups;
     if (config.groupConfig) groupConfig = config.groupConfig;
     tmuxAlertsNtfy = !!(config.tmuxAlerts && config.tmuxAlerts.ntfy);
+    chatFirst = config.landing !== "terminal";
+    landingKnown = true;
   } catch {}
+}
+
+// Landing tab — a workspace setting (View → Chat View First), stored by the
+// server in .hadron/config.json as `landing`, default "chat": every browser
+// and the Mac shell open an agent the same way. The per-agent choice
+// (perSessionTab) still wins over it.
+function landingTab() { return chatFirst ? "chat" : "terminal"; }
+async function setLanding(tab) {
+  try {
+    const res = await fetch("/api/workspace", {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ landing: tab }),
+    });
+    if (!res.ok) throw new Error(`PATCH /api/workspace ${res.status}`);
+    const config = await res.json();
+    chatFirst = config.landing !== "terminal";
+  } catch (e) { console.error("Failed to save landing tab setting:", e); }
+}
+// Whether the Primary (terminal) tab is on the tab bar: always when the
+// terminal is the landing, otherwise only once opened (switchTab adds it to
+// the open set) or while it is the active tab.
+function primaryShown() {
+  if (!chatFirst) return true;
+  const open = openTabsPerSession[activeSessionId];
+  return activeTab === "terminal" || !!(open && open.has("terminal"));
 }
 
 // tmux Alerts via ntfy — a workspace setting (every browser sees the same
@@ -406,8 +439,13 @@ function renderWorkHeader() {
   let tabsHtml = "";
   if (showTabs) {
     const noHighlight = layoutMode !== "tabs";
-    const termActive = !noHighlight && activeTab === "terminal" ? " active" : "";
-    tabsHtml += `<div class="wh-tab${termActive}" data-tab="terminal">Primary</div>`;
+    if (primaryShown()) {
+      const termActive = !noHighlight && activeTab === "terminal" ? " active" : "";
+      // With chat as the landing the terminal is a tab like any other: it closes.
+      // In a split layout the terminal is always one of the panes, so it does not close.
+      const termX = chatFirst && layoutMode === "tabs" ? `<span class="wh-tab-x" data-close-tab="terminal">×</span>` : "";
+      tabsHtml += `<div class="wh-tab${termActive}" data-tab="terminal" title="The agent's terminal — claude's own screen"><span class="wh-tab-label">Primary</span>${termX}</div>`;
+    }
     openTabs.forEach((tab) => {
       const isActive = !noHighlight && activeTab === tab.id ? " active" : "";
       let iconHtml = "";
@@ -424,7 +462,9 @@ function renderWorkHeader() {
       const isArtifact = tab.id.startsWith("artifact:");
       const artCls = isArtifact ? " wh-tab-art" : "";
       const artData = isArtifact ? ` data-art-type="${esc(tab.type || 'file')}" data-art-value="${esc(tab.value || '')}"` : "";
-      tabsHtml += `<div class="wh-tab${artCls}${isActive}${hasDraft}" data-tab="${tab.id}"${artData} title="${esc(tab.label)}">${iconHtml}<span class="wh-tab-label">${esc(tab.label)}</span><span class="wh-tab-x" data-close-tab="${tab.id}">×</span></div>`;
+      // The landing tab has no ×: closing it would only land on itself.
+      const xHtml = tab.id === landingTab() && layoutMode === "tabs" ? "" : `<span class="wh-tab-x" data-close-tab="${tab.id}">×</span>`;
+      tabsHtml += `<div class="wh-tab${artCls}${isActive}${hasDraft}" data-tab="${tab.id}"${artData} title="${esc(tab.label)}">${iconHtml}<span class="wh-tab-label">${esc(tab.label)}</span>${xHtml}</div>`;
     });
   }
 
@@ -566,13 +606,17 @@ function mkLayoutIcon(mode) {
   return `<svg width="14" height="14" viewBox="0 0 14 14"><rect x="1" y="1" width="12" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.2"/><line x1="1" y1="7" x2="13" y2="7" stroke="currentColor" stroke-width="1.2"/></svg>`;
 }
 
+const preSplitTab = {}; // per agent: the active tab when a split was entered (this page only)
 function cycleLayout() {
   if (activeTab === "notes") saveNotes();
-  if (layoutMode === "tabs") layoutMode = "vsplit";
+  if (layoutMode === "tabs") { preSplitTab[activeSessionId] = activeTab; layoutMode = "vsplit"; }
   else if (layoutMode === "vsplit") layoutMode = "hsplit";
   else layoutMode = "tabs";
 
+  // A split puts the terminal first; back in tabs, the tab that was active
+  // before the split comes back (else the landing) — never the forced terminal.
   if (layoutMode !== "tabs") activeTab = "terminal";
+  else { activeTab = preSplitTab[activeSessionId] || defaultTab(); delete preSplitTab[activeSessionId]; }
 
   renderWorkHeader();
   renderWorkContent();
@@ -809,7 +853,9 @@ function getOpenTabs(session) {
   if (open.has("notes") || activeTab === "notes") {
     tabs.push({ id: "notes", label: "Notes" });
   }
-  if (open.has("chat") || activeTab === "chat") {
+  // The landing tab is always on the bar in the tabs layout; in a split the
+  // terminal is one pane already, so the chat is a tab like any other (closable).
+  if (open.has("chat") || activeTab === "chat" || (chatFirst && layoutMode === "tabs")) {
     tabs.push({ id: "chat", label: "Chat" });
   }
   if (open.has("changes") || activeTab === "changes") {
@@ -848,6 +894,23 @@ function getOpenTabs(session) {
   return tabs;
 }
 
+// The tab an agent opens on when nothing was chosen for it: the workspace landing
+// in the tabs layout; a split always has the terminal as its first pane.
+// The chat landing is an open tab, so a split shows it as a pane and not only as
+// the ×-less tab. The terminal needs no entry: it is always on screen when it is
+// the landing, and one in the open set would linger as a closable Primary chip
+// after a switch to chat-first.
+function openLanding() { if (landingTab() !== "terminal") openTab(landingTab()); }
+
+function defaultTab() { return layoutMode === "tabs" ? landingTab() : "terminal"; }
+
+// Remember the active tab for this agent — except the terminal a split forces
+// (cycleLayout): persisting it would turn the agent terminal-landing for good.
+function rememberTab() {
+  if (layoutMode !== "tabs" && activeTab === "terminal") delete perSessionTab[activeSessionId];
+  else perSessionTab[activeSessionId] = activeTab;
+}
+
 function openTab(tabId) {
   if (!openTabsPerSession[activeSessionId]) openTabsPerSession[activeSessionId] = new Set();
   openTabsPerSession[activeSessionId].add(tabId);
@@ -865,7 +928,7 @@ function closeTab(tabId) {
   if (activeTab === "notes" || tabId === "notes") saveNotes();
   const open = openTabsPerSession[activeSessionId];
   if (open) open.delete(tabId);
-  if (activeTab === tabId) activeTab = "terminal";
+  if (activeTab === tabId) activeTab = layoutMode === "tabs" ? landingTab() : "terminal";
   renderWorkHeader();
   renderWorkContent();
   deferredFit();
@@ -1438,6 +1501,8 @@ function renderRightPanel() {
   if (chgBtn) chgBtn.addEventListener("click", () => switchTab("changes"));
   const chatBtn = document.getElementById("af-chat-btn");
   if (chatBtn) chatBtn.addEventListener("click", () => switchTab("chat"));
+  const termBtn = document.getElementById("af-term-btn");
+  if (termBtn) termBtn.addEventListener("click", () => switchTab("terminal"));
   const addBtn = document.getElementById("af-add-btn");
   if (addBtn) {
     addBtn.addEventListener("click", (e) => showArtifactPopover(e));
@@ -1822,7 +1887,11 @@ function buildArtifactsSection(activeSession) {
   });
 
   html += `<div class="af-add" id="af-add-btn" tabindex="0">+ pin a file</div>`;
-  html += `<div class="af-add af-chat-btn" id="af-chat-btn" tabindex="0" title="The conversation as claude recorded it: prompts, replies, tool calls with their results (read-only; the terminal stays the Primary tab)">💬 Chat</div>`;
+  // The landing tab is already open, so the button offers the OTHER view:
+  // chat-first shows "⌨ Primary" (the terminal, opened on demand), the
+  // terminal-first layout shows "💬 Chat" as before.
+  if (chatFirst) html += `<div class="af-add af-term-btn" id="af-term-btn" tabindex="0" title="The agent's terminal — claude's own screen: permission dialogs, raw output, typing straight into the pane (opens as the Primary tab)">⌨ Primary</div>`;
+  else html += `<div class="af-add af-chat-btn" id="af-chat-btn" tabindex="0" title="The conversation as claude recorded it: prompts, replies, tool calls with their results, with a composer to reply (the terminal stays the Primary tab)">💬 Chat</div>`;
   html += `<div class="af-add af-changes-btn" id="af-changes-btn" tabindex="0" title="What git sees in this agent's directory: changed files with +/− and a diff per file (read-only)">⎇ Changes</div>`;
 
 
@@ -2485,7 +2554,7 @@ function switchSession(sessionId) {
   if (activeTab === "notes") saveNotes();
 
   // Save current session's tab/layout state
-  perSessionTab[activeSessionId] = activeTab;
+  rememberTab();
   perSessionLayout[activeSessionId] = layoutMode;
 
   viewing = null; // the ack dwell restarts on the new agent
@@ -2498,8 +2567,9 @@ function switchSession(sessionId) {
   activeSessionId = sessionId;
 
   // Restore target session's tab/layout state
-  activeTab = perSessionTab[sessionId] || (chatFirst ? "chat" : "terminal");
   layoutMode = perSessionLayout[sessionId] || "tabs";
+  activeTab = perSessionTab[sessionId] || defaultTab();
+  openLanding();
 
   // Lay the TARGET agent out first and fit the terminal to it, so the size on
   // the new WS URL is the size this agent is actually shown at. Opening the WS
@@ -2789,7 +2859,8 @@ function cycleAgent(direction) {
 function cycleTab(direction) {
   const s = sessions.find((s) => s.id === activeSessionId);
   if (!s) return;
-  const allTabs = ["terminal", ...getOpenTabs(s).map((t) => t.id)];
+  const ids = getOpenTabs(s).map((t) => t.id);
+  const allTabs = primaryShown() ? ["terminal", ...ids] : ids;
   if (allTabs.length <= 1) return;
   const curIdx = allTabs.indexOf(activeTab);
   const next = (curIdx + direction + allTabs.length) % allTabs.length;
@@ -3199,12 +3270,14 @@ async function handleMenuAction(action, item) {
     saveUIState();
   } else if (action === "toggle-chat-first") {
     chatFirst = !chatFirst;
+    setLanding(landingTab()); // a workspace setting: every browser lands the same way after its next load
     // Agents remembered on the old default follow the new one; a tab chosen
     // on purpose (an artifact, a shell) is kept.
     const was = chatFirst ? "terminal" : "chat";
     for (const k of Object.keys(perSessionTab)) if (perSessionTab[k] === was) delete perSessionTab[k];
-    if (layoutMode === "tabs" && activeTab === was) switchTab(chatFirst ? "chat" : "terminal");
-    else saveUIState();
+    openLanding(); // in a split or on an artifact tab too: the new landing is reachable at once
+    if (layoutMode === "tabs" && activeTab === was) switchTab(landingTab());
+    else { renderWorkHeader(); renderRightPanel(); saveUIState(); }
   } else if (action === "set-quota-from") {
     const pct = Number(item.dataset.quotaFrom);
     quotaShowFrom = QUOTA_SHOW_FROM.includes(pct) ? pct : 30;

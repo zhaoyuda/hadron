@@ -11,7 +11,7 @@
  * script that boots a workspace, asserts, and exits non-zero on failure.
  */
 import { spawn, execFileSync } from "child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -33,9 +33,18 @@ export function freePort() {
 // for records that must already be on disk at load time (an agent whose
 // timestamps are days old, say). Boot never autostarts agents, so a seeded
 // agent gets a plain shell pane.
-export async function bootWorkspace({ name = "e2e", seed } = {}) {
+// `landing` is the workspace's landing tab (.hadron/config.json `landing`).
+// The product default is "chat"; the modules here were written against the
+// terminal-first layout (they type into Primary, time its paint, dwell on it
+// for the ack), so the harness pins "terminal" unless a module asks for
+// "chat" or `null` (no key: the server's default — M32 proves it is chat).
+export async function bootWorkspace({ name = "e2e", seed, landing = "terminal" } = {}) {
   const ws = mkdtempSync(join(tmpdir(), "hadron-e2e-"));
   execFileSync("node", [join(REPO, "scripts", "setup-workspace.js"), ws, "--name", name], { stdio: "ignore" });
+  if (landing !== null) {
+    const cfgPath = join(ws, ".hadron", "config.json");
+    writeFileSync(cfgPath, JSON.stringify({ ...JSON.parse(readFileSync(cfgPath, "utf-8")), landing }, null, 2) + "\n");
+  }
   if (seed) await seed(ws);
 
   const port = await freePort();

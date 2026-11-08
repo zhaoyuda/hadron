@@ -22,10 +22,10 @@
  *   - hostile HTML quoted in a reply is rendered inert (sanitised markdown);
  *     an open Thinking survives its message's re-render; scrolled up, then
  *     Primary and back → the reader's place is kept with the pill, a new
- *     exchange counts on it, the jump follows again; 1200 records appended at
- *     once (more than one tick's pages) all arrive — at the START of what
- *     arrived (a multi-screen arrival never lands the reader at its end) with
- *     the pill offering the latest; a server-side cache rebuild while the tab
+ *     exchange counts on it, the jump follows again; a multi-screen reply
+ *     while following keeps the view at the bottom, no pill; 1200 records
+ *     appended at once (more than one tick's pages) all arrive, the view at
+ *     the bottom; a server-side cache rebuild while the tab
  *     was away loses nothing (new generation) and keeps a scrolled-up reader's
  *     place, counting what was written meanwhile; an adopted second session
  *     id paints the new conversation
@@ -85,6 +85,8 @@ const env = await bootWorkspace({
 });
 let browser;
 const wait = (ms) => new Promise((res) => setTimeout(res, ms));
+// Chat View First is on from its section onwards: Primary is opened from the
+// file panel (or its tab, once open) and the chat is its own tab.
 async function until(fn, timeout = 12000) {
   const start = Date.now();
   while (Date.now() - start < timeout) { if (await fn()) return true; await wait(250); }
@@ -95,6 +97,10 @@ const api = (method, path, body) => fetch(`${env.baseUrl}${path}`, { method, hea
 try {
   browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  // Chat View First is on from its section onwards: Primary is opened from the
+  // file panel (or its tab, once open) and the chat is its own tab.
+  const openPrimary = async () => { if (await page.locator("#af-term-btn").count()) await page.locator("#af-term-btn").click(); else await page.locator(".wh-tab", { hasText: "Primary" }).click(); };
+  const backToChat = async () => { if (await page.locator("#af-chat-btn").count()) await page.locator("#af-chat-btn").click(); else await page.locator(".wh-tab", { hasText: "Chat" }).click(); };
   const pageErrors = [];
   page.on("pageerror", (e) => pageErrors.push(e.message));
   await page.goto(env.baseUrl, { waitUntil: "domcontentloaded" });
@@ -102,7 +108,7 @@ try {
   await page.locator(`.dk[data-sid="alpha"]`).waitFor({ state: "visible", timeout: 10000 });
   await page.locator(`.dk[data-sid="alpha"]`).first().click();
   await page.locator("#af-chat-btn").waitFor({ state: "visible", timeout: 5000 });
-  await page.locator("#af-chat-btn").click();
+  await backToChat();
   const chat = page.locator("#chat-container");
   r.ok(await until(async () => (await chat.locator(".ci-user").count()) === 1 && (await chat.locator(".ci-assistant").count()) === 3), `Chat tab paints the conversation: 1 prompt, 3 assistant messages (${await chat.locator(".ci").count()} items)`);
   r.ok(await chat.evaluate((el) => el.classList.contains("active")) && (await page.locator(".wh-tab.active").textContent()).includes("Chat"), "…the Chat tab is active in the work header");
@@ -166,15 +172,66 @@ try {
   await page.locator(`.dk[data-sid="${plain}"]`).first().click();
   r.ok(await until(async () => (await chat.evaluate((el) => el.classList.contains("active"))) && (await chat.locator(".chat-empty").count()) === 1), "with Chat View First, a new agent opens on its chat; a shell agent's says it has no conversation");
   r.ok((await chat.locator(".chat-empty").textContent()).includes("No conversation yet"), `…(${await chat.locator(".chat-empty").textContent()})`);
-  r.ok(await until(async () => (await page.locator(".wh-tab", { hasText: "Primary" }).count()) === 1), "…the terminal is still there as the Primary tab");
+  r.ok((await page.locator(".wh-tab", { hasText: "Primary" }).count()) === 0 && (await page.locator("#af-term-btn").count()) === 1 && (await page.locator("#af-chat-btn").count()) === 0, "…the Primary tab is hidden; the file panel offers ⌨ Primary instead of 💬 Chat");
+  r.ok((await (await api("GET", "/api/workspace")).json()).landing === "chat", "…the workspace config says landing: chat (every browser, every agent)");
+  await page.locator("#af-term-btn").click();
+  r.ok(await until(async () => (await page.locator(".wh-tab.active", { hasText: "Primary" }).count()) === 1 && (await page.locator('.wh-tab-x[data-close-tab="terminal"]').count()) === 1), "⌨ Primary opens the terminal as a closable tab");
+  await page.locator('.wh-tab-x[data-close-tab="terminal"]').click();
+  r.ok(await until(async () => (await page.locator(".wh-tab", { hasText: "Primary" }).count()) === 0 && (await chat.evaluate((el) => el.classList.contains("active")))), "…× on it goes back to the chat, Primary hidden again");
   await page.reload({ waitUntil: "domcontentloaded" });
   await page.locator(`.dk[data-sid="alpha"]`).waitFor({ state: "visible", timeout: 10000 });
   await page.locator(`.dk[data-sid="alpha"]`).first().click();
   r.ok(await until(async () => (await page.locator("#chat-container").evaluate((el) => el.classList.contains("active"))) && (await page.locator("#chat-container .ci-assistant").count()) === 1), "after a reload the preference holds and alpha lands on its chat");
+  r.ok((await page.locator(".wh-tab", { hasText: "Primary" }).count()) === 0, "…with no Primary tab");
   await page.locator("#menu-view").click();
   await page.locator('.menu-dropdown-item[data-action="toggle-chat-first"]').waitFor({ state: "visible", timeout: 3000 });
   r.ok(/✓/.test(await page.locator('.menu-dropdown-item[data-action="toggle-chat-first"]').textContent()), "…View menu shows it checked");
   await page.keyboard.press("Escape");
+  // In a split layout the terminal is one of the panes: Primary is on the bar
+  // without its ×, and the chat is an ordinary closable tab there.
+  await page.locator(".wh-layout-btn").click();
+  r.ok(await until(async () => (await page.locator(".wh-tab", { hasText: "Primary" }).count()) === 1 && (await page.locator('.wh-tab-x[data-close-tab="terminal"]').count()) === 0), "vsplit: the Primary tab is on the bar with no ×");
+  r.ok((await page.locator(".wh-tab", { hasText: "Chat" }).count()) === 1 && (await page.locator('.wh-tab-x[data-close-tab="chat"]').count()) === 1, "…the Chat tab is there as a closable tab");
+  await page.locator('.wh-tab-x[data-close-tab="chat"]').click();
+  r.ok(await until(async () => (await page.locator(".wh-tab", { hasText: "Chat" }).count()) === 0), "…and × closes it");
+  await page.locator(".wh-layout-btn").click(); await page.locator(".wh-layout-btn").click();
+  r.ok(await until(async () => (await page.locator(".wh-tab", { hasText: "Chat" }).count()) === 1 && (await page.locator('.wh-tab-x[data-close-tab="chat"]').count()) === 0 && (await page.locator("#chat-container").evaluate((el) => el.classList.contains("active")))), "back to tabs: the tab that was active before the split (Chat, the landing, no ×) is active again");
+  await page.locator(".wh-tab", { hasText: "Chat" }).click();
+  r.ok(await until(async () => (await page.locator(".wh-tab", { hasText: "Primary" }).count()) === 0 && (await chat.evaluate((el) => el.classList.contains("active")))), "…a click on Chat makes it active and Primary (never opened on purpose) hides again");
+  // A browser upgraded from before the workspace landing: its ui state has
+  // every agent on "terminal" (the old only landing) — forgotten once, so the
+  // new default shows; a choice made after that stands.
+  const ctx2 = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  await ctx2.addInitScript(() => { if (!localStorage.getItem("hadron-ui-state")) localStorage.setItem("hadron-ui-state", JSON.stringify({ activeSessionId: "alpha", perSessionTab: { alpha: "terminal" }, openTabs: { alpha: ["terminal"] } })); });
+  const page2 = await ctx2.newPage();
+  await page2.goto(env.baseUrl, { waitUntil: "domcontentloaded" });
+  await page2.locator(`.dk[data-sid="alpha"]`).waitFor({ state: "visible", timeout: 10000 });
+  await page2.locator(`.dk[data-sid="alpha"]`).first().click();
+  r.ok(await until(async () => (await page2.locator("#chat-container").evaluate((el) => el.classList.contains("active"))) && (await page2.locator(".wh-tab", { hasText: "Primary" }).count()) === 0), "a pre-landing ui state (every agent on terminal) is migrated: alpha opens on its chat, Primary hidden");
+  r.ok(await until(async () => { try { return JSON.parse(await page2.evaluate(() => localStorage.getItem("hadron-ui-state"))).landingMigrated === true; } catch { return false; } }), "…and the state is marked migrated");
+  // A split straight from the cold landing (the Chat tab never clicked): the
+  // landing is an open tab, so the split shows terminal + chat, not a
+  // full-screen terminal with no way back to the conversation.
+  await page2.locator(".wh-layout-btn").click();
+  r.ok(await until(async () => (await page2.locator(".split-pane .chat-scroll").count()) === 1 && (await page2.locator(".wh-tab", { hasText: "Chat" }).count()) === 1 && (await page2.locator(".wh-tab", { hasText: "Primary" }).count()) === 1), "vsplit from the cold landing: the chat is a pane beside the terminal, both on the bar");
+  // Leaving the split must not persist the terminal it forced as alpha's tab:
+  // a reload lands on the chat again.
+  await page2.locator(".wh-layout-btn").click(); await page2.locator(".wh-layout-btn").click();
+  await until(async () => JSON.parse(await page2.evaluate(() => localStorage.getItem("hadron-ui-state")) || "{}").perSessionLayout?.alpha === "tabs");
+  await page2.reload({ waitUntil: "domcontentloaded" });
+  await page2.locator(`.dk[data-sid="alpha"]`).waitFor({ state: "visible", timeout: 10000 });
+  r.ok(await until(async () => (await page2.locator("#chat-container").evaluate((el) => el.classList.contains("active")))), "…a visit to a split did not turn alpha terminal-landing: after a reload it opens on its chat");
+  await ctx2.close();
+  // A fresh browser (no ui state at all, nothing clicked): the landing is
+  // opened for the agent actually shown, so its first split keeps the chat.
+  const ctx3 = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const page3 = await ctx3.newPage();
+  await page3.goto(env.baseUrl, { waitUntil: "domcontentloaded" });
+  r.ok(await until(async () => (await page3.locator("#chat-container").evaluate((el) => el.classList.contains("active")).catch(() => false))), "a fresh browser lands on the chat of the agent it shows");
+  await page3.locator(".wh-layout-btn").click();
+  r.ok(await until(async () => (await page3.locator(".split-pane .chat-scroll").count()) === 1 && (await page3.locator(".wh-tab", { hasText: "Chat" }).count()) === 1), "…and its first split, with no card clicked, shows the chat beside the terminal");
+  r.ok(!Object.hasOwn(JSON.parse(await page3.evaluate(() => localStorage.getItem("hadron-ui-state")) || "{}").openTabs || {}, "null"), "…no open set is kept for agent null");
+  await ctx3.close();
 
   // ── more than a page: Load earlier prepends with the reader's place kept ──
   let bulk = "";
@@ -218,8 +275,8 @@ try {
   r.ok(await until(async () => (await chat2.locator(".chat-jump").isVisible())), "scrolled up → pill");
   const placeId = await sc2.evaluate((el) => { const top = el.getBoundingClientRect().top; return [...el.querySelectorAll(".ci")].find((c) => c.getBoundingClientRect().bottom > top).dataset.id; });
   const placeY = await page.locator(`#chat-container .ci[data-id="${placeId}"]`).evaluate((el) => el.getBoundingClientRect().top);
-  await page.locator(".wh-tab", { hasText: "Primary" }).click();
-  await page.locator("#af-chat-btn").click();
+  await openPrimary();
+  await backToChat();
   const sc3 = page.locator("#chat-container .chat-scroll");
   const placeY2 = await until(async () => Math.abs((await page.locator(`#chat-container .ci[data-id="${placeId}"]`).evaluate((el) => el.getBoundingClientRect().top)) - placeY) < 4);
   r.ok(placeY2 && (await page.locator("#chat-container .chat-jump").isVisible()), `Primary and back: the item the reader was on is where it was (${Math.round(placeY)}px), the pill is still there`);
@@ -231,16 +288,14 @@ try {
   appendFileSync(transcript, user("再来") + asst("mb2", { type: "text", text: "还在底部。" }, { stop_reason: "end_turn" }));
   r.ok(await until(async () => (await page.locator('#chat-container .ci-assistant[data-id="a:mb2"]').count()) === 1 && (await sc3.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 48)) && !(await page.locator("#chat-container .chat-jump").isVisible())), "…and the view follows the next exchange, no phantom pill");
 
-  // ── a multi-screen reply lands the reader at its START, not its end ──
-  const long = Array.from({ length: 60 }, (_, i) => `第 ${i + 1} 段：这是一段很长的中文回答，用来把视口撑开，看看阅读是不是从头开始。`).join("\n\n");
+  // ── a multi-screen reply while following keeps the view at the bottom ──
+  // (the operator's call over "land at its start", 2026-11-08: new output
+  // should scroll into view unless the reader scrolled up on purpose)
+  const long = Array.from({ length: 60 }, (_, i) => `第 ${i + 1} 段：这是一段很长的中文回答，用来把视口撑开，看看视图是不是跟到了底部。`).join("\n\n");
   appendFileSync(transcript, user("写长一点") + asst("ml", { type: "text", text: long }, { stop_reason: "end_turn" }));
   const ml = page.locator('#chat-container .ci-assistant[data-id="a:ml"]');
-  r.ok(await until(async () => (await ml.count()) === 1 && (await page.locator("#chat-container .chat-jump").isVisible())), "a reply taller than the view lands → the ↓ pill is up (reader paused at its start)");
-  const mlTop = await page.locator("#chat-container .ci-user", { hasText: "写长一点" }).evaluate((el) => el.getBoundingClientRect().top - el.closest(".chat-scroll").getBoundingClientRect().top);
-  r.ok(mlTop >= 0 && mlTop < 40 && (await sc3.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)) > 400, `…the arrival (its prompt first) starts at the top of the view (${Math.round(mlTop)}px), the reply's end is below the fold`);
-  r.ok((await page.locator("#chat-container .chat-jump").textContent()) === "↓", "…the pill offers the latest without a count (nothing arrived since)");
-  await page.locator("#chat-container .chat-jump").click();
-  r.ok(await until(async () => (await sc3.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 48))), "…click → bottom");
+  r.ok(await until(async () => (await ml.count()) === 1 && (await sc3.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 48))), "a reply taller than the view arrives → the view follows to its end");
+  r.ok((await sc3.evaluate((el) => el.scrollHeight)) > (await sc3.evaluate((el) => el.clientHeight)) * 2 && !(await page.locator("#chat-container .chat-jump").isVisible()), "…the reply is several screens tall and no pill is up (nothing unseen)");
 
   // ── a message that grows while the reader is away counts, and keeps its nodes ──
   await sc3.evaluate((el) => { el.scrollTop = 0; });
@@ -276,7 +331,7 @@ try {
   await live.locator(".chat-open-primary").click();
   r.ok(await until(async () => (await page.locator(".wh-tab.active").textContent()).includes("Primary")), "…Open Primary switches to the terminal tab");
   r.ok(await until(async () => { const x = await sessOf(); return x.ackRev === x.attentionRev; }, 6000), "…where the dwell acks it");
-  await page.locator("#af-chat-btn").click();
+  await backToChat();
   await api("PATCH", "/api/sessions/alpha", { state: "working" });
   appendFileSync(transcript, user("跑一下") + asst("mw", { type: "tool_use", id: "t-w", name: "Bash", input: { command: "ls -la" } }));
   r.ok(await until(async () => (await live.isVisible()) && /Working · last activity \d+s ago · running: Bash ls -la/.test(await live.textContent())), `working → "last activity Ns ago · running: Bash ls -la" (${(await live.textContent()).trim()})`);
@@ -309,24 +364,27 @@ try {
   // count below is the whole conversation)
   const earlierBtn = page.locator("#chat-container .chat-earlier");
   if (await earlierBtn.isVisible()) { await earlierBtn.click(); await until(async () => !(await earlierBtn.isVisible())); }
+  // Following: the prepend above keeps the reader's place, which can leave them
+  // paused — jump to the latest so the arrival below meets a following reader.
+  const jumpEl = page.locator("#chat-container .chat-jump");
+  if (await jumpEl.isVisible()) await jumpEl.click();
+  await until(async () => (await sc3.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 48)) && !(await jumpEl.isVisible()));
   let big = "";
   for (let i = 0; i < 600; i++) big += user(`大 ${i}`) + asst(`g${i}`, { type: "text", text: `回 ${i}` }, { stop_reason: "end_turn" });
   appendFileSync(transcript, big);
   const ci = page.locator("#chat-container .ci");
   let wireN = 0;
   r.ok(await until(async () => { wireN = (await (await api("GET", "/api/sessions/alpha/conversation")).json()).count; return wireN > 1400 && (await ci.count()) === wireN; }, 20000), `1200 records appended at once (more than 5 pages): every item arrives (${await ci.count()} of ${wireN})`);
-  r.ok((await page.locator("#chat-container .chat-jump").isVisible()) && /^↓ \d+ new$/.test(await page.locator("#chat-container .chat-jump").textContent()), `…the reader was left at the start of the arrival with the rest counted on the pill (${await page.locator("#chat-container .chat-jump").textContent()})`);
-  const g0 = page.locator('#chat-container .ci-assistant[data-id="a:g0"]');
-  r.ok((await g0.evaluate((el) => { const s = el.closest(".chat-scroll"); return s.scrollTop >= 0 && s.scrollHeight - s.scrollTop - s.clientHeight > 400; })), "…not at the bottom");
-  await page.locator("#chat-container .chat-jump").click();
-  r.ok(await until(async () => (await sc3.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 48))), "…jump → bottom");
+  // The view follows the tail on every arrival while following (operator's
+  // call, 2026-11-08: a reply longer than the screen still lands at its end).
+  r.ok(await until(async () => (await sc3.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 48)) && !(await jumpEl.isVisible())), "…a following reader is taken to the bottom, no pill");
 
   // ── the server rebuilt its cache while the chat was not polled: nothing is lost ──
   const genBefore = (await (await api("GET", "/api/sessions/alpha/conversation")).json()).generation;
-  await page.locator(".wh-tab", { hasText: "Primary" }).click();
+  await openPrimary();
   appendFileSync(transcript, user("离开时") + asst("ma", { type: "text", text: "你不在的时候。" }, { stop_reason: "end_turn" }));
   await wait(4000); // > idle + sweep: the server has dropped alpha's conversation cache
-  await page.locator("#af-chat-btn").click();
+  await backToChat();
   // The rebuilt cache is a new generation: the picture is dropped and the tail
   // re-paged (the earlier pages are a click away again) — never extended past
   // a hole.
@@ -341,10 +399,10 @@ try {
   r.ok(await until(async () => (await page.locator("#chat-container .chat-jump").isVisible())), "scrolled up in the rebuilt picture → pill");
   const keepId = await sc4.evaluate((el) => { const top = el.getBoundingClientRect().top; return [...el.querySelectorAll(".ci")].find((c) => c.getBoundingClientRect().bottom > top).dataset.id; });
   const keepY = await page.locator(`#chat-container .ci[data-id="${keepId}"]`).evaluate((el) => el.getBoundingClientRect().top);
-  await page.locator(".wh-tab", { hasText: "Primary" }).click();
+  await openPrimary();
   appendFileSync(transcript, user("又离开了") + asst("mc", { type: "text", text: "又写了一句。" }, { stop_reason: "end_turn" }));
   await wait(4000);
-  await page.locator("#af-chat-btn").click();
+  await backToChat();
   r.ok(await until(async () => (await page.locator('#chat-container .ci-assistant[data-id="a:mc"]').count()) === 1 && Math.abs((await page.locator(`#chat-container .ci[data-id="${keepId}"]`).evaluate((el) => el.getBoundingClientRect().top)) - keepY) < 4 && (await page.locator("#chat-container .chat-jump").textContent()) === "↓ 2 new", 15000), `back after a rebuild while scrolled up: the item the reader was on is where it was and the exchange written meanwhile is counted (${await page.locator("#chat-container .chat-jump").textContent()})`);
   await page.locator("#chat-container .chat-jump").click();
   r.ok(await until(async () => (await sc4.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 48))), "…jump → bottom");

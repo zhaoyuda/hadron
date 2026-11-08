@@ -717,7 +717,9 @@ function annCardHoverIn(mark) {
   if (annCardPinned) return;
   clearTimeout(annCardHideT); annCardHideT = null;
   clearTimeout(annCardShowT);
-  annCardShowT = setTimeout(() => annCardShow(mark, false), 150);
+  // The focus a mousedown gives the mark lands here too; a click 150 ms later pins the
+  // card, and this timer must not repaint it as the read-only hover card over the editor.
+  annCardShowT = setTimeout(() => { if (!annCardPinned) annCardShow(mark, false); }, 150);
 }
 
 function annCardHoverOut() {
@@ -755,6 +757,7 @@ function annCardShow(mark, pin, onlyId) {
   let comments = ids.map((id) => all.find((c) => c.id === id)).filter(Boolean);
   if (onlyId) comments = comments.filter((c) => c.id === onlyId);
   if (!comments.length) { annCardHide(); return; }
+  if (pin) { clearTimeout(annCardShowT); annCardShowT = null; }
   const el = annCardEnsure();
   annCardMark = mark;
   annCardPinned = !!pin;

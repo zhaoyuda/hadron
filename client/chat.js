@@ -22,8 +22,10 @@
 // every reader scroll while paused and restored when the tab is drawn again or
 // the server rebuilt its cache of the SAME conversation (earlier pages are
 // loaded until the anchored item is back, bounded); only a different
-// conversation goes to the bottom. A multi-screen arrival while following lands
-// the reader at the START of what arrived with a ↓ pill, never at its end. An
+// conversation goes to the bottom. While following, every arrival — a
+// multi-screen reply included — keeps the view at the bottom (the operator's
+// call, 2026-11-08: "有输出之后应该默认往下翻"); only a reader who scrolled up
+// is left alone, with the pill. An
 // assistant message is patched block by block (data-sig): a block whose content
 // did not change keeps its node, so a selection in it and an open Thinking
 // survive a tool result landing on the same message; the pill counts items that
@@ -130,12 +132,6 @@ function renderChatView(el, s) {
   };
   const follow = () => { m.paused = false; m.unseen = 0; m.anchor = null; toBottom(); drawJump(); };
   jump.addEventListener("click", follow);
-  // A multi-screen arrival while following: land at the START of it, paused,
-  // with the pill offering the latest — never at its end.
-  const landAt = (node) => {
-    scrollTo(scroll.scrollTop + (node.getBoundingClientRect().top - scroll.getBoundingClientRect().top) - 8);
-    m.paused = true; takeAnchor(); drawJump();
-  };
   el.querySelector(".chat-tools").addEventListener("click", (e) => {
     chatExpandAll = !chatExpandAll; if (typeof saveUIState === "function") saveUIState();
     e.target.textContent = chatExpandAll ? "Collapse tools" : "Expand tools";
@@ -240,20 +236,17 @@ function renderChatView(el, s) {
       list.innerHTML = "";
       if (fromCursor) return false;
     }
-    const hadItems = m.items.size > 0;
     // The cursor advances only as far as this page: a tick cut short resumes
     // from nextAfter, not from the server's head (items would be lost for good).
     m.conversationId = data.conversationId; m.generation = data.generation; m.rev = data.more ? data.nextAfter : data.rev;
     m.title = data.title; m.mode = data.mode; m.permissionMode = data.permissionMode;
     m.firstOrd = data.firstOrd; m.evicted = data.evicted || 0; m.skipped = data.skipped || 0; m.orphanResults = data.orphanResults || 0;
     m.readable = data.readable !== false; m.complete = data.complete !== false; m.reason = data.reason || null;
-    const h0 = scroll.scrollHeight;
     const { added, grew, first } = chatApplyItems(m, list, data.items || []);
     if (m.rebuild) return true; // placed, not scrolled: finishRebuild decides
     if (m.paused) { if (added + grew) { m.unseen += added + grew; drawJump(); } return true; }
     if (!first) return true; // an unchanged tick never moves the view
-    const growth = scroll.scrollHeight - h0;
-    if (hadItems && scroll.clientHeight > 0 && growth > scroll.clientHeight * 0.8) landAt(first); else toBottom();
+    toBottom(); // following: the latest stays on screen however much arrived
     return true;
   };
   // The tail of a rebuilt picture is in: put the reader back where they were,
@@ -575,7 +568,7 @@ function chatDecorateCode(root) {
 // records the turn (the user bubble appears) — or say honestly that it has
 // not. An uncertain send (no answer from the server) is never resent on its own.
 const CHAT_DRAFT_DEBOUNCE_MS = 500, CHAT_DRAFT_MAX_WAIT_MS = 3000, CHAT_DRAFT_RETRY_MS = 5000;
-const CHAT_HANDED_WARN_MS = 20000; // handed, no user turn seen for this long → "check Primary"
+const CHAT_HANDED_WARN_MS = 20000; // handed, no user turn seen for this long → "Handed to claude, not in the conversation yet"
 const CHAT_OUTBOX_GONE_MS = 10000; // a row removed here is ignored on the (3-s old) sessions list for this long
 let chatActiveComposer = null;
 function chatDeviceId() {
@@ -841,7 +834,19 @@ function chatComposer(el, m, sessionId, { list }) {
       case "queued": return row.stale ? "Written for an earlier conversation — held" : "Send after this turn";
       case "handed":
         if (m.readable === false || !m.conversationId) return "Handed to the terminal"; // no transcript to see it recorded in
-        return Date.now() - Date.parse(row.handedAt || row.at || 0) > CHAT_HANDED_WARN_MS ? "Handed to the terminal, not seen by claude yet — check Primary" : "Sent · waiting for claude…";
+        // Pasted while claude was working: claude takes it with its next step and
+        // records it as a prompt then (staging 2026-11-08: the bubble came at the
+        // end of a 25-s tool call), so the wait is as long as the turn — the
+        // warning counts only once the pane has left `working`.
+        let late = Date.now() - Date.parse(row.handedAt || row.at || 0) > CHAT_HANDED_WARN_MS;
+        if (row.handedWhile === "working") {
+          if (!m.handedIdleAt) m.handedIdleAt = new Map();
+          if (sess()?.state === "working") { m.handedIdleAt.delete(row.id); return "Delivered mid-turn · claude reads it with its next step"; }
+          if (!m.handedIdleAt.has(row.id)) m.handedIdleAt.set(row.id, Date.now());
+          late = Date.now() - m.handedIdleAt.get(row.id) > CHAT_HANDED_WARN_MS;
+          return late ? "Delivered mid-turn, not in the conversation — Primary shows what claude did with it" : "Delivered mid-turn · waiting for claude…";
+        }
+        return late ? "Handed to claude, not in the conversation yet" : "Sent · waiting for claude…";
       case "failed": return `Not delivered — ${row.error || "refused"}`;
       case "uncertain": return `Not sure this was sent — ${row.error || "the server did not answer"}`;
       default: return row.state;
@@ -862,11 +867,20 @@ function chatComposer(el, m, sessionId, { list }) {
       const st = document.createElement("span"); st.className = "ob-st"; st.textContent = label(row);
       meta.appendChild(st);
       const act = (name, lbl, title) => { const b = document.createElement("span"); b.className = "ob-act"; b.dataset.act = name; b.textContent = lbl; b.title = title; b.addEventListener("click", () => action(name, row)); meta.appendChild(b); };
-      if (row.state === "queued") { act("edit", "Edit", row.stale ? "Take it back into the composer, for this conversation" : "Take it back into the composer"); act("cancel", "×", "Cancel — not sent"); }
-      if (row.state === "failed") { act("retry", "Retry", "Send it again"); act("discard", "Discard", "Forget it"); }
-      if (row.state === "uncertain") { act("retry", "Send again", "Send it again — if the first one did land, claude gets it twice"); act("discard", "Discard", "Forget it"); }
+      if (row.state === "queued") { if (!row.stale) act("now", "Send now", "Send it now, dialog or not — into a dialog the text lands wherever its cursor is"); act("edit", "Edit", row.stale ? "Take it back into the composer, for this conversation" : "Take it back into the composer"); act("cancel", "×", "Cancel — not sent"); }
+      if (row.state === "failed") { act("retry", "Retry", "Send it again"); act("edit", "Edit", "Take it back into the composer"); act("discard", "Discard", "Forget it"); }
+      if (row.state === "uncertain") { act("retry", "Send again", "Send it again — if the first one did land, claude gets it twice"); act("edit", "Edit", "Take it back into the composer — if the first one did land, claude gets it twice"); act("discard", "Discard", "Forget it"); }
       div.appendChild(text); div.appendChild(meta);
       obEl.appendChild(div);
+    }
+    // Several messages waiting: one button folds them into a single queued
+    // message (in order, a blank line between) — one paste, one bubble.
+    const queued = rows.filter((r) => r.state === "queued" && !r.stale);
+    if (queued.length > 1) {
+      const bar = document.createElement("div"); bar.className = "ob-row ob-merge";
+      const b = document.createElement("span"); b.className = "ob-act"; b.dataset.act = "merge"; b.textContent = `Merge ${queued.length} into one message`; b.title = "Send them as one message, in this order";
+      b.addEventListener("click", () => action("merge", queued));
+      bar.appendChild(b); obEl.appendChild(bar);
     }
   };
   // The record may hold the entry even when this tab never heard so (a POST
@@ -888,7 +902,7 @@ function chatComposer(el, m, sessionId, { list }) {
       j = await r.json().catch(() => ({}));
     } catch { r = null; }
     if (!m.outbox.has(row.id)) return; // removed meanwhile
-    if (r && j.entry) { Object.assign(row, { state: j.entry.state, error: j.entry.error, handedAt: j.entry.handedAt, at: j.entry.at || row.at, stale: j.entry.stale, server: true }); }
+    if (r && j.entry) { Object.assign(row, { state: j.entry.state, error: j.entry.error, handedAt: j.entry.handedAt, handedWhile: j.entry.handedWhile, at: j.entry.at || row.at, stale: j.entry.stale, server: true }); }
     else {
       // No entry in the answer (or no answer): the POST may still have landed.
       // Ask the record before claiming anything.
@@ -899,8 +913,20 @@ function chatComposer(el, m, sessionId, { list }) {
     }
     drawOutbox();
   };
+  // A row that came off the sessions list carries the wire form (500 chars,
+  // `truncated`); Edit and Merge need the whole text — one GET /outbox fills
+  // every clipped row. False when the record could not be read.
+  const fullText = async (rows) => {
+    if (!rows.some((r) => r.truncated)) return true;
+    let list = null;
+    try { const g = await fetch(api("/outbox")); if (g.ok) list = (await g.json()).outbox || []; } catch {}
+    if (!list) return false;
+    for (const r of rows) { const e = list.find((x) => x.id === r.id); if (e) { r.text = e.text; r.truncated = false; } else r.gone = true; }
+    return rows.every((r) => !r.truncated || r.gone); // a row the record no longer has is the merge loop's 404, not a failed read
+  };
   const action = async (name, row) => {
     if (name === "cancel" || name === "edit") {
+      if (name === "edit" && !(await fullText([row]))) { status.textContent = "Could not read the whole message from the server — try again"; return; }
       let r = null;
       try { r = await fetch(api(`/outbox/${encodeURIComponent(row.id)}`), { method: "DELETE" }); } catch {}
       if (r && r.status === 409) { row.state = "sending"; drawOutbox(); return; } // being delivered right now
@@ -915,6 +941,45 @@ function chatComposer(el, m, sessionId, { list }) {
       const fresh = { id: chatRequestId(), text: row.text, state: "pending", at: new Date().toISOString(), server: false };
       m.outbox.set(fresh.id, fresh); post(fresh);
     } else if (name === "discard") remove(row, true);
+    else if (name === "now") {
+      row.state = "sending"; drawOutbox();
+      let r = null, j = {};
+      try { r = await fetch(api(`/outbox/${encodeURIComponent(row.id)}/send`), { method: "POST" }); j = await r.json().catch(() => ({})); } catch {}
+      if (!el.isConnected) return;
+      if (j.entry) Object.assign(row, { state: j.entry.state, error: j.entry.error, handedAt: j.entry.handedAt, handedWhile: j.entry.handedWhile });
+      else if (r && r.status === 404) { m.outbox.delete(row.id); m.outboxGone.set(row.id, Date.now()); }
+      else row.state = "queued"; // no answer: the record decides on the next tick
+      drawOutbox();
+    } else if (name === "merge") {
+      // `row` is the queued list, in order. Each is cancelled (one being
+      // delivered right now is left alone and out of the merge), then the
+      // texts go out as one new entry through the normal path.
+      if (!(await fullText(row))) { status.textContent = "Could not read the whole messages from the server — not merged"; return; }
+      const parts = [];
+      let stopped = false;
+      for (const q of row) {
+        let r = null, j = {};
+        try { r = await fetch(api(`/outbox/${encodeURIComponent(q.id)}`), { method: "DELETE" }); j = await r.json().catch(() => ({})); } catch {}
+        if (r && r.status === 409) { q.state = "sending"; continue; } // going out right now: not ours to fold in
+        if (r && r.status === 404) { m.outbox.delete(q.id); m.outboxGone.set(q.id, Date.now()); continue; } // already gone
+        if (!r || !r.ok) { stopped = true; break; } // the server did not answer: the rows after this one stay as they are
+        m.outbox.delete(q.id); m.outboxGone.set(q.id, Date.now());
+        // Only a message that was still waiting is folded in — one the record
+        // says went out (handed, failed) must not be sent a second time.
+        if (j.removed === "queued") parts.push(q.text);
+      }
+      if (!el.isConnected) return;
+      if (stopped) {
+        // Nothing is lost and nothing is reordered: what was taken off the
+        // record goes back into the composer, the rest stays queued.
+        if (parts.length) { ta.value = ta.value.trim() ? `${parts.join("\n\n")}\n${ta.value}` : parts.join("\n\n"); onInput(); ta.focus(); }
+        status.textContent = `Merge stopped — the server did not answer${parts.length ? `; ${parts.length} message${parts.length === 1 ? "" : "s"} taken back into the composer` : ""}`;
+        drawOutbox(); return;
+      }
+      if (!parts.length) { drawOutbox(); return; }
+      const fresh = { id: chatRequestId(), text: parts.join("\n\n"), state: "pending", at: new Date().toISOString(), server: false };
+      m.outbox.set(fresh.id, fresh); post(fresh);
+    }
   };
   const send = () => {
     const text = ta.value.replace(/\s+$/, "");
@@ -957,11 +1022,15 @@ function chatComposer(el, m, sessionId, { list }) {
         seen.add(e.id);
         if (m.outboxGone.has(e.id)) continue;
         const row = m.outbox.get(e.id);
-        if (row) { if (row.state !== "pending") Object.assign(row, { state: e.state, error: e.error, handedAt: e.handedAt, at: e.at, stale: e.stale, server: true }, fresh ? { text: e.text, truncated: false } : {}); }
-        else m.outbox.set(e.id, { id: e.id, text: e.text, truncated: !fresh && Boolean(e.truncated), state: e.state, at: e.at, error: e.error, handedAt: e.handedAt, stale: e.stale, server: true });
+        if (row) { if (row.state !== "pending") Object.assign(row, { state: e.state, error: e.error, handedAt: e.handedAt, handedWhile: e.handedWhile, at: e.at, stale: e.stale, server: true }, fresh ? { text: e.text, truncated: false } : {}); }
+        else m.outbox.set(e.id, { id: e.id, text: e.text, truncated: !fresh && Boolean(e.truncated), state: e.state, at: e.at, error: e.error, handedAt: e.handedAt, handedWhile: e.handedWhile, stale: e.stale, server: true });
       }
       if (fresh) for (const row of m.outbox.values()) if (row.server && row.state !== "pending" && !seen.has(row.id)) m.outbox.delete(row.id);
     }
+    // A handed row goes once claude recorded the text as a prompt — a mid-turn
+    // paste included (claude records it when it takes it, at its next step). A
+    // paste that got lost stays as a row that never goes, which is the truth;
+    // the label says so once the turn is over.
     for (const row of m.outbox.values()) if (row.state === "handed" && chatObserved(m, row)) remove(row, true);
     drawOutbox();
     if (local && !local.synced && !inflight && !timer && !conflict && Date.now() - lastTry > CHAT_DRAFT_RETRY_MS) sync();

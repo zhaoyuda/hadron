@@ -397,6 +397,24 @@ try {
   ok(afterClear && afterClear.history && afterClear.history.overCap === 0 && afterClear.history.uncapped === 2, `after the clear the pane is no longer over the cap and the uncapped count is unchanged (${JSON.stringify(afterClear && afterClear.history)})`);
   ok(hrow2 === null, "…and the yellow scrollback row is gone — the row can be cleared by its own advice");
 
+  console.log("[PATCH /api/workspace landing]");
+  {
+    const g0 = await (await fetch(`${BASE}/api/workspace`)).json();
+    ok(g0.landing === "chat", `a config without the key reads landing: chat — the chat view is the default landing (${g0.landing})`);
+    for (const bad of [{ landing: "primary" }, { landing: true }, { landing: null }, { landing: "" }]) {
+      const b = await fetch(`${BASE}/api/workspace`, { method: "PATCH", headers: H(), body: JSON.stringify(bad) });
+      ok(b.status === 400, `PATCH ${JSON.stringify(bad)} → 400 (${b.status})`);
+    }
+    let lp = await fetch(`${BASE}/api/workspace`, { method: "PATCH", headers: H(), body: JSON.stringify({ landing: "terminal" }) });
+    let lj = await lp.json();
+    ok(lp.status === 200 && lj.landing === "terminal", `PATCH { landing: "terminal" } → 200, echoed (${lj.landing})`);
+    const disk = JSON.parse(readFileSync(join(WS, ".hadron", "config.json"), "utf-8"));
+    ok(disk.landing === "terminal" && disk.groups[0] === "Workers", "persisted in .hadron/config.json, other keys kept");
+    ok((await (await fetch(`${BASE}/api/workspace`)).json()).landing === "terminal", "GET /api/workspace carries it (every browser lands on the terminal)");
+    lp = await fetch(`${BASE}/api/workspace`, { method: "PATCH", headers: H(), body: JSON.stringify({ landing: "chat" }) });
+    ok(lp.status === 200 && (await lp.json()).landing === "chat", `back to chat → 200`);
+  }
+
   console.log("[PATCH /api/workspace tmuxAlerts]");
   for (const bad of [{ tmuxAlerts: true }, { tmuxAlerts: { ntfy: "yes" } }, { tmuxAlerts: [] }, { tmuxAlerts: {} }, { tmuxAlerts: null }]) {
     const b = await fetch(`${BASE}/api/workspace`, { method: "PATCH", headers: H(), body: JSON.stringify(bad) });

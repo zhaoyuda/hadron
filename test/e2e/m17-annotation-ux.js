@@ -292,6 +292,9 @@ try {
     const s = (await list()).summary;
     return s.sent === 5 && s.draft === 0;
   }), "Send: all 5 drafts became sent");
+  // The client learns of the send from its own poll after the POST; the pinned card is
+  // painted from that picture, so wait for the bar to drop the Send button first.
+  await page.locator(".ann-send").waitFor({ state: "detached", timeout: 5000 });
   await page.locator(`mark.ann-mark[data-ann-id="${dup.id}"]`).click();
   await page.locator(".ann-card").waitFor({ state: "visible", timeout: 5000 });
   const sentCard = await page.evaluate(() => {
