@@ -94,3 +94,36 @@ export function reporter(title) {
     },
   };
 }
+
+// A terminal connect that has to CREATE an agent's tmux session runs a chain —
+// new-session → scrollback-cap chain (new-window + kill-window) → set-environment
+// ×2 → `respawn-pane -k` — and `has-session` answers after the first step. Keys
+// typed into the pane before the respawn land in a shell that is about to be
+// killed (M33 2026-11-08: on a paging tmux the chain took seconds and the fixture
+// claude died with that shell, so the send step pasted into bash). The shell
+// that stays is the respawned one, the only one born with HADRON_TOKEN in its
+// environment — wait for that before typing anything into a fresh session.
+export async function waitPaneProvisioned(tmuxName, timeoutMs = 20000) {
+  const t0 = Date.now();
+  const tmux = (args) => execFileSync("tmux", args, { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, TMUX: undefined } }).trim();
+  while (Date.now() - t0 < timeoutMs) {
+    try {
+      const pid = tmux(["display-message", "-p", "-t", tmuxName, "#{pane_pid}"]);
+      if (/^\d+$/.test(pid) && paneShellHasToken(pid)) return true;
+    } catch {}
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return false;
+}
+// Linux reads the pane shell's environment from /proc. Elsewhere (macOS `ps -E`
+// shows another process's environment only to root) the proxy is a pane pid that
+// has held still for a second — the respawn replaces the pid, so a stable one is
+// past the chain. Slower but never a false FAIL.
+let lastPanePid = null, lastPanePidAt = 0;
+function paneShellHasToken(pid) {
+  if (process.platform === "linux") {
+    try { return readFileSync(`/proc/${pid}/environ`, "latin1").split("\0").some((e) => e.startsWith("HADRON_TOKEN=")); } catch { return false; }
+  }
+  if (pid !== lastPanePid) { lastPanePid = pid; lastPanePidAt = Date.now(); return false; }
+  return Date.now() - lastPanePidAt >= 1000;
+}

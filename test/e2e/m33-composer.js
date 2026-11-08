@@ -32,7 +32,7 @@ import { execFileSync } from "child_process";
 import { join } from "path";
 import { tmpdir } from "os";
 import { randomUUID } from "crypto";
-import { bootWorkspace, authHeaders, reporter, screenshotDir } from "./harness.js";
+import { bootWorkspace, authHeaders, reporter, screenshotDir, waitPaneProvisioned } from "./harness.js";
 import { claudeProjectDir } from "../../server/resume.js";
 
 const r = reporter("M33 composer");
@@ -95,6 +95,7 @@ try {
   await page.locator(`.dk[data-sid="alpha"]`).first().click();
   // The terminal connect created alpha's tmux session; put a "claude" in it.
   r.ok(await until(() => { try { tmux(["has-session", "-t", tmuxName]); return true; } catch { return false; } }), "alpha's tmux session exists after the switch");
+  r.ok(await waitPaneProvisioned(tmuxName), "…and its pane is the provisioned shell (after the server's respawn-pane)");
   tmux(["send-keys", "-t", tmuxName, `exec ${FIXTURE} ${transcript} ${LOG}`, "Enter"]);
   r.ok(await until(() => tmux(["display-message", "-t", tmuxName, "-p", "#{pane_current_command}"]) === "claude"), "…and a process named claude is at its prompt");
   r.ok(await until(async () => (await (await api("GET", "/api/sessions")).json()).find((s) => s.id === "alpha")?.state === "idle"), "the detector reads it idle");

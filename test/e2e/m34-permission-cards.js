@@ -24,7 +24,7 @@ import { execFileSync } from "child_process";
 import { join } from "path";
 import { tmpdir } from "os";
 import { randomUUID } from "crypto";
-import { bootWorkspace, authHeaders, reporter, screenshotDir } from "./harness.js";
+import { bootWorkspace, authHeaders, reporter, screenshotDir, waitPaneProvisioned } from "./harness.js";
 import { claudeProjectDir } from "../../server/resume.js";
 
 const r = reporter("M34 permission cards");
@@ -80,6 +80,7 @@ try {
   await page.locator(`.dk[data-sid="alpha"]`).waitFor({ state: "visible", timeout: 10000 });
   await page.locator(`.dk[data-sid="alpha"]`).first().click();
   r.ok(await until(() => { try { tmux(["has-session", "-t", tmuxName]); return true; } catch { return false; } }), "alpha's tmux session exists after the switch");
+  r.ok(await waitPaneProvisioned(tmuxName), "…and its pane is the provisioned shell (after the server's respawn-pane)");
   tmux(["resize-window", "-t", tmuxName, "-x", "130", "-y", "40"]);
   tmux(["send-keys", "-t", tmuxName, `exec ${FIXTURE} ${LOG}`, "Enter"]);
   r.ok(await until(() => tmux(["display-message", "-t", tmuxName, "-p", "#{pane_current_command}"]) === "claude"), "…and a process named claude shows its dialog");

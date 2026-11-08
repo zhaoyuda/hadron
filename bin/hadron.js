@@ -930,6 +930,7 @@ async function main() {
       }
       // Errors the process guard absorbed: the server is up, but something
       // threw where nothing caught it — a bug to read about in server.log.
+      if (doctor && doctor.earlyInputDropped) local.push({ level: "yellow", message: `terminal: ${doctor.earlyInputDropped} input message${doctor.earlyInputDropped === 1 ? "" : "s"} typed before a terminal had attached ${doctor.earlyInputDropped === 1 ? "was" : "were"} dropped since boot (more than the early buffer holds while tmux answered) — server.log names the agent` });
       if (doctor && doctor.guard && (doctor.guard.uncaught || doctor.guard.unhandledRejections)) {
         const g = doctor.guard;
         local.push({ level: "yellow", message: `server survived ${g.uncaught} uncaught exception${g.uncaught === 1 ? "" : "s"} + ${g.unhandledRejections} unhandled rejection${g.unhandledRejections === 1 ? "" : "s"} since boot (last ${g.lastAt || "?"}: ${g.lastError || "?"}) — see .hadron/server.log (the row stays until the next restart)` });

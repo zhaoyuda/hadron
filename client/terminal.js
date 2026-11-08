@@ -235,10 +235,11 @@ function deferredFit() {
 let lastSentSize = "";
 function sendResize() {
   if (ws && ws.readyState === WebSocket.OPEN && term) {
-    const size = `${term.cols}x${term.rows}`;
+    const c = clampSize(term);
+    const size = `${c.cols}x${c.rows}`;
     if (size === lastSentSize) return;
     lastSentSize = size;
-    ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+    ws.send(JSON.stringify({ type: "resize", cols: c.cols, rows: c.rows }));
   }
 }
 
@@ -251,9 +252,16 @@ function sendResize() {
 // target's own even when the two agents' layouts differ (tabs vs vsplit); a
 // terminal that is not on screen at switch time (notes/artifact tab active)
 // still carries the previous size and corrects with one resize.
+// The server grants 10–1000 × 5–1000; asking for more and remembering the
+// request as lastSentSize would suppress every later fit while the pty sat
+// at the cap (a 1200-column xterm on a 5K display, small font).
+function clampSize(t) {
+  return { cols: Math.min(Math.max(t.cols, 10), 1000), rows: Math.min(Math.max(t.rows, 5), 1000) };
+}
 function wsSizeParam(t) {
   if (!t || !(t.cols >= 10) || !(t.rows >= 5)) return "";
-  return `&cols=${t.cols}&rows=${t.rows}`;
+  const c = clampSize(t);
+  return `&cols=${c.cols}&rows=${c.rows}`;
 }
 
 function connectWs(sessionId) {
@@ -283,7 +291,7 @@ function connectWs(sessionId) {
   // the program in the pane (Claude Code on a long session: seconds) had to
   // re-render twice before the screen settled after every agent switch.
   ws = new WebSocket(`${protocol}//${location.host}/ws?session=${encodeURIComponent(sessionId)}${wsTokenParam()}${wsSizeParam(term)}`);
-  lastSentSize = wsSizeParam(term) ? `${term.cols}x${term.rows}` : "";   // the pty starts at this size
+  lastSentSize = wsSizeParam(term) ? `${clampSize(term).cols}x${clampSize(term).rows}` : "";   // the pty starts at this size
 
   const statusEl = document.getElementById("status");
 

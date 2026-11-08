@@ -211,6 +211,12 @@ npm test
 #                            ptys — never a vacuous 0 === 0; the pty starts at the client's fitted
 #                            size (?cols=&rows= on the WS URL, clamped to 10-1000/5-1000, non-numeric → 80x24; shell-tab + primary WS reconnect with 1→4 s backoff) so an agent
 #                            switch is one attach at the window's current size, not 80x24 → resize;
+#                            messages that arrive before the pty exists (the handler is registered only after tmux
+#                            answered has-session + spawn; the browser's first fit lands ~30 ms after open) are kept:
+#                            the last early resize is the spawn size, early input is replayed in order (prod
+#                            2026-11-08: a lost resize left the pty at the URL size, xterm had moved on, a 269-col
+#                            pane wrapped into 134 cols until a reload — the client's same-size suppression never
+#                            re-sends);
 #                            a WS for an unknown or archived id is refused with close code 4404 — never
 #                            mints an agent, no pty, no shell tmux session, archived record untouched;
 #                            restore → attaches again; ?shell= must be sh<N> or vim-<ts> (the client's

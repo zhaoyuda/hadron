@@ -41,6 +41,13 @@ const __dirname = dirname(__filename);
 
 const app = express();
 const server = createServer(app);
+// Node closes an idle keep-alive socket after 5 s by default. A client that
+// cannot run its timers meanwhile (the e2e harness blocks in a synchronous
+// `hadron spawn` for the length of tmux's creation chain) reuses the socket
+// the server just closed → "fetch failed" (M3 2026-11-08, when tmux calls took
+// 700 ms each). 65 s is the usual remedy: longer than any client-side stall.
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 66_000; // must exceed keepAliveTimeout
 
 // Auth state — populated in the listen() callback once the workspace (.hadron) exists.
 let AUTH_TOKEN = null;
@@ -653,7 +660,7 @@ function ensureDefaults() {
 // `hadron doctor` compare it against the working tree.
 let PROVENANCE = null;
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true, pid: process.pid, livePtys: livePtys.size, liveSessions: sessions.size, wsClients: wss.clients.size, ...(heartbeat ? heartbeat.status() : {}), ...(PROVENANCE || {}), tmux: tmuxReport(), guard: { uncaught: crashGuard.uncaught, unhandledRejections: crashGuard.unhandledRejections, lastAt: crashGuard.lastAt } });
+  res.json({ ok: true, pid: process.pid, livePtys: livePtys.size, earlyInputDropped, liveSessions: sessions.size, wsClients: wss.clients.size, ...(heartbeat ? heartbeat.status() : {}), ...(PROVENANCE || {}), tmux: tmuxReport(), guard: { uncaught: crashGuard.uncaught, unhandledRejections: crashGuard.unhandledRejections, lastAt: crashGuard.lastAt } });
 });
 
 // GET but AUTHENTICATED: requireAuth waves GET through, and this returns per-agent
@@ -3397,17 +3404,25 @@ function tmuxReport() {
   if (Date.now() - ntfyStatusCache.at > 5000) ntfyStatusCache = { at: Date.now(), value: { enabled: tmuxAlertsEnabled(), topicReadable: readNtfyTopic() !== null } };
   return { ...tmuxStats(), busyRefusals: tmuxBusyRefusals, historyCapFailures, ...tmuxHealth.snapshot(), ntfy: { ...ntfyStatusCache.value } };
 } // /api/health
+// Resize messages are bounded like the URL size (10–1000 × 5–1000); a shape that
+// is not two integers is ignored, never clamped into existence.
+function clampPtySize(cols, rows) {
+  if (!Number.isInteger(cols) || !Number.isInteger(rows)) return null;
+  return { cols: Math.min(Math.max(cols, 10), 1000), rows: Math.min(Math.max(rows, 5), 1000) };
+}
+// Input buffered before the pty exists is capped by BYTES (a message has no
+// bounded size), and the listener comes off on every refusal path too.
+const EARLY_INPUT_MAX_BYTES = 8192;
+let earlyInputDropped = 0; // /api/health + a yellow doctor row
 function ptySizeFromQuery(params) {
   // Clamp rather than reject an out-of-range value: a 25%-zoomed browser on a
   // wide monitor asks for >1000 cols, and falling back to 80x24 there would
   // silently reinstate the double-resize on exactly the widest clients.
-  const n = (k, lo, hi) => {
+  const n = (k) => {
     const v = params.get(k);
-    if (v == null || !/^\d{1,5}$/.test(v)) return null;
-    return Math.min(Math.max(Number(v), lo), hi);
+    return v != null && /^\d{1,5}$/.test(v) ? Number(v) : null;
   };
-  const cols = n("cols", 10, 1000), rows = n("rows", 5, 1000);
-  return cols && rows ? { cols, rows } : { ...PTY_DEFAULT_SIZE };
+  return clampPtySize(n("cols"), n("rows")) || { ...PTY_DEFAULT_SIZE };
 }
 
 // The whole connect path is async (tmux answers off the event loop) and
@@ -3427,6 +3442,30 @@ async function handleTerminalConnection(ws) {
   const isShell = !!shellName;
   const effectiveTmuxName = isShell ? `${TMUX_PREFIX}-${sessionId}-${shellName}` : tmuxSessionName(sessionId);
 
+  // Messages that arrive before the pty exists. The real handler is registered
+  // only after tmux has answered has-session/new-session (100–300 ms on a loaded
+  // server) and the pty is spawned; the client's first fit after `open` fires
+  // ~30 ms in. Anything sent in that window used to be dropped on the floor —
+  // and the client's same-size suppression (lastSentSize) never re-sent a lost
+  // resize, so the pty stayed at the URL's size while xterm had already moved on:
+  // a 269-column pane wrapped into a 134-column xterm until a reload (prod
+  // 2026-11-08, Mac, agent in a vsplit). Keep the last resize as the pty's spawn
+  // size and replay input in order once the pty is up.
+  const early = { size: null, input: [], bytes: 0, dropped: 0 };
+  const earlyListener = (msg) => {
+    try {
+      const m = JSON.parse(msg.toString());
+      if (m.type === "resize") {
+        const sz = clampPtySize(m.cols, m.rows);
+        if (sz) early.size = sz;
+      } else if (m.type === "input" && typeof m.data === "string") {
+        if (early.bytes + m.data.length <= EARLY_INPUT_MAX_BYTES) { early.input.push(m.data); early.bytes += m.data.length; } else early.dropped++;
+      }
+    } catch {}
+  };
+  ws.on("message", earlyListener);
+  const refuse = () => ws.off("message", earlyListener); // every path that returns without a pty
+
   console.log(`WebSocket connected for session: ${sessionId}${isShell ? ` (shell: ${shellName})` : ""}`);
 
   ensureDefaults();
@@ -3443,6 +3482,7 @@ async function handleTerminalConnection(ws) {
       ws.send(JSON.stringify({ type: "output", data: `\r\n\x1b[33mThis agent is ${reason === "archived" ? "archived" : "not on this server"} — terminal closed.\x1b[0m\r\n` }));
       ws.close(WS_CLOSE_AGENT_GONE, reason);
     }
+    refuse();
     return;
   }
 
@@ -3462,6 +3502,7 @@ async function handleTerminalConnection(ws) {
       ws.send(JSON.stringify({ type: "output", data: `\r\n\x1b[33mtmux is busy — ${busy ? `no answer within ${Math.round(TMUX_TIMEOUT_MS / 1000)} s` : e.message}; retrying…\x1b[0m\r\n` }));
       ws.close(WS_CLOSE_TMUX_BUSY, "tmux busy");
     }
+    refuse();
     return;
   }
   // The client may have left while tmux was answering (an editor closed
@@ -3472,11 +3513,13 @@ async function handleTerminalConnection(ws) {
   if (ws.readyState !== ws.OPEN) {
     if (isEditor && created) await tmuxSafeAsync(["kill-session", "-t", effectiveTmuxName]);
     console.log(`WebSocket closed before attach for ${sessionId}${isShell ? ` (${isEditor ? "editor" : "shell"}: ${shellName})` : ""}${isEditor && created ? " — vim tmux session killed" : ""}`);
+    refuse();
     return;
   }
   if (!sessions.has(sessionId)) { // archived meanwhile: archive killed its sessions, do not leave one we just created
     if (created) await tmuxSafeAsync(["kill-session", "-t", effectiveTmuxName]);
     try { ws.close(WS_CLOSE_AGENT_GONE, "unknown"); } catch {}
+    refuse();
     return;
   }
 
@@ -3495,8 +3538,8 @@ async function handleTerminalConnection(ws) {
       tmuxArgv(["-u", "attach-session", "-t", effectiveTmuxName]),
       {
         name: "xterm-256color",
-        cols: (ws.ptySize || PTY_DEFAULT_SIZE).cols,
-        rows: (ws.ptySize || PTY_DEFAULT_SIZE).rows,
+        cols: (early.size || ws.ptySize || PTY_DEFAULT_SIZE).cols,   // a resize that beat the pty wins over the URL
+        rows: (early.size || ws.ptySize || PTY_DEFAULT_SIZE).rows,
         cwd: resolveAgentCwd(sessions.get(sessionId)),
         env: {
           ...process.env,
@@ -3544,24 +3587,38 @@ async function handleTerminalConnection(ws) {
     }
   });
 
+  const onInput = (data) => {
+    pty.write(data);
+    monitors.get(sessionId)?.wake();   // keystrokes: end any capture backoff
+    if (!isShell && isKeystroke(data)) ackByInput(sessionId); // typing into the agent's pane = you have seen it
+  };
   ws.on("message", (msg) => {
     try {
       const message = JSON.parse(msg.toString());
       if (message.type === "input") {
-        pty.write(message.data);
-        monitors.get(sessionId)?.wake();   // keystrokes: end any capture backoff
-        if (!isShell && isKeystroke(message.data)) ackByInput(sessionId); // typing into the agent's pane = you have seen it
+        onInput(message.data);
       } else if (message.type === "resize") {
-        const { cols, rows } = message;
         // Resize the pty only — tmux gets SIGWINCH and refits the window to this client
         // (window-size smallest, set in fitWindowToClients). Do NOT call `tmux resize-window`:
         // it pins window-size to manual and freezes the size, causing right-edge clipping.
-        pty.resize(cols, rows);
+        // Same contract as the URL and the early buffer; a bad shape is ignored (node-pty
+        // throws on 0x0, and the catch below would type the JSON into the pane).
+        const sz = clampPtySize(message.cols, message.rows);
+        if (sz) pty.resize(sz.cols, sz.rows);
       }
     } catch {
       pty.write(msg.toString());
     }
   });
+  // The real handler is on; hand over. Both registrations are synchronous, so
+  // no message can land between them. Input that arrived early goes in now, in
+  // order; the early resize was already the spawn size.
+  ws.off("message", earlyListener);
+  for (const data of early.input) onInput(data);
+  if (early.dropped) {
+    earlyInputDropped += early.dropped;
+    warnOnce(`early-input-dropped:${sessionId}`, `[ws] ${sessionId}${isShell ? ` (shell: ${shellName})` : ""}: ${early.dropped} input message(s) arrived before the terminal was ready and were dropped (buffer ${EARLY_INPUT_MAX_BYTES} bytes) — keystrokes typed into a terminal that had not attached yet are lost; \`hadron doctor\` counts them`);
+  }
 
   ws.on("close", () => {
     reapPty(pty);

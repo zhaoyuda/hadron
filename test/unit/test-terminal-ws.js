@@ -410,6 +410,45 @@ async function main() {
     }
   }
 
+  console.log("\n[messages sent before the pty exists are kept, not dropped]");
+  {
+    // The real message handler is registered only after tmux has answered and the
+    // pty is spawned; the browser's first fit after `open` lands before that.
+    // Before: that resize was lost and — the client suppressing same-size
+    // re-sends — the pty stayed at the URL size for the life of the connection
+    // (prod 2026-11-08: a 269-column pane wrapped into a 134-column xterm until
+    // a reload). Now the early resize is the spawn size and early input is
+    // replayed in order.
+    const size = () => { try { return tmuxQ(["display-message", "-p", "-t", `=hadron-${WS_NAME}-pty-sz:`, "#{window_width}x#{window_height}"]).trim(); } catch { return "?"; } };
+    const pane = () => { try { return tmuxQ(["capture-pane", "-p", "-t", `=hadron-${WS_NAME}-pty-sz:`]); } catch { return ""; } };
+    const marker = `early-${process.pid}`;
+    const ws = await new Promise((res, rej) => {
+      const w = new WebSocket(`ws://127.0.0.1:${PORT}/ws?session=pty-sz&cols=123&rows=41&token=${encodeURIComponent(TOKEN)}`);
+      const t = setTimeout(() => { try { w.close(); } catch {} rej(new Error("no output")); }, 10_000);
+      w.on("open", () => {   // before any output = before the pty exists
+        w.send(JSON.stringify({ type: "resize", cols: 97, rows: 31 }));
+        w.send(JSON.stringify({ type: "input", data: `echo ${marker}` }));
+        w.send(JSON.stringify({ type: "input", data: "\r" }));
+      });
+      w.on("message", () => { clearTimeout(t); res(w); }); w.on("error", rej);
+    });
+    // The window is one row shorter than the pty: tmux keeps the bottom row for its status line.
+    ok(await waitFor(size, "97x30"), `a resize sent before the first output sizes the pty — window 97x30, not the URL's 123x40 (got ${size()})`);
+    // The echo's OUTPUT is the marker alone on a line; the typed command line has "echo " in front of it.
+    ok(await waitFor(() => pane().split("\n").some((l) => l.trim() === marker), true), "input sent before the first output reaches the pane in order (the echo ran)");
+    // A live resize goes through the same validator as the URL and the early
+    // buffer. Before: {cols:0,rows:0} made node-pty throw and the catch typed the
+    // raw JSON into the pane as keystrokes.
+    ws.send(JSON.stringify({ type: "resize", cols: 0, rows: 0 }));
+    ws.send(JSON.stringify({ type: "resize", cols: "x", rows: 31 }));
+    ws.send(JSON.stringify({ type: "resize", cols: 5000, rows: 31 }));
+    ok(await waitFor(size, "1000x30"), `an over-range live resize is clamped to the cap (got ${size()})`);
+    ws.send(JSON.stringify({ type: "resize", cols: 91, rows: 31 }));
+    ok(await waitFor(size, "91x30"), `a valid live resize after the bad ones still lands (got ${size()})`);
+    ok(!pane().includes('"type":"resize"'), "a malformed live resize is ignored — never typed into the pane as text");
+    ws.close(); await waitFor(async () => (await health()).livePtys, 0);
+  }
+
   console.log("\n[an unknown or archived id is refused — never minted]");
   {
     // Before: wss "connection" created + saved an agent for ANY session id. A
