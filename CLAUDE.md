@@ -48,6 +48,8 @@ client/
 examples/             # Demo artifact files (md, py, csv, sql, ipynb) + sample-agent.json
 scripts/
   setup-workspace.js  # Interactive workspace initializer
+shell/
+  macos/              # Hadron.app: Swift + WKWebView around the web client (build.sh on a Mac, no Xcode project)
 test/
   unit/               # detectState/nextState fixtures + security HTTP suite (npm test)
   e2e/                # Playwright browser modules M1-M34 (npm run test:e2e)
