@@ -101,7 +101,7 @@ function renderChatView(el, s) {
   // search over the list, items are stacked in ord order) and its offset.
   const takeAnchor = () => {
     if (!scroll.clientHeight) return; // hidden (another tab): every rect is 0, the place would be lost
-    const kids = [...list.children].filter((c) => !c.hidden), top = scroll.getBoundingClientRect().top;
+    const kids = [...list.children].filter((c) => !c.hidden && c.dataset.id !== undefined && !c.classList.contains("ci-folded")), top = scroll.getBoundingClientRect().top;
     if (!kids.length) { m.anchor = null; return; }
     let lo = 0, hi = kids.length - 1;
     while (lo < hi) { const mid = (lo + hi) >> 1; if (kids[mid].getBoundingClientRect().bottom <= top) lo = mid + 1; else hi = mid; }
@@ -111,7 +111,9 @@ function renderChatView(el, s) {
   // Put the anchored item back where it was; false when it is not on screen.
   const restoreAnchor = () => {
     if (!m.anchor) return false;
-    const el = list.querySelector(`[data-id="${CSS.escape(m.anchor.id)}"]`);
+    let el = list.querySelector(`[data-id="${CSS.escape(m.anchor.id)}"]`);
+    if (!el) return false;
+    while (el && (el.hidden || el.classList.contains("ci-folded"))) el = el.previousElementSibling; // folded since: its fold row
     if (!el) return false;
     scrollTo(scroll.scrollTop + (el.getBoundingClientRect().top - scroll.getBoundingClientRect().top) - m.anchor.offset);
     return true;
@@ -279,7 +281,7 @@ function renderChatView(el, s) {
     m.readable = data.readable !== false; m.complete = data.complete !== false; m.reason = data.reason || null;
     const { added, grew, first } = chatApplyItems(m, list, data.items || []);
     if (m.rebuild) return true; // placed, not scrolled: finishRebuild decides
-    if (m.paused) { if (added + grew) { m.unseen += added + grew; drawJump(); } return true; }
+    if (m.paused) { if (added + grew) { m.unseen += added + grew; drawJump(); } if (first) restoreAnchor(); return true; }
     if (!first) return true; // an unchanged tick never moves the view
     toBottom(); // following: the latest stays on screen however much arrived
     return true;
@@ -364,13 +366,14 @@ function chatLastItem(m) { let l = null; for (const it of m.items.values()) if (
 // existing messages grew a visible block (text / tool call), and the first
 // node that is new or changed (where a multi-screen arrival starts).
 function chatApplyItems(m, list, items) {
-  let added = 0, grew = 0, first = null;
+  let added = 0, grew = 0, first = null, changed = false;
   const sorted = [...items].sort((a, b) => a.ord - b.ord);
   for (const it of sorted) {
     const prev = m.items.get(it.id);
     const old = list.querySelector(`[data-id="${CSS.escape(it.id)}"]`);
     if (prev && old && prev.rev === it.rev) continue;
     m.items.set(it.id, it);
+    changed = true;
     if (old) {
       const touched = chatPatchItem(m, old, it);
       if (prev && chatVisibleBlocks(it) > chatVisibleBlocks(prev)) grew++;
@@ -383,10 +386,95 @@ function chatApplyItems(m, list, items) {
     for (const c of list.children) { if (c.dataset.ord !== undefined && Number(c.dataset.ord) > it.ord) { before = c; break; } }
     list.insertBefore(node, before);
   }
+  if (changed) chatFold(m, list); // an unchanged tick leaves the fold rows alone (a click mid-press lands)
   return { added, grew, first };
 }
-// Items drawn as nothing (a turn without a duration, a queue dequeue) never count.
-function chatHidden(it) { return (it.kind === "turn" && !it.durationMs) || (it.kind === "queue" && it.op !== "enqueue"); }
+// A turn shorter than this draws no duration line (noise on every reply).
+const CHAT_TURN_SHOWN_MS = 30000;
+// An auto turn (started by a background-task notification, not by a person)
+// is "quiet" when it called no tool and said little — a heartbeat.
+const CHAT_QUIET_TEXT = 600;
+// Items drawn as nothing never count: a turn without a long duration, a queue
+// dequeue, the second copy of a notification (claude records it twice: in its
+// queue and as the prompt it became).
+function chatHidden(it) {
+  return (it.kind === "turn" && !(it.durationMs >= CHAT_TURN_SHOWN_MS)) || (it.kind === "queue" && (it.op !== "enqueue" || it.dup)) || (it.kind === "notice" && it.dup);
+}
+
+// Fold pass over the drawn list: an auto turn (a notification that arrives
+// between turns, and what claude did with it) is a segment; a quiet one is
+// dimmed (.ci-auto), and in a run of two or more quiet segments in a row all
+// but the latest are folded behind one "N earlier background updates" row.
+// Runs are keyed by their first notice's id (m.foldOpen holds the open ones).
+function chatFold(m, list) {
+  if (!m.foldOpen) m.foldOpen = new Set();
+  const nodes = new Map();
+  for (const c of list.children) if (c.dataset.id !== undefined) nodes.set(c.dataset.id, c);
+  const rows = new Map([...list.querySelectorAll(":scope > .chat-fold")].map((c) => [c.dataset.fold, c]));
+  const sorted = [...m.items.values()].filter((it) => nodes.has(it.id)).sort((a, b) => a.ord - b.ord);
+  const runs = []; let run = [], seg = null, inTurn = false;
+  const closeSeg = () => {
+    if (!seg) return;
+    if (seg.quiet) run.push(seg); else endRun();
+    seg = null;
+  };
+  const endRun = () => { if (run.length) runs.push(run); run = []; };
+  // A notice that reports a failure, or an agent's final result, is news: its
+  // segment is never quiet (never dimmed, never folded behind a heartbeat).
+  // The words are read outside quotes: a task NAMED "wait until jobs finished" is not news.
+  const news = (it) => {
+    const s = (it.summary || "").replace(/"[^"]*"/g, '""');
+    return /^(failed|error|killed|stopped|cancel)/i.test(it.status || "") || /\b(failed|killed|stopped)\b/i.test(s) || /^Agent\b.*\b(finished|completed)\s*$/i.test(s);
+  };
+  for (const it of sorted) {
+    // Only a person's prompt starts a human turn; meta / summary / compact
+    // break a run of background updates but leave the turn as it was.
+    if (it.kind === "user" || it.kind === "command") { closeSeg(); endRun(); inTurn = true; continue; }
+    if (it.kind === "summary" || it.kind === "compact" || it.kind === "meta") { closeSeg(); endRun(); continue; }
+    // A notice queued during the previous turn becomes its own prompt after
+    // it: its queue line was drawn mid-turn, the dup record starts the segment.
+    if (it.kind === "notice" && !inTurn) { closeSeg(); seg = { key: it.id, items: [it], quiet: !news(it), text: 0 }; inTurn = true; continue; }
+    if (it.kind === "notice" && it.dup) { if (seg) seg.items.push(it); continue; }
+    if (!seg) { if (it.kind === "turn" || (it.kind === "assistant" && it.stopReason === "end_turn")) inTurn = false; continue; }
+    seg.items.push(it);
+    if (it.kind === "notice" && news(it)) seg.quiet = false;
+    if (it.kind === "system" && it.level === "error") seg.quiet = false;
+    if (it.kind === "assistant") {
+      for (const b of it.blocks) {
+        if (b.type === "tool_use") seg.quiet = false;
+        else if (b.type === "text") seg.text += (b.text || "").length;
+      }
+      if (seg.text > CHAT_QUIET_TEXT) seg.quiet = false;
+      if (it.stopReason === "end_turn") inTurn = false;
+    } else if (it.kind === "turn") inTurn = false;
+  }
+  closeSeg(); endRun();
+  const auto = new Set(), folded = new Set();
+  for (const r of runs) for (const sg of r) for (const it of sg.items) auto.add(it.id);
+  for (const r of runs) {
+    if (r.length < 2) continue;
+    const key = r[0].key, open = m.foldOpen.has(key), n = r.length - 1;
+    if (!open) for (const sg of r.slice(0, -1)) for (const it of sg.items) folded.add(it.id);
+    let ctl = rows.get(key);
+    rows.delete(key);
+    if (!ctl) {
+      ctl = document.createElement("div");
+      ctl.className = "chat-fold"; ctl.dataset.fold = key; ctl.setAttribute("role", "button"); ctl.tabIndex = 0;
+      ctl.title = "Turns claude ran on its own when a background task reported, with no tool call and a short reply";
+      const toggle = () => { if (m.foldOpen.has(key)) m.foldOpen.delete(key); else m.foldOpen.add(key); chatFold(m, list); };
+      ctl.addEventListener("click", toggle);
+      ctl.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
+    }
+    ctl.textContent = open ? `▾ hide ${n} earlier background update${n === 1 ? "" : "s"}` : `▸ ${n} earlier background update${n === 1 ? "" : "s"}`;
+    const at = nodes.get(r[0].items[0].id);
+    if (ctl.nextElementSibling !== at) list.insertBefore(ctl, at);
+  }
+  for (const c of rows.values()) c.remove();
+  for (const [id, node] of nodes) {
+    node.classList.toggle("ci-auto", auto.has(id));
+    node.classList.toggle("ci-folded", folded.has(id));
+  }
+}
 function chatVisibleBlocks(it) { return it.kind === "assistant" ? it.blocks.filter((b) => b.type === "text" || b.type === "tool_use").length : 0; }
 // Re-render an item whose rev moved. Assistant messages keep every block whose
 // signature is unchanged (its node, selection, open state); other kinds are
@@ -429,14 +517,24 @@ function chatItemEl(m, it) {
       div.innerHTML = `<div class="ci-boundary-line">— context compacted${it.trigger ? ` (${esc(it.trigger)})` : ""}${it.preTokens ? ` · ${esc(String(Math.round(it.preTokens / 1000)))}k tokens before` : ""} —</div>`;
       break;
     case "turn":
-      div.innerHTML = it.durationMs ? `<div class="ci-turn-txt">turn · ${esc(chatDuration(it.durationMs))}</div>` : "";
-      if (!it.durationMs) div.hidden = true;
+      div.innerHTML = chatHidden(it) ? "" : `<div class="ci-turn-txt">turn · ${esc(chatDuration(it.durationMs))}</div>`;
+      if (chatHidden(it)) div.hidden = true;
       break;
+    case "notice": {
+      // A background task reporting back (claude's <task-notification>): one
+      // line — what it said, how long it ran — the raw envelope behind it.
+      if (it.dup) { div.hidden = true; break; }
+      const st = (it.status || "").toLowerCase(), sum = it.summary || "background task update";
+      const glyph = /waiting/i.test(sum) ? "⏳" : /^(completed|done|success)/.test(st) ? "✓" : /^(failed|error)/.test(st) ? "✗" : /^(killed|stopped|cancel)/.test(st) ? "■" : "•";
+      const meta = [it.durationMs ? chatDuration(it.durationMs) : null, it.toolUses ? `${it.toolUses} tool${it.toolUses === 1 ? "" : "s"}` : null].filter(Boolean).join(" · ");
+      div.innerHTML = `<details class="ci-nt"><summary><span class="ci-nt-g">${glyph}</span> ${esc(sum)}${meta ? ` <span class="ci-dim">· ${esc(meta)}</span>` : ""}</summary><pre>${esc(it.text || "")}${it.truncated ? "\n… (clipped)" : ""}</pre></details>${when}`;
+      break;
+    }
     case "queue":
       // claude's OWN message queue as the transcript recorded it (historical) —
       // not Hadron's outbox, which G3 draws in the composer.
       div.innerHTML = it.op === "enqueue" ? `<div class="ci-line ci-queue" title="Recorded by claude's own message queue (historical, already consumed)">claude queue · ${esc(it.text || "")}</div>` : "";
-      if (it.op !== "enqueue") div.hidden = true;
+      if (chatHidden(it)) div.hidden = true;
       break;
     case "system":
       div.innerHTML = `<div class="ci-line ci-sys${it.level === "error" ? " ci-sys-error" : ""}">${esc(it.text || it.subtype || "")}</div>`;

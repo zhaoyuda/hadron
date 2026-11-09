@@ -3003,6 +3003,17 @@ mark.ann-mark.ann-mark-flash { background: rgba(210, 153, 34, .8); outline: 1px 
 .ci-cmd { font-family: 'JetBrains Mono', Menlo, monospace; color: var(--blue); }
 .ci-queue { color: var(--text3); font-style: italic; }
 .ci-sys { color: var(--text3); }
+.ci-nt { font-size: 12px; color: var(--text3); }
+.ci-nt > summary { cursor: pointer; list-style: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ci-nt > summary::-webkit-details-marker { display: none; }
+.ci-nt[open] > summary { white-space: normal; }
+.ci-nt-g { display: inline-block; width: 1.2em; text-align: center; }
+.ci-nt pre { margin: 4px 0 0; padding: 6px 8px; background: var(--bg2); border-radius: 4px; font-size: 11px; white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow: auto; }
+.ci-auto { opacity: 0.5; }
+.ci-auto:hover { opacity: 1; }
+.ci-folded { display: none !important; }
+.chat-fold { font-size: 12px; color: var(--text3); cursor: pointer; padding: 2px 0 8px; user-select: none; }
+.chat-fold:hover { color: var(--text2); }
 .ci-sys-error { color: var(--red); }
 .ci-out { font-size: 12px; }
 .ci-out pre { margin: 4px 0 0; padding: 6px 8px; background: var(--bg2); border-radius: 4px; font-size: 11.5px; white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow: auto; }

@@ -10,6 +10,9 @@
  *     duration, queue operations, api errors; sidechain records ignored;
  *     duplicate uuids ignored; title/mode/permissionMode carried; text clipped
  *     with `truncated`, tool inputs clipped per string, results clipped
+ *   - task notifications: one `notice` item (status / summary / duration / tools
+ *     parsed), the user record of an enqueued one is `dup`, a person's prompt
+ *     that starts with the tag stays a prompt
  *   - readConversation: incremental cursor — a second read ingests only the
  *     appended records; a torn tail waits; `after=` returns changed items
  *     (an old assistant item whose tool result just landed included); a
@@ -206,6 +209,57 @@ const DIR = mkdtempSync(join(tmpdir(), "hadron-convtest-"));
   const many = asst(Array.from({ length: 600 }, (_, i) => ({ type: "text", text: `b${i}` })), 3, "big");
   ingestRecord(conv, many);
   ok(conv.items[2].blocks.length === BLOCKS_MAX && conv.items[2].blocksTruncated === true, `an assistant message holds at most BLOCKS_MAX blocks (${BLOCKS_MAX}), flagged`);
+}
+
+console.log("\n[task notifications → notice]");
+{
+  const conv = createConversation();
+  const env = (id, status, summary, extra = "") => `<task-notification>\n<task-id>${id}</task-id>\n<status>${status}</status>\n<summary>${summary}</summary>\n<usage><subagent_tokens>900</subagent_tokens><tool_uses>7</tool_uses><duration_ms>125000</duration_ms></usage>${extra}\n</task-notification>`;
+  const a = env("bg1", "completed", "Agent &quot;scan&quot; &amp; co finished");
+  const b = env("bg2", "failed", "Command failed");
+  const c = env("bg3", "killed", "x");
+  const recs = [
+    { type: "queue-operation", operation: "enqueue", timestamp: T(1), sessionId: SID, content: a },
+    { type: "queue-operation", operation: "dequeue", timestamp: T(2), sessionId: SID },
+    user(a, 3, { origin: { kind: "task-notification" }, promptSource: "system" }),
+    user(b, 4, { origin: { kind: "task-notification" } }),
+    { type: "queue-operation", operation: "enqueue", timestamp: T(5), sessionId: SID, content: c },
+    { type: "queue-operation", operation: "remove", timestamp: T(6), sessionId: SID, content: c },
+    user("<task-notification> 我自己打的", 7),
+    user("<task-notification> 我自己打的 (human)", 8, { origin: { kind: "human" }, promptSource: "typed" }),
+    { type: "queue-operation", operation: "enqueue", timestamp: T(9), sessionId: SID, content: "普通排队消息" },
+  ];
+  for (const r of recs) ingestRecord(conv, r);
+  const kinds = conv.items.map((i) => i.kind);
+  ok(JSON.stringify(kinds) === JSON.stringify(["notice", "queue", "notice", "notice", "notice", "user", "user", "queue"]), `kinds: ${kinds.join(",")}`);
+  const [q, dq, d, f, k] = conv.items;
+  ok(dq.op === "dequeue", "a contentless dequeue stays a queue item (the client draws nothing for it)");
+  ok(q.via === "queue" && !q.dup && q.status === "completed" && q.summary === 'Agent "scan" & co finished' && q.durationMs === 125000 && q.toolUses === 7, `the enqueued notice parses status / summary (entities decoded) / duration / tools (${q.summary})`);
+  ok(q.text === a && q.at === T(1), "…the raw envelope is its text");
+  ok(d.via === "record" && d.dup === true, "the user record of the same notice is the dup (the client hides it)");
+  ok(f.via === "record" && !f.dup && f.status === "failed", "a notice with no queue entry is a notice, not a dup");
+  ok(k.via === "queue" && k.status === "killed", "a notice removed from the queue mid-turn is drawn once, from its enqueue (dequeue / remove add nothing)");
+  ok(conv.items[5].kind === "user" && conv.items[5].text === "<task-notification> 我自己打的" && conv.items[6].kind === "user", "a person's prompt that starts with the tag (no origin / human origin) stays a prompt");
+  // A prompt typed mid-turn: the queue line becomes the dup once its bubble lands.
+  {
+    const qline = conv.items[7], rev0 = qline.rev;
+    ok(!qline.dup, "a queued prompt's line is drawn while it waits");
+    ingestRecord(conv, user("普通排队消息", 9.5));
+    ok(qline.dup === true && qline.rev > rev0, "…its user record marks the queue line dup with a new rev (the client hides it on the next after= page)");
+    ingestRecord(conv, user("普通排队消息", 9.6));
+    ok(conv.items.filter((i) => i.kind === "user" && i.text === "普通排队消息").length === 2, "…a second identical prompt is still a bubble");
+    ingestRecord(conv, { type: "queue-operation", operation: "enqueue", timestamp: T(9.7), sessionId: SID, content: "继续" });
+    const cont = conv.items[conv.items.length - 1];
+    ingestRecord(conv, { type: "queue-operation", operation: "remove", timestamp: T(9.8), sessionId: SID, content: "继续" });
+    ingestRecord(conv, user("继续", 9.9));
+    ok(cont.kind === "queue" && !cont.dup, "…a prompt removed from the queue mid-turn is forgotten: a later identical prompt does not hide its line");
+  }
+  // A second record of an already-paired notice is not a dup again.
+  ingestRecord(conv, user(a, 10, { origin: { kind: "task-notification" } }));
+  ok(conv.items.at(-1).kind === "notice" && !conv.items.at(-1).dup, "the dup pairing is used once");
+  const bad = createConversation();
+  ingestRecord(bad, user("<task-notification><usage><duration_ms>12abc</duration_ms></usage>", 1, { origin: { kind: "task-notification" } }));
+  ok(bad.items[0].kind === "notice" && bad.items[0].durationMs === null && bad.items[0].summary === null && bad.items[0].status === null, "malformed fields are null, never a NaN or a guess");
 }
 
 console.log("\n[eviction + paging]");

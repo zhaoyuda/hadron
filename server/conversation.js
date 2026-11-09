@@ -22,6 +22,12 @@
  *   turn       system/turn_duration (durationMs) — "Working · Ns" ends here
  *   system     other system records (away_summary, informational): text, level
  *   queue      queue-operation records (claude's own queue: op + text)
+ *   notice     a <task-notification> claude fed itself (a background command or
+ *              agent finished / stopped): status, summary, durationMs, toolUses,
+ *              text = the whole envelope. Comes from the user record claude
+ *              writes for it, or from the queue-operation that enqueued it (a
+ *              notice removed from the queue mid-turn never gets a user record).
+ *              The user record of a notice already seen via the queue is `dup`.
  * Sidechain (subagent) records are ignored throughout. Records are deduped by
  * uuid. Nothing in an item is a session id; the conversation's identity on the
  * wire is a hash of it (conversationId), so /clear or a resume reads as a new
@@ -89,6 +95,28 @@ function contentText(c) {
 
 const ENVELOPE_RE = /^<command-name>([\s\S]*?)<\/command-name>/;
 const ARGS_RE = /<command-args>([\s\S]*?)<\/command-args>/;
+const NOTICE_RE = /^\s*<task-notification>/;
+const NOTICE_SEEN_MAX = 200;
+const unxml = (t) => t.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+const tag = (text, name) => { const m = new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(text); return m ? m[1].trim() : null; };
+const num = (v) => (v !== null && /^\d{1,12}$/.test(v) ? Number(v) : null);
+// One notice item from a <task-notification> envelope. Only `text` carries the
+// whole envelope; the rest are what the one-line card shows.
+function noticeItem(id, at, text, via) {
+  const head = text.slice(0, 64 * 1024);
+  const summary = tag(head, "summary");
+  return {
+    id, kind: "notice", at, via,
+    status: (tag(head, "status") || "").slice(0, 40) || null,
+    summary: summary === null ? null : unxml(summary).slice(0, 300),
+    durationMs: num(tag(head, "duration_ms")), toolUses: num(tag(head, "tool_uses")),
+    ...clipText(text, TEXT_MAX),
+  };
+}
+function rememberNotice(conv, text) {
+  conv.noticeSeen.set(text, true);
+  if (conv.noticeSeen.size > NOTICE_SEEN_MAX) conv.noticeSeen.delete(conv.noticeSeen.keys().next().value);
+}
 const STDOUT_RE = /^<local-command-stdout>([\s\S]*?)<\/local-command-stdout>\s*$/;
 
 export function conversationIdFor(sessionId) {
@@ -99,7 +127,7 @@ export function conversationIdFor(sessionId) {
 export function createConversation({ maxItems = MAX_ITEMS } = {}) {
   return {
     items: [], ord: 0, rev: 0, maxItems,
-    byMsgId: new Map(), toolUse: new Map(), seen: new Map(),
+    byMsgId: new Map(), toolUse: new Map(), seen: new Map(), noticeSeen: new Map(), queuedPrompt: new Map(),
     title: null, mode: null, permissionMode: null, lastAt: null,
     evicted: 0, skipped: 0, orphanResults: 0, truncated: false,
     offset: 0, ino: undefined, wideAt: undefined, complete: false,
@@ -166,9 +194,21 @@ function ingestUser(conv, rec) {
     push(conv, { id, kind: "command", at, name: env[1].trim().slice(0, 200), args: args ? args[1].trim().slice(0, 2000) : "" });
     return;
   }
+  // A notice is claude's own: marked by its origin, or enqueued by claude a moment ago.
+  // A person's prompt that merely starts with the tag (origin null / human) stays a prompt.
+  if (NOTICE_RE.test(text) && (rec.origin?.kind === "task-notification" || conv.noticeSeen.has(text))) {
+    const it = noticeItem(id, at, text, "record");
+    if (conv.noticeSeen.has(text)) { it.dup = true; conv.noticeSeen.delete(text); }
+    push(conv, it);
+    return;
+  }
   const out = STDOUT_RE.exec(text);
   if (out) { push(conv, { id, kind: "output", at, ...clipText(out[1], TEXT_MAX) }); return; }
   if (!text.trim() && !images) return;
+  // A prompt typed mid-turn was drawn as claude's queue line first; once it is a
+  // bubble, the queue line is its second copy.
+  const q = conv.queuedPrompt.get(text);
+  if (q) { q.dup = true; touch(conv, q); conv.queuedPrompt.delete(text); }
   push(conv, { id, kind: "user", at, ...clipText(text, TEXT_MAX), ...(images ? { images } : {}) });
 }
 
@@ -223,7 +263,23 @@ export function ingestRecord(conv, rec) {
     case "queue-operation": {
       if (seenBefore(conv, rec.uuid)) return;
       const op = str(rec.operation).slice(0, 40) || "unknown";
-      push(conv, { id: str(rec.uuid) || `q${conv.ord + 1}`, kind: "queue", at, op, ...clipText(str(rec.content), TEXT_MAX) });
+      const content = str(rec.content);
+      if (NOTICE_RE.test(content)) {
+        // Only the enqueue draws the notice; its dequeue / remove adds nothing.
+        if (op !== "enqueue") return;
+        rememberNotice(conv, content);
+        push(conv, noticeItem(str(rec.uuid) || `q${conv.ord + 1}`, at, content, "queue"));
+        return;
+      }
+      // A prompt taken mid-turn (remove) never becomes a bubble: forget it, so a
+      // later identical prompt does not hide this old line.
+      if (op === "remove") conv.queuedPrompt.delete(content);
+      const qi = { id: str(rec.uuid) || `q${conv.ord + 1}`, kind: "queue", at, op, ...clipText(str(rec.content), TEXT_MAX) };
+      push(conv, qi);
+      if (op === "enqueue" && content.trim()) {
+        conv.queuedPrompt.set(content, qi);
+        if (conv.queuedPrompt.size > NOTICE_SEEN_MAX) conv.queuedPrompt.delete(conv.queuedPrompt.keys().next().value);
+      }
       return;
     }
     case "system": {

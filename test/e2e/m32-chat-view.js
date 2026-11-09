@@ -80,7 +80,7 @@ const env = await bootWorkspace({
       asst("m2", { type: "tool_use", id: "t-edit", name: "Edit", input: { file_path: join(ws, "src", "app.js"), old_string: "console.log('app')", new_string: "console.info('app')" } }) +
       result("t-edit", "String to replace not found in file.", true) +
       asst("m3", { type: "text", text: "改好了。" }, { stop_reason: "end_turn" }) +
-      rec({ type: "system", subtype: "turn_duration", durationMs: 3200 }));
+      rec({ type: "system", subtype: "turn_duration", durationMs: 45200 }));
   },
 });
 let browser;
@@ -131,7 +131,7 @@ try {
   await editCard.locator(".ci-tool-hd").click();
   r.ok(await editCard.locator(".ci-tool-body").isVisible() && (await editCard.locator(".ci-diff .ci-l-del").textContent()).includes("console.log") && (await editCard.locator(".ci-diff .ci-l-add").textContent()).includes("console.info"), "…click expands it to a −/+ diff of old/new");
   r.ok((await editCard.locator(".ci-tool-res.err pre").textContent()).includes("not found"), "…with the error text under it");
-  r.ok((await chat.locator(".ci-turn").textContent()).includes("3s"), "the turn's duration is drawn under the reply");
+  r.ok((await chat.locator(".ci-turn").textContent()).includes("45s"), "the turn's duration (45 s) is drawn under the reply");
   r.ok((await chat.locator(".chat-live").isVisible()) === false, "no live 'Working' line for an idle agent");
   await page.screenshot({ path: join(screenshotDir(), "m32-chat.png") });
 
@@ -432,6 +432,52 @@ try {
   r.ok(await until(async () => await jumpV()), "…a wheel up still pauses it (pill)");
   await page.locator("#chat-container .chat-jump").click();
   r.ok(await until(async () => (await atEnd()) && !(await jumpV())), "…jump → following again");
+
+  // ── quiet chat: background-task notifications are one line, heartbeats fold ──
+  const envl = (n, status, summary) => `<task-notification>\n<task-id>bg${n}</task-id>\n<status>${status}</status>\n<summary>${summary}</summary>\n<usage><tool_uses>${n}</tool_uses><duration_ms>${n * 61000}</duration_ms></usage>\n</task-notification>`;
+  const autoTurn = (n, status, summary, reply, extra = "") => {
+    const t = envl(n, status, summary);
+    return rec({ type: "queue-operation", operation: "enqueue", content: t }) + rec({ type: "queue-operation", operation: "dequeue" }) +
+      rec({ type: "user", origin: { kind: "task-notification" }, promptSource: "system", message: { role: "user", content: t } }) +
+      extra + asst(`q${n}`, { type: "text", text: reply }, { stop_reason: "end_turn" }) + rec({ type: "system", subtype: "turn_duration", durationMs: 4000 });
+  };
+  appendFileSync(transcript,
+    autoTurn(1, "completed", "Agent &quot;scan&quot; is waiting on its own background work", "还在跑。") +
+    autoTurn(2, "completed", "Agent &quot;scan&quot; is waiting on its own background work", "还在跑，没有报告。") +
+    autoTurn(3, "completed", "Agent &quot;scan&quot; is waiting on its own background work", "还在跑，快了。"));
+  const notices = page.locator("#chat-container .ci-nt:visible");
+  r.ok(await until(async () => (await page.locator('#chat-container .ci-assistant[data-id="a:q3"]').count()) === 1), "three auto turns land");
+  r.ok(await until(async () => (await page.locator('#chat-container .ci-assistant[data-id="a:q3"]').isVisible()) && (await notices.count()) === 1), `…only the latest is shown (${await notices.count()} notice line(s) visible)`);
+  const lastNotice = page.locator("#chat-container .ci-nt:visible").first();
+  r.ok((await lastNotice.locator("summary").textContent()).includes('⏳ Agent "scan" is waiting on its own background work') && (await lastNotice.locator("summary").textContent()).includes("3m 3s · 3 tools"), `…the notice is one line: glyph (⏳ waiting), summary (entities decoded), duration + tools (${await lastNotice.locator("summary").textContent()})`);
+  r.ok(!(await lastNotice.evaluate((d) => d.open)) && !(await lastNotice.locator("pre").isVisible()), "…collapsed");
+  await lastNotice.locator("summary").click();
+  r.ok((await lastNotice.locator("pre").textContent()).includes("<task-id>bg3</task-id>"), "…a click shows the raw envelope");
+  r.ok((await page.locator("#chat-container .ci-bubble", { hasText: "task-notification" }).count()) === 0 && (await page.locator("#chat-container .ci-queue", { hasText: "task-notification" }).count()) === 0, "no raw <task-notification> bubble or claude-queue line (the second copy is hidden)");
+  r.ok(await page.locator('#chat-container .ci-assistant[data-id="a:q3"]').evaluate((el) => el.classList.contains("ci-auto")), "…the quiet auto turn is dimmed");
+  const fold = page.locator("#chat-container .chat-fold");
+  r.ok((await fold.count()) === 1 && (await fold.textContent()).includes("2 earlier background updates"), `one fold row for the two heartbeats before it (${await fold.count() ? await fold.textContent() : "none"})`);
+  r.ok(!(await page.locator('#chat-container .ci-assistant[data-id="a:q1"]').isVisible()), "…the heartbeats are folded");
+  r.ok((await page.locator("#chat-container .ci-turn-txt:visible", { hasText: "4s" }).count()) === 0, "a 4 s turn draws no duration line");
+  await fold.click();
+  r.ok(await until(async () => (await page.locator('#chat-container .ci-assistant[data-id="a:q1"]').isVisible()) && (await fold.textContent()).includes("hide 2")), "…a click unfolds them");
+  await fold.click();
+  r.ok(await until(async () => !(await page.locator('#chat-container .ci-assistant[data-id="a:q1"]').isVisible())), "…and folds them again");
+  await page.screenshot({ path: join(screenshotDir(), "m32-quiet.png") });
+  appendFileSync(transcript, autoTurn(4, "completed", "Agent &quot;fix&quot; finished", "改好了。", asst("q4t", { type: "tool_use", id: "t-q4", name: "Read", input: { file_path: join(ws, "src", "app.js") } }) + result("t-q4", "x")));
+  r.ok(await until(async () => (await page.locator('#chat-container .ci-assistant[data-id="a:q4"]').count()) === 1), "an auto turn that called a tool lands");
+  r.ok(!(await page.locator('#chat-container .ci-assistant[data-id="a:q4t"]').evaluate((el) => el.classList.contains("ci-auto"))) && (await page.locator('#chat-container .ci-assistant[data-id="a:q3"]').isVisible()), "…is not dimmed, and the quiet run before it keeps its latest turn visible");
+  appendFileSync(transcript, user("<task-notification> 这是我自己打的字") + asst("qh", { type: "text", text: "好。" }, { stop_reason: "end_turn" }));
+  appendFileSync(transcript, autoTurn(5, "failed", "Background command &quot;build&quot; failed with exit code 1", "构建失败了，等你看。") + autoTurn(6, "completed", "Agent &quot;x&quot; is waiting on its own background work", "还在跑。"));
+  r.ok(await until(async () => (await page.locator('#chat-container .ci-assistant[data-id="a:q6"]').count()) === 1), "a failed notice and a heartbeat after it land");
+  r.ok(await page.locator('#chat-container .ci-assistant[data-id="a:q5"]').isVisible() && !(await page.locator('#chat-container .ci-assistant[data-id="a:q5"]').evaluate((el) => el.classList.contains("ci-auto"))), "…the failure's turn is never dimmed or folded behind the heartbeat");
+  r.ok((await page.locator("#chat-container .ci-nt:visible", { hasText: "failed with exit code 1" }).locator(".ci-nt-g").textContent()) === "✗", "…its notice line has ✗");
+  r.ok(await until(async () => (await page.locator("#chat-container .ci-bubble", { hasText: "这是我自己打的字" }).count()) === 1), "a person's prompt that merely starts with <task-notification> stays a bubble");
+  // The news words are read outside the task's quoted name; an agent's final report is news without a tool call.
+  appendFileSync(transcript, autoTurn(7, "completed", "Background command &quot;wait until 120 jobs finished&quot; completed (exit code 0)", "还在跑。") + autoTurn(8, "completed", "Agent &quot;y&quot; completed", "报告到了，结论在上面。"));
+  r.ok(await until(async () => (await page.locator('#chat-container .ci-assistant[data-id="a:q8"]').count()) === 1), "a task named \"…finished\" and an agent's completion land");
+  r.ok(await page.locator('#chat-container .ci-assistant[data-id="a:q7"]').evaluate((el) => el.classList.contains("ci-auto")), "…the task whose NAME says finished is still a quiet heartbeat (dimmed)");
+  r.ok(!(await page.locator('#chat-container .ci-assistant[data-id="a:q8"]').evaluate((el) => el.classList.contains("ci-auto"))), "…\"Agent … completed\" is news: not dimmed");
 
   // ── a new conversation id (adopt / resume / clear) paints the new conversation ──
   const SID2 = randomUUID();
