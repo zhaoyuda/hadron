@@ -156,6 +156,47 @@ try {
   await page.locator("#artifact-container").screenshot({ path: join(dir, "m7-pasted-image-preview.png") });
   console.log(`  📸 ${join(dir, "m7-pasted-image-preview.png")}`);
 
+  // 4b. Notes copies (sidebar notes beside a split's notes pane). Stand-ins of the same field,
+  // both on screen: the paste lands in one; the other never received the placeholder (a split's
+  // notes are not mirrored) — that stale copy is no deletion, the path lands. Then a placeholder
+  // the user deleted from the pasted copy before the upload answered: nothing is written.
+  const pasteNotes = (b64) => {
+    const el = document.getElementById("m7-notes-a");
+    el.focus(); el.setSelectionRange(el.value.length, el.value.length);
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    const dt = new DataTransfer();
+    dt.items.add(new File([bytes], "shot.png", { type: "image/png" }));
+    el.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  };
+  await page.evaluate(() => {
+    for (const id of ["m7-notes-a", "m7-notes-b"]) {
+      const t = document.createElement("textarea");
+      t.id = id; t.className = "split-pane-notes"; t.value = "notes";
+      t.style.cssText = "width:200px;height:60px"; // in the flow: offsetParent is how "on screen" is read
+      document.body.appendChild(t);
+    }
+  });
+  await page.evaluate(pasteNotes, PNG_B64);
+  const staleOk = await page.waitForFunction(() => /!\[screenshot\]\(\/[^)]+\.png\)/.test(document.getElementById("m7-notes-a").value), null, { timeout: 6000 }).then(() => true).catch(() => false);
+  r.ok(staleOk, "notes: a copy on screen that never received the placeholder does not block the swap");
+  const notesA = await page.evaluate(() => document.getElementById("m7-notes-a").value);
+  r.ok(!notesA.includes("uploading"), `…no placeholder left in the pasted copy (${JSON.stringify(notesA.slice(0, 80))})`);
+  let releaseUpload; const held = new Promise((res) => { releaseUpload = res; });
+  await page.route("**/upload", async (route) => { await held; await route.continue(); });
+  await page.evaluate(pasteNotes, PNG_B64);
+  await page.waitForFunction(() => document.getElementById("m7-notes-a").value.includes("![uploading"), null, { timeout: 4000 });
+  const before = await page.evaluate(() => {
+    const a = document.getElementById("m7-notes-a");
+    a.value = a.value.replace(/!\[uploading [0-9a-z]+…\]\(\)/, "");
+    return { a: a.value, b: document.getElementById("m7-notes-b").value };
+  });
+  releaseUpload();
+  await page.waitForTimeout(1500);
+  const after = await page.evaluate(() => ({ a: document.getElementById("m7-notes-a").value, b: document.getElementById("m7-notes-b").value }));
+  r.ok(after.a === before.a && after.b === before.b, "notes: a placeholder deleted before the upload answered — nothing written anywhere");
+  await page.unroute("**/upload");
+  await page.evaluate(() => { document.getElementById("m7-notes-a").remove(); document.getElementById("m7-notes-b").remove(); });
+
   // 5. View ▸ Editor ▸ "Vim (terminal)" via real clicks → Edit opens vim tmux.
   await page.locator("#menu-view").click();
   const editorItem = page.locator(".menu-dropdown-item.has-submenu", { hasText: "Editor" });

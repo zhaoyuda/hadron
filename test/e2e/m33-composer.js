@@ -259,6 +259,296 @@ try {
   r.ok(await until(async () => /\.png/.test(await ta.inputValue()) && !(await ta.inputValue()).includes("uploading")), `an image pasted into the composer is uploaded and its path inserted ("${(await ta.inputValue()).trim()}")`);
   r.ok(!(await ta.inputValue()).includes("!["), "…as a bare path, not a markdown image tag");
   await ta.fill("");
+  // A type the server does not take (a Mac clipboard TIFF, a BMP) is re-encoded to PNG first.
+  const bmp1x1 = "Qk06AAAAAAAAADYAAAAoAAAAAQAAAAEAAAABABgAAAAAAAQAAAATCwAAEwsAAAAAAAAAAAAAAAD/AA==";
+  await ta.focus();
+  await page.evaluate((b64) => {
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    const dt = new DataTransfer(); dt.items.add(new File([bytes], "shot.bmp", { type: "image/bmp" }));
+    document.querySelector("#chat-container .chat-input").dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  }, bmp1x1);
+  r.ok(await until(async () => /\.png /.test(await ta.inputValue()) && !(await ta.inputValue()).includes("uploading")), `a BMP pasted is converted and attached as a .png ("${(await ta.inputValue()).trim()}")`);
+  await ta.fill("");
+  // Two images in one paste → two paths.
+  await page.evaluate(() => {
+    const png = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="), (c) => c.charCodeAt(0));
+    const dt = new DataTransfer(); dt.items.add(new File([png], "a.png", { type: "image/png" })); dt.items.add(new File([png], "b.png", { type: "image/png" }));
+    document.querySelector("#chat-container .chat-input").dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  });
+  r.ok(await until(async () => ((await ta.inputValue()).match(/\.png/g) || []).length === 2 && !(await ta.inputValue()).includes("uploading")), "…two images in one paste attach two paths");
+  await ta.fill("");
+  // A refused upload is said under the composer, the placeholder goes.
+  await page.route("**/api/sessions/alpha/upload", (rt) => rt.fulfill({ status: 413, contentType: "application/json", body: JSON.stringify({ error: "too big for the test" }) }));
+  await page.evaluate(() => {
+    const png = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="), (c) => c.charCodeAt(0));
+    const dt = new DataTransfer(); dt.items.add(new File([png], "a.png", { type: "image/png" }));
+    document.querySelector("#chat-container .chat-input").dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  });
+  const stEl = page.locator("#chat-container .chat-draft-st");
+  r.ok(await until(async () => /Image not attached — too big for the test/.test(await stEl.textContent()) && !(await ta.inputValue()).includes("uploading")), `a refused upload says why under the composer ("${await stEl.textContent()}")`);
+  await page.unroute("**/api/sessions/alpha/upload");
+  await ta.fill("");
+  // 📎 picks files; a non-image among them is refused with a word.
+  const pngBuf = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
+  r.ok(await page.locator("#chat-container .chat-attach").isVisible(), "the composer has a 📎 button");
+  const [chooser] = await Promise.all([page.waitForEvent("filechooser"), page.locator("#chat-container .chat-attach").click()]);
+  await chooser.setFiles([{ name: "pick.png", mimeType: "image/png", buffer: pngBuf }, { name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("x") }]);
+  r.ok(await until(async () => /\.png/.test(await ta.inputValue()) && !(await ta.inputValue()).includes("uploading")), "…a picked image is attached");
+  r.ok(/Only images can be attached/.test(await stEl.textContent()), "…the text file is refused with a word");
+  await ta.fill("");
+  // Out of order: the first upload is held back, the second finishes first, the user removes the
+  // first's placeholder and keeps typing — each path lands in its own place, the caret stays put.
+  let release; const held = new Promise((res) => { release = res; });
+  let nUp = 0;
+  await page.route("**/api/sessions/alpha/upload", async (rt) => { nUp++; if ((rt.request().postDataBuffer() || []).length > 100) await held; await rt.continue(); });
+  await ta.fill("A ");
+  await ta.focus();
+  await page.evaluate(() => {
+    const png = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="), (c) => c.charCodeAt(0));
+    const t = document.querySelector("#chat-container .chat-input");
+    t.setSelectionRange(t.value.length, t.value.length);
+    for (const name of ["first.png", "second.png"]) {
+      // the first carries trailing bytes so the route can hold exactly it back
+      const dt = new DataTransfer(); dt.items.add(new File(name === "first.png" ? [png, new Uint8Array(64)] : [png], name, { type: "image/png" }));
+      t.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+    }
+  });
+  r.ok(await until(async () => /^A \[uploading image [0-9a-z]+…\]\S*\.png $/.test(await ta.inputValue())), `…the second upload finishes first into ITS place ("${await ta.inputValue()}")`);
+  await page.evaluate(() => {
+    const t = document.querySelector("#chat-container .chat-input");
+    t.value = t.value.replace(/\[uploading image [0-9a-z]+…\]/, ""); t.dispatchEvent(new Event("input", { bubbles: true }));
+    t.setSelectionRange(t.value.length, t.value.length);
+  });
+  await ta.pressSequentially("tail");
+  release();
+  await page.waitForTimeout(800);
+  const outOfOrder = await ta.inputValue();
+  r.ok((outOfOrder.match(/\.png/g) || []).length === 1 && outOfOrder.endsWith(".png tail"), `…the first, whose placeholder was removed, takes nobody else's place ("${outOfOrder}")`);
+  await page.unroute("**/api/sessions/alpha/upload");
+  // The caret is kept while an upload lands in front of it.
+  let release2; const held2 = new Promise((res) => { release2 = res; });
+  await page.route("**/api/sessions/alpha/upload", async (rt) => { await held2; await rt.continue(); });
+  await ta.fill("");
+  await page.evaluate(() => {
+    const png = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="), (c) => c.charCodeAt(0));
+    const dt = new DataTransfer(); dt.items.add(new File([png], "c.png", { type: "image/png" }));
+    document.querySelector("#chat-container .chat-input").dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  });
+  await ta.pressSequentially(" look at this");
+  release2();
+  r.ok(await until(async () => /\.png  look at this$/.test(await ta.inputValue())), `…typing after a pending image stays where it was typed ("${await ta.inputValue()}")`);
+  const caretAtEnd = await page.evaluate(() => { const t = document.querySelector("#chat-container .chat-input"); return t.selectionStart === t.value.length; });
+  r.ok(caretAtEnd, "…and the caret is still at the end");
+  await page.unroute("**/api/sessions/alpha/upload");
+  await ta.fill("");
+  // Switched away and back while an upload is in flight: the composer was re-rendered, the path
+  // lands in the live one (where the draft brought the placeholder back) and nothing is left waiting.
+  let release3; const held3 = new Promise((res) => { release3 = res; });
+  await page.route("**/api/sessions/alpha/upload", async (rt) => { await held3; await rt.continue(); });
+  await page.evaluate(() => {
+    const png = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="), (c) => c.charCodeAt(0));
+    const dt = new DataTransfer(); dt.items.add(new File([png], "away.png", { type: "image/png" }));
+    document.querySelector("#chat-container .chat-input").dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  });
+  await page.waitForTimeout(300);
+  await page.locator(`.dk[data-sid="beta"]`).first().click();
+  await page.locator("#af-chat-btn").click();
+  await page.locator(`.dk[data-sid="alpha"]`).first().click();
+  await page.locator("#af-chat-btn").click();
+  r.ok(await until(async () => /\[uploading image [0-9a-z]+…\]/.test(await ta.inputValue())), `…back on Alpha the placeholder is in the new composer ("${await ta.inputValue()}")`);
+  release3();
+  r.ok(await until(async () => /\.png $/.test(await ta.inputValue()) && !(await ta.inputValue()).includes("uploading")), `…and the upload finishing lands its path there ("${await ta.inputValue()}")`);
+  await page.unroute("**/api/sessions/alpha/upload");
+  await ta.fill("");
+  // Away and back with an upload running, then the placeholder removed and new text typed in the
+  // re-rendered composer: the detached old one must not save its stale text over it.
+  let release6; const held6 = new Promise((res) => { release6 = res; });
+  await page.route("**/api/sessions/alpha/upload", async (rt) => { await held6; await rt.continue(); });
+  await page.evaluate(() => {
+    const png = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="), (c) => c.charCodeAt(0));
+    const dt = new DataTransfer(); dt.items.add(new File([png], "away2.png", { type: "image/png" }));
+    document.querySelector("#chat-container .chat-input").dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  });
+  await page.waitForTimeout(300);
+  await page.locator(`.dk[data-sid="beta"]`).first().click();
+  await page.locator("#af-chat-btn").click();
+  await page.locator(`.dk[data-sid="alpha"]`).first().click();
+  await page.locator("#af-chat-btn").click();
+  r.ok(await until(async () => /uploading image/.test(await ta.inputValue())), "away and back with an upload running");
+  await ta.fill("");
+  await ta.pressSequentially("newer text");
+  await page.waitForTimeout(400);
+  // away again BEFORE it finishes: no composer of Alpha on the page when it does
+  await page.locator(`.dk[data-sid="beta"]`).first().click();
+  await page.locator("#af-chat-btn").click();
+  release6();
+  await page.waitForTimeout(1200);
+  await page.unroute("**/api/sessions/alpha/upload");
+  await page.locator(`.dk[data-sid="alpha"]`).first().click();
+  await page.locator("#af-chat-btn").click();
+  r.ok(await until(async () => (await ta.inputValue()) === "newer text"), `…the draft is the new text, not the old composer's ("${await ta.inputValue()}")`);
+  // …and an upload that finishes while Alpha is away lands in its saved draft.
+  let release7; const held7 = new Promise((res) => { release7 = res; });
+  await page.route("**/api/sessions/alpha/upload", async (rt) => { await held7; await rt.continue(); });
+  await ta.fill("caption ");
+  await page.evaluate(() => {
+    const png = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="), (c) => c.charCodeAt(0));
+    const t = document.querySelector("#chat-container .chat-input"); t.setSelectionRange(t.value.length, t.value.length);
+    const dt = new DataTransfer(); dt.items.add(new File([png], "away3.png", { type: "image/png" }));
+    t.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  });
+  await page.waitForTimeout(300);
+  await page.locator(`.dk[data-sid="beta"]`).first().click();
+  await page.locator("#af-chat-btn").click();
+  release7();
+  await page.waitForTimeout(1200);
+  await page.unroute("**/api/sessions/alpha/upload");
+  await page.locator(`.dk[data-sid="alpha"]`).first().click();
+  await page.locator("#af-chat-btn").click();
+  r.ok(await until(async () => /^caption \S+\.png $/.test(await ta.inputValue())), `…an upload finishing while Alpha is away lands in its draft ("${await ta.inputValue()}")`);
+  await ta.fill("");
+  // Send is held while an upload runs, and a placeholder left by a reload (no upload behind it) is named.
+  let release4; const held4 = new Promise((res) => { release4 = res; });
+  await page.route("**/api/sessions/alpha/upload", async (rt) => { await held4; await rt.continue(); });
+  await page.evaluate(() => {
+    const png = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="), (c) => c.charCodeAt(0));
+    const dt = new DataTransfer(); dt.items.add(new File([png], "wait.png", { type: "image/png" }));
+    document.querySelector("#chat-container .chat-input").dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  });
+  await ta.press("End"); await ta.press("Enter");
+  r.ok(await until(async () => /Wait for the image to upload/.test(await stEl.textContent())), `Enter while an upload runs waits for it ("${await stEl.textContent()}")`);
+  r.ok(/uploading image/.test(await ta.inputValue()), "…nothing was sent");
+  // tabs → split while it runs: the path lands in the composer on screen too.
+  await page.locator(".wh-layout-btn").click();
+  const splitTa = page.locator(".split-pane .chat-input");
+  r.ok(await until(async () => (await splitTa.count()) === 1 && /uploading image/.test(await splitTa.inputValue())), "…a split shows the chat with the placeholder in its composer");
+  release4();
+  r.ok(await until(async () => /\.png $/.test(await splitTa.inputValue()) && !(await splitTa.inputValue()).includes("uploading")), `…the upload finishing lands in the split's composer ("${await splitTa.inputValue()}")`);
+  await page.unroute("**/api/sessions/alpha/upload");
+  await page.locator(".wh-layout-btn").click(); await page.locator(".wh-layout-btn").click();
+  r.ok(await until(async () => (await page.locator(".split-pane .chat-input").count()) === 0 && (await ta.count()) === 1), "…back to tabs");
+  // In the split, the user removes the placeholder and types on before the upload ends: the hidden
+  // tab copy (still holding it) must not save its stale text over theirs.
+  let release5; const held5 = new Promise((res) => { release5 = res; });
+  await page.route("**/api/sessions/alpha/upload", async (rt) => { await held5; await rt.continue(); });
+  await ta.fill("");
+  await page.evaluate(() => {
+    const png = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="), (c) => c.charCodeAt(0));
+    const dt = new DataTransfer(); dt.items.add(new File([png], "gone.png", { type: "image/png" }));
+    document.querySelector("#chat-container .chat-input").dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  });
+  await page.locator(".wh-layout-btn").click();
+  r.ok(await until(async () => (await splitTa.count()) === 1 && /uploading image/.test(await splitTa.inputValue())), "split again with an upload running");
+  await splitTa.fill("");
+  await splitTa.pressSequentially("newer text");
+  await page.waitForTimeout(400);
+  release5();
+  await page.waitForTimeout(1200);
+  r.ok((await splitTa.inputValue()) === "newer text", `…the placeholder removed in the split stays removed ("${await splitTa.inputValue()}")`);
+  await page.unroute("**/api/sessions/alpha/upload");
+  await page.locator(".wh-layout-btn").click(); await page.locator(".wh-layout-btn").click();
+  r.ok(await until(async () => (await page.locator(".split-pane .chat-input").count()) === 0 && (await ta.count()) === 1), "…back to tabs");
+  r.ok(await until(async () => (await ta.inputValue()) === "newer text"), `…the draft is what the user typed, not the hidden copy's stale text ("${await ta.inputValue()}")`);
+  // …and the same with a switch to Beta before it finishes: the tab's hidden copy is then the only
+  // Alpha composer left on the page, and it still must not save its stale text.
+  let release8; const held8 = new Promise((res) => { release8 = res; });
+  await page.route("**/api/sessions/alpha/upload", async (rt) => { await held8; await rt.continue(); });
+  await ta.fill("");
+  await page.evaluate(() => {
+    const png = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="), (c) => c.charCodeAt(0));
+    const dt = new DataTransfer(); dt.items.add(new File([png], "gone2.png", { type: "image/png" }));
+    document.querySelector("#chat-container .chat-input").dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  });
+  await page.locator(".wh-layout-btn").click();
+  r.ok(await until(async () => (await splitTa.count()) === 1 && /uploading image/.test(await splitTa.inputValue())), "split with an upload running, once more");
+  await splitTa.fill("");
+  await splitTa.pressSequentially("split newer");
+  await page.waitForTimeout(400);
+  await page.locator(`.dk[data-sid="beta"]`).first().click();
+  await page.waitForTimeout(300);
+  release8();
+  await page.waitForTimeout(1200);
+  await page.unroute("**/api/sessions/alpha/upload");
+  await page.locator(`.dk[data-sid="alpha"]`).first().click();
+  const layoutBack = async () => { for (let i = 0; i < 3 && (await page.locator(".split-pane .chat-input").count()) > 0; i++) { await page.locator(".wh-layout-btn").click(); await page.waitForTimeout(300); } };
+  await layoutBack();
+  if ((await ta.count()) === 0) await page.locator("#af-chat-btn").click();
+  r.ok(await until(async () => (await ta.inputValue()) === "split newer"), `…switched to Beta before it finished: the draft is still what the user typed ("${await ta.inputValue()}")`);
+  await ta.fill("");
+  await ta.fill("before [uploading image zz9q…] after");
+  await ta.press("End"); await ta.press("Enter");
+  r.ok(await until(async () => /An image upload was interrupted — remove \[uploading image zz9q…\]/.test(await stEl.textContent())), `a placeholder with no upload behind it is named, not waited on ("${await stEl.textContent()}")`);
+  await ta.fill("");
+  // JPEG re-encoding paints transparency white (black would hide dark text); a PNG under the cap goes as it is.
+  const conv = await page.evaluate(async () => {
+    const c = document.createElement("canvas"); c.width = 2; c.height = 1;
+    const g = c.getContext("2d"); g.fillStyle = "#000"; g.fillRect(0, 0, 1, 1); // pixel 1 black, pixel 2 transparent
+    const png = await new Promise((res) => c.toBlob(res, "image/png"));
+    const jpg = await reencodeImage(new File([png], "t.png", { type: "image/png" }), "image/jpeg", 0.95);
+    const bmp = await createImageBitmap(jpg); const d = document.createElement("canvas"); d.width = 2; d.height = 1;
+    const dg = d.getContext("2d"); dg.drawImage(bmp, 0, 0);
+    const px = [...dg.getImageData(1, 0, 1, 1).data];
+    const big = new File([new Uint8Array(11.5 * 1024 * 1024)], "big.png", { type: "image/png" });
+    return { type: jpg.type, px, same: (await uploadableImage(big)) === big };
+  });
+  r.ok(conv.type === "image/jpeg" && conv.px[0] > 200 && conv.px[1] > 200 && conv.px[2] > 200, `…a transparent pixel re-encoded to JPEG is white (${conv.px.join(",")})`);
+  r.ok(conv.same, "…an 11.5 MiB PNG is uploaded unchanged");
+  // An upload failing while Alpha is away is said in Alpha's composer on return.
+  let release9; const held9 = new Promise((res) => { release9 = res; });
+  await page.route("**/api/sessions/alpha/upload", async (rt) => { await held9; await rt.fulfill({ status: 413, contentType: "application/json", body: JSON.stringify({ error: "refused while away" }) }); });
+  await page.evaluate(() => {
+    const png = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="), (c) => c.charCodeAt(0));
+    const dt = new DataTransfer(); dt.items.add(new File([png], "fail.png", { type: "image/png" }));
+    document.querySelector("#chat-container .chat-input").dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+  });
+  await page.waitForTimeout(300);
+  await page.locator(`.dk[data-sid="beta"]`).first().click();
+  await page.locator("#af-chat-btn").click();
+  release9();
+  await page.waitForTimeout(800);
+  await page.locator(`.dk[data-sid="alpha"]`).first().click();
+  await page.locator("#af-chat-btn").click();
+  r.ok(await until(async () => /Image not attached — refused while away/.test(await stEl.textContent()) && !(await ta.inputValue()).includes("uploading")), `…an upload that failed while Alpha was away is said on return ("${await stEl.textContent()}" / "${await ta.inputValue()}")`);
+  await page.unroute("**/api/sessions/alpha/upload");
+  await ta.fill("");
+  // A draft save in flight when the user types on and switches away: the old composer's PATCH,
+  // answered while Alpha is away, moves the saved draft's revision under the later typing — the
+  // return is no "changed on another device" against this device's own text.
+  let release10; const held10 = new Promise((res) => { release10 = res; });
+  let patches10 = 0;
+  await page.route("**/api/sessions/alpha/draft", async (rt) => { if (rt.request().method() === "PATCH" && patches10++ === 0) await held10; await rt.continue(); });
+  await ta.fill("saving");
+  r.ok(await until(async () => patches10 > 0), "a draft PATCH is in flight (held)");
+  await ta.pressSequentially(" and more, typed key by key past twenty", { delay: 5 }); // > 20 input events
+  await page.locator(`.dk[data-sid="beta"]`).first().click();
+  await page.locator("#af-chat-btn").click();
+  release10();
+  await page.waitForTimeout(800);
+  await page.locator(`.dk[data-sid="alpha"]`).first().click();
+  await page.locator("#af-chat-btn").click();
+  r.ok(await until(async () => ((await draft()) || {}).text === "saving and more, typed key by key past twenty"), `…back on Alpha the later typing is synced (${JSON.stringify(((await draft()) || {}).text)})`);
+  const notice10 = page.locator("#chat-container .chat-notice");
+  r.ok((await ta.inputValue()) === "saving and more, typed key by key past twenty" && ((await notice10.count()) === 0 || await notice10.evaluate((el) => el.hidden)), "…no conflict notice against this device's own text, the composer keeps it");
+  await page.unroute("**/api/sessions/alpha/draft");
+  await ta.fill("");
+  // A drop with no readable file (Photos.app's file promise) says so.
+  await page.evaluate(() => {
+    const dt = new DataTransfer(); dt.items.add("x", "text/plain");
+    const c = document.querySelector("#chat-container .chat-composer");
+    Object.defineProperty(dt, "types", { value: ["Files"] });
+    c.dispatchEvent(new DragEvent("drop", { dataTransfer: dt, bubbles: true, cancelable: true }));
+  });
+  r.ok(await until(async () => /Nothing attached — this drag carries no file/.test(await stEl.textContent())), `…an empty file drop says why ("${await stEl.textContent()}")`);
+  // Drag and drop onto the composer.
+  await page.evaluate(() => {
+    const png = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="), (c) => c.charCodeAt(0));
+    const dt = new DataTransfer(); dt.items.add(new File([png], "drop.png", { type: "image/png" }));
+    const c = document.querySelector("#chat-container .chat-composer");
+    c.dispatchEvent(new DragEvent("dragover", { dataTransfer: dt, bubbles: true, cancelable: true }));
+    c.dispatchEvent(new DragEvent("drop", { dataTransfer: dt, bubbles: true, cancelable: true }));
+  });
+  r.ok(await until(async () => /\.png/.test(await ta.inputValue()) && !(await ta.inputValue()).includes("uploading")), "an image dropped on the composer is attached");
+  await ta.fill("");
 
   await page.screenshot({ path: join(screenshotDir(), "m33-composer.png") });
   r.ok(pageErrors.length === 0, `no page errors (${pageErrors.join("; ")})`);

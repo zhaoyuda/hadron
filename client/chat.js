@@ -88,7 +88,7 @@ function renderChatView(el, s) {
     <div class="chat-notice" hidden></div>
     <div class="chat-outbox" hidden></div>
     <div class="chat-dialog" hidden></div>
-    <div class="chat-composer"><textarea class="chat-input" rows="1" placeholder="Message claude — Enter to send, Shift+Enter for a new line"></textarea><button class="chat-send" title="Send (Enter)">↑</button><div class="chat-draft-st"></div></div>
+    <div class="chat-composer"><button class="chat-attach" title="Attach images (or paste / drop them here)">📎</button><input class="chat-attach-in" type="file" accept="image/*" multiple hidden><textarea class="chat-input" rows="1" placeholder="Message claude — Enter to send, Shift+Enter for a new line"></textarea><button class="chat-send" title="Send (Enter)">↑</button><div class="chat-draft-st"></div></div>
   </div>`;
   const scroll = el.querySelector(".chat-scroll"), list = el.querySelector(".chat-list"), jump = el.querySelector(".chat-jump"), live = el.querySelector(".chat-live");
   // A programmatic scroll is consumed by the first scroll event that finds the
@@ -767,6 +767,17 @@ function chatLocalDraft(sessionId) {
 function chatSaveLocalDraft(sessionId, d) {
   try { if (d) localStorage.setItem(`hadron-draft-${sessionId}`, JSON.stringify(d)); else localStorage.removeItem(`hadron-draft-${sessionId}`); } catch {}
 }
+// An image upload finishing while no composer of this agent is on the page (the
+// operator switched away): the path goes into the saved draft — the one the next
+// composer opens with and syncs — never into a detached composer, whose input
+// handler would save its stale text over newer typing.
+function chatDraftReplace(sessionId, placeholder, replacement) {
+  const d = chatLocalDraft(sessionId);
+  if (!d || !d.text.includes(placeholder)) return; // removed meanwhile — don't fight it
+  // `from` keeps the lineage: the `at` of every text this one came from by an upload swap, so
+  // a PATCH of any of them may move it forward (sync()); another copy's typing may not.
+  chatSaveLocalDraft(sessionId, { ...d, text: d.text.replace(placeholder, replacement), synced: false, from: [...(Array.isArray(d.from) ? d.from : []), d.at].slice(-20), at: Date.now() });
+}
 const chatRequestId = () => `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 // Has claude recorded this handed message as a user turn? Same text (a clipped
 // bubble matches its prefix), recorded no earlier than the send.
@@ -902,6 +913,7 @@ function chatDialogCard(el, sessionId) {
 function chatComposer(el, m, sessionId, { list }) {
   const root = el.querySelector(".chat"), ta = el.querySelector(".chat-input"), sendBtn = el.querySelector(".chat-send");
   const status = el.querySelector(".chat-draft-st"), notice = el.querySelector(".chat-notice"), obEl = el.querySelector(".chat-outbox");
+  ta.dataset.sid = sessionId; // markdown.js tells a composer's hidden copy from the one on screen by it
   const deviceId = chatDeviceId();
   const api = (path) => `/api/sessions/${encodeURIComponent(sessionId)}${path}`;
   const sess = () => (typeof sessions !== "undefined" ? sessions : []).find((x) => x.id === sessionId);
@@ -915,8 +927,44 @@ function chatComposer(el, m, sessionId, { list }) {
     ta.style.height = `${Math.min(ta.scrollHeight, max)}px`;
     ta.style.overflowY = ta.scrollHeight > max ? "auto" : "hidden";
   };
+  // An image that could not be attached says why, for a while, where the draft status is.
+  let imgErr = null, imgErrTimer = null;
+  const showImgErr = (msg) => {
+    imgErr = String(msg || "Image not attached"); clearTimeout(imgErrTimer);
+    imgErrTimer = setTimeout(() => { imgErr = null; drawStatus(); }, 10000);
+  };
+  ta.addEventListener("hadron-image-error", (e) => {
+    showImgErr(e.detail); drawStatus();
+  });
+  // 📎 and drag-and-drop go through the same upload as a paste.
+  const attachIn = el.querySelector(".chat-attach-in");
+  el.querySelector(".chat-attach").addEventListener("click", () => attachIn.click());
+  attachIn.addEventListener("change", () => {
+    const files = [...attachIn.files]; attachIn.value = "";
+    const imgs = files.filter(isImageBlob);
+    if (imgs.length < files.length) ta.dispatchEvent(new CustomEvent("hadron-image-error", { detail: "Only images can be attached", bubbles: true }));
+    if (imgs.length) { ta.focus(); uploadImagesInto(ta, imgs, sessionId); }
+  });
+  const composerEl = el.querySelector(".chat-composer");
+  const dragHasFiles = (e) => [...(e.dataTransfer?.types || [])].includes("Files");
+  composerEl.addEventListener("dragover", (e) => { if (!dragHasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = "copy"; composerEl.classList.add("chat-drop"); });
+  composerEl.addEventListener("dragleave", (e) => { if (!composerEl.contains(e.relatedTarget)) composerEl.classList.remove("chat-drop"); });
+  composerEl.addEventListener("drop", (e) => {
+    composerEl.classList.remove("chat-drop");
+    if (!dragHasFiles(e)) return;
+    e.preventDefault();
+    const files = [...(e.dataTransfer.files || [])], imgs = files.filter(isImageBlob);
+    // Photos.app drags a file promise the page cannot read: say so instead of nothing.
+    if (!files.length) ta.dispatchEvent(new CustomEvent("hadron-image-error", { detail: "Nothing attached — this drag carries no file the page can read; drag it from Finder, or copy and paste it", bubbles: true }));
+    if (imgs.length < files.length) ta.dispatchEvent(new CustomEvent("hadron-image-error", { detail: "Only images can be attached", bubbles: true }));
+    if (imgs.length) { ta.focus(); uploadImagesInto(ta, imgs, sessionId); }
+  });
   const drawStatus = () => {
     let t = "";
+    // An upload that failed while no composer of this agent was on screen is said by the
+    // first one shown (a hidden or never-attached composer takes nothing; tick re-checks).
+    if (ta.offsetParent !== null && typeof imageErrors !== "undefined" && imageErrors.has(sessionId)) { showImgErr(imageErrors.get(sessionId)); imageErrors.delete(sessionId); }
+    if (imgErr) { status.textContent = imgErr; status.className = "chat-draft-st chat-draft-off chat-img-err"; return; }
     if (conflict) t = "";
     else if (local && (local.text || !local.synced)) t = inflight ? "Saving draft…" : local.synced ? "Draft synced" : offline ? "Offline — draft saved locally" : "Draft saved locally";
     status.textContent = t;
@@ -945,20 +993,51 @@ function chatComposer(el, m, sessionId, { list }) {
     const wait = Math.max(0, Math.min(CHAT_DRAFT_DEBOUNCE_MS, firstEdit + CHAT_DRAFT_MAX_WAIT_MS - Date.now()));
     timer = setTimeout(() => { timer = null; sync(); }, wait);
   };
+  // Another copy's accepted PATCH moved the saved draft's revision past this copy's: when the
+  // saved text is what this copy holds, take its record (revision, lineage) — never a 409 or a
+  // "changed on another device" against this device's own text.
+  const catchUp = () => {
+    const st = chatLocalDraft(sessionId);
+    if (st && local && st.text === local.text && st.revision > local.revision) local = { ...st };
+  };
   const sync = async () => {
     clearTimeout(timer); timer = null; firstEdit = 0;
     if (inflight || conflict || !local || local.synced) return;
     inflight = true; lastTry = Date.now(); drawStatus();
+    catchUp();
     const snap = { ...local };
+    // Later typing keeps this record in its lineage. Marked on the saved draft only when it IS this
+    // record — an upload swap may have written a newer one, never saved over.
+    local.sent = true;
+    const cur = chatLocalDraft(sessionId);
+    if (cur && cur.at === local.at) chatSaveLocalDraft(sessionId, { ...cur, sent: true });
     let r = null, j = null;
     try {
       r = await fetch(api("/draft"), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: snap.text, attachments: [], deviceId, revision: snap.revision, conversationId: snap.conversationId || m.conversationId || null }) });
       j = await r.json().catch(() => ({}));
     } catch { r = null; }
     inflight = false;
-    if (!el.isConnected) return;
+    // The server took this text: the saved draft moves to the new revision even when this
+    // composer was retired or someone wrote the draft meanwhile (an image upload finishing into
+    // it) — on this device every later text descends from this one. Left behind, the next
+    // composer would read the server's copy as newer and paste it over what the user has.
+    const newRev = r && r.ok ? (j.draft ? j.draft.revision : 0) : null;
+    let stored = chatLocalDraft(sessionId);
+    if (newRev !== null && stored && stored.revision === snap.revision && (stored.text === snap.text || (Array.isArray(stored.from) && stored.from.includes(snap.at)))) {
+      stored = stored.text === snap.text ? (newRev ? { ...stored, revision: newRev, synced: true } : null) : { ...stored, revision: newRev, synced: false };
+      chatSaveLocalDraft(sessionId, stored);
+    }
+    if (!el.isConnected || !ta.isConnected) return; // a retired composer: the next one owns the draft
     if (!r) { offline = true; drawStatus(); return; }
     offline = false;
+    // Someone else wrote the saved draft meanwhile (an image upload finishing into it, the
+    // composer's other copy): never save this answer over it — the writer syncs its own.
+    if (stored && stored.text !== snap.text && (!local || stored.text !== local.text)) {
+      if (newRev !== null && local && local.revision === snap.revision) local.revision = newRev;
+      // The upload's silent put made this textarea show the saved draft: adopt it and send it.
+      if (ta.value === stored.text) { local = { ...stored }; schedule(); }
+      drawStatus(); return;
+    }
     if (r.ok) {
       const rev = j.draft ? j.draft.revision : 0;
       if (local && local.text === snap.text) local = rev ? { ...local, revision: rev, synced: true } : null;
@@ -974,7 +1053,14 @@ function chatComposer(el, m, sessionId, { list }) {
   };
   const onInput = () => {
     touched = true;
-    local = { text: ta.value, revision: local ? local.revision : 0, conversationId: m.conversationId || null, synced: false, at: Date.now() };
+    // An upload swap already wrote this exact text into the saved draft (chatDraftReplace):
+    // take that record whole — its revision and lineage — so sync() can tell it from typing.
+    const st = chatLocalDraft(sessionId);
+    if (st && !st.synced && st.text === ta.value) local = { ...st };
+    // Typing descends from the record it edits; a record that went out in a PATCH is kept in the
+    // lineage (one per PATCH, not one per keystroke) so that PATCH, answered after this composer
+    // was retired, still moves the saved draft to its new revision however much was typed since.
+    else local = { text: ta.value, revision: local ? local.revision : 0, conversationId: m.conversationId || null, synced: false, from: local ? [...(Array.isArray(local.from) ? local.from : []), ...(local.sent ? [local.at] : [])].slice(-20) : [], at: Date.now() };
     if (!local.text && !local.revision) local = null;
     chatSaveLocalDraft(sessionId, local);
     autosize(); drawStatus();
@@ -985,10 +1071,15 @@ function chatComposer(el, m, sessionId, { list }) {
   // another device fills an untouched composer; one for an earlier
   // conversation is offered, not pasted in; unsynced local typing is sent.
   const load = async () => {
+    const seenRev = chatLocalDraft(sessionId)?.revision || 0;
     let d;
     try { const r = await fetch(api("/draft")); if (!r.ok) { if (r.status !== 401) offline = true; drawStatus(); return; } d = (await r.json()).draft; } catch { offline = true; drawStatus(); return; }
-    if (!el.isConnected) return;
+    if (!el.isConnected || !ta.isConnected) return;
     offline = false;
+    catchUp();
+    // A PATCH accepted while this GET was out moved the saved draft past what the answer knows:
+    // the answer is older than this device's own draft, never a reason to clear or replace it.
+    if ((chatLocalDraft(sessionId)?.revision || 0) > seenRev) { if (local && !local.synced) sync(); drawStatus(); return; }
     if (!d) {
       if (local && !local.synced && local.text) sync();
       else if (local && local.synced) { local = null; chatSaveLocalDraft(sessionId, null); if (!touched) { ta.value = ""; autosize(); } }
@@ -1167,7 +1258,8 @@ function chatComposer(el, m, sessionId, { list }) {
   const send = () => {
     const text = ta.value.replace(/\s+$/, "");
     if (!text) return;
-    if (text.includes("[uploading image…]")) { status.textContent = "Wait for the image to upload…"; return; }
+    const hold = imageUploadHold(text);
+    if (hold) { status.textContent = hold; return; }
     // The draft is cleared on this device at once and on the record right after;
     // the message is a separate thing from here on.
     ta.value = ""; touched = true; autosize();
@@ -1192,6 +1284,7 @@ function chatComposer(el, m, sessionId, { list }) {
   // the sessions list for entries made elsewhere), handed rows that claude has
   // recorded since are done, a draft that could not sync is tried again.
   const tick = async () => {
+    if (ta.offsetParent !== null && typeof imageErrors !== "undefined" && imageErrors.has(sessionId)) drawStatus();
     const wire = sess()?.outbox;
     let fresh = null;
     if (m.outbox.size) { try { const g = await fetch(api("/outbox")); if (g.ok) fresh = (await g.json()).outbox || []; } catch {} }

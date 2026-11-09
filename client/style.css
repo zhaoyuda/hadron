@@ -3046,11 +3046,14 @@ mark.ann-mark.ann-mark-flash { background: rgba(210, 153, 34, .8); outline: 1px 
 .ob-handed { opacity: 0.75; }
 .ob-failed { border-color: var(--red); } .ob-failed .ob-st { color: var(--red); }
 .ob-uncertain { border-color: var(--yellow); } .ob-uncertain .ob-st { color: var(--yellow); }
-.chat-composer { flex-shrink: 0; position: relative; margin: 6px auto 0; width: 100%; max-width: 860px; box-sizing: border-box; padding: 0 20px 8px; display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: end; }
+.chat-composer { flex-shrink: 0; position: relative; margin: 6px auto 0; width: 100%; max-width: 860px; box-sizing: border-box; padding: 0 20px 8px; display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: end; }
 .chat-input { width: 100%; box-sizing: border-box; resize: none; min-height: 38px; max-height: 40vh; padding: 9px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg2); color: var(--text); font: inherit; font-size: 14px; line-height: 1.45; outline: none; }
 .chat-input:focus { border-color: var(--blue); }
 .chat-send { width: 34px; height: 34px; margin-bottom: 2px; border-radius: 50%; border: none; background: var(--blue); color: #fff; font-size: 16px; cursor: pointer; }
 .chat-send:hover { filter: brightness(1.1); }
+.chat-attach { width: 30px; height: 34px; margin-bottom: 2px; border: none; background: none; color: var(--text3); font-size: 16px; cursor: pointer; border-radius: 6px; }
+.chat-attach:hover { background: rgba(255,255,255,0.06); }
+.chat-composer.chat-drop { outline: 2px dashed var(--blue); outline-offset: -2px; }
 .chat-draft-st { grid-column: 1 / -1; min-height: 14px; font-size: 11px; color: var(--text3); padding: 0 4px; }
 .chat-draft-off { color: var(--yellow); }
 /* the dialog card (G4): claude's permission / plan / question dialog, parsed from the pane */
@@ -3093,3 +3096,5 @@ mark.ann-mark.ann-mark-flash { background: rgba(210, 153, 34, .8); outline: 1px 
 .cd-busy .cd-status { color: var(--text2); }
 @media (max-width: 700px) { .chat-dialog { padding-left: 10px; padding-right: 10px; } .cd-opt { flex-basis: 100%; } }
 @media (max-width: 700px) { .chat-list, .chat-composer, .chat-outbox, .chat-notice { padding-left: 10px; padding-right: 10px; } }
+
+.img-err-toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 9999; max-width: min(560px, calc(100vw - 32px)); padding: 8px 14px; border-radius: 6px; background: #3d1d1d; color: #ffb4b4; border: 1px solid #6e2b2b; font-size: 13px; box-shadow: 0 4px 16px rgba(0,0,0,.4); }

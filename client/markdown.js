@@ -744,42 +744,158 @@ function showSaveConflictDialog({ filePath, container, draftContent, diskContent
 // textareas' inline oninput autosave exactly as typing would.
 const IMAGE_PASTE_TARGETS = ".text-edit-area, #notes-textarea, #rp-notes-textarea, .split-pane-notes, .chat-input";
 
-function imagePasteInsert(ta, text, start, end) {
-  ta.setRangeText(text, start, end, "end");
+function imagePasteInsert(ta, text, start, end, mode = "end") {
+  ta.setRangeText(text, start, end, mode);
   ta.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+// What the server stores and claude reads. Anything else the browser can decode
+// (a Mac clipboard TIFF, HEIC, BMP) is re-encoded to PNG first; an image over
+// the upload cap is re-encoded to JPEG. Before, both were refused (415 / 413) and
+// the placeholder vanished without a word.
+const UPLOAD_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+const UPLOAD_MAX = 12 * 1024 * 1024 - 64 * 1024; // the server takes 12 MiB
+const IMAGE_NAME_RE = /\.(png|jpe?g|gif|webp|heic|heif|tiff?|bmp)$/i;
+
+// artifacts.js has a global isImageFile(path) — this one takes a File.
+function isImageBlob(f) { return !!f && (/^image\//.test(f.type) || (!f.type && IMAGE_NAME_RE.test(f.name || ""))); }
+
+async function reencodeImage(file, type, quality) {
+  let bmp;
+  try { bmp = await createImageBitmap(file, { imageOrientation: "from-image" }); } catch { throw new Error(`this ${file.type || "image"} cannot be read by the browser — save it as PNG or JPEG`); }
+  const c = document.createElement("canvas"); c.width = bmp.width; c.height = bmp.height;
+  const g = c.getContext("2d");
+  // JPEG has no alpha: transparency would turn black and take dark text with it.
+  if (type === "image/jpeg") { g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height); }
+  g.drawImage(bmp, 0, 0); bmp.close?.();
+  const blob = await new Promise((res) => c.toBlob(res, type, quality));
+  if (!blob) throw new Error("could not convert the image");
+  return blob;
+}
+
+async function uploadableImage(file) {
+  let blob = file;
+  if (!UPLOAD_TYPES.includes(file.type)) blob = await reencodeImage(file, "image/png");
+  if (blob.size > UPLOAD_MAX) blob = await reencodeImage(file, "image/jpeg", 0.9);
+  if (blob.size > UPLOAD_MAX) throw new Error(`image too large (${Math.round(blob.size / 1048576)} MB)`);
+  return blob;
+}
+
+// Upload each image and put its path (a markdown image tag outside the chat
+// composer) where its placeholder is. Every upload has its own placeholder (a
+// random id: the draft keeps it across a reload), so uploads finishing out of
+// order — or one removed by the user — never land in another's place, and the
+// replacement keeps the caret where the user has it. The composer may have been
+// re-rendered or doubled meanwhile (agent switched away and back, a split): the
+// path goes into every textarea on the page holding the placeholder. A failure
+// removes the placeholder and is SAID: an "hadron-image-error" event on the
+// textarea (the chat composer shows it), and a console line everywhere.
+const imageErrors = new Map(); // sid → an upload error no composer was on the page to show
+function imageErrorToast(msg) {
+  const el = document.createElement("div");
+  el.className = "img-err-toast"; el.textContent = msg; el.setAttribute("role", "alert");
+  document.body.appendChild(el); setTimeout(() => el.remove(), 8000);
+}
+const pendingImageUploads = new Set(); // placeholders whose upload runs in THIS page
+const IMAGE_PLACEHOLDER_RE = /\[uploading image [0-9a-z]+…\]/g;
+function uploadImagesInto(ta, files, sessionId) {
+  const bare = ta.matches(".chat-input");
+  for (const file of files) {
+    const id = Math.random().toString(36).slice(2, 8);
+    const placeholder = bare ? `[uploading image ${id}…]` : `![uploading ${id}…]()`;
+    pendingImageUploads.add(placeholder);
+    imagePasteInsert(ta, placeholder + (files.length > 1 && bare ? " " : ""), ta.selectionStart, ta.selectionEnd);
+    // Which copies of the field existed at the paste and which got the placeholder (the
+    // input handler mirrors it to some, never to all — saveRpNotes leaves a split's notes alone).
+    const copiesAtPaste = new Set(document.querySelectorAll(IMAGE_PASTE_TARGETS));
+    const hadPlaceholder = new Set([...copiesAtPaste].filter((o) => o.value.includes(placeholder)));
+    const sid = ta.dataset.sid || ""; // a chat composer: its saved draft is the truth
+    const swap = (replacement) => {
+      pendingImageUploads.delete(placeholder);
+      const all = [...document.querySelectorAll(IMAGE_PASTE_TARGETS)];
+      const shown = (t) => t.offsetParent !== null;
+      const put = (t, notify) => {
+        const idx = t.value.indexOf(placeholder);
+        if (idx === -1) return false; // the user removed it — don't fight them
+        if (notify) imagePasteInsert(t, replacement, idx, idx + placeholder.length, "preserve");
+        else t.setRangeText(replacement, idx, idx + placeholder.length, "preserve");
+        return true;
+      };
+      if (sid) {
+        // A composer can exist more than once (re-rendered after a switch, the tab's hidden copy
+        // beside a split's): the saved draft is written once, the copy on screen gets the text as
+        // typing (it saves the same), hidden or detached copies only silently — their input
+        // handlers would save stale text over what the user typed elsewhere.
+        if (typeof chatDraftReplace === "function") chatDraftReplace(sid, placeholder, replacement);
+        const mine = all.filter((t) => t.dataset.sid === sid);
+        let target = null;
+        for (const t of mine) if (put(t, shown(t)) && shown(t)) target = t;
+        if (!ta.isConnected) put(ta, false);
+        return target || mine.find(shown) || ta;
+      }
+      // Notes / editor: the copy on screen holding the placeholder gets it as typing (it saves);
+      // hidden copies only silently — a stale hidden copy's save would drop what was typed since.
+      // A copy on screen that held the placeholder (or was drawn after the paste, from text that
+      // held it) and no longer does means the user deleted it: that wins, nothing is written
+      // anywhere. A copy that never received it (a split's notes left stale) decides nothing.
+      const NOTES = "#notes-textarea, #rp-notes-textarea, .split-pane-notes";
+      const copies = ta.matches(NOTES) ? all.filter((o) => o.matches(NOTES)) : [ta];
+      const holders = copies.filter((o) => o.value.includes(placeholder));
+      if (!holders.includes(ta) && ta.value.includes(placeholder)) holders.push(ta);
+      const shownCopies = copies.filter((o) => o.isConnected && shown(o));
+      const deleted = shownCopies.some((o) => !o.value.includes(placeholder) && (hadPlaceholder.has(o) || !copiesAtPaste.has(o)));
+      const t = deleted ? null : holders.find(shown) || (shownCopies.length ? null : (ta.isConnected ? ta : holders[0])) || null;
+      if (!t) return shownCopies[0] || ta;
+      for (const o of holders) put(o, o === t);
+      return t;
+    };
+    uploadableImage(file)
+      .then((blob) => fetch(`/api/sessions/${encodeURIComponent(sessionId)}/upload`, { method: "POST", headers: { "Content-Type": blob.type }, body: blob }))
+      .then(async (r) => { if (r.ok) return r.json(); let j = {}; try { j = await r.json(); } catch {} throw new Error(j.error || `upload failed (HTTP ${r.status})`); })
+      .then((j) => swap(bare ? `${j.path} ` : `![screenshot](${j.path})`))
+      .catch((err) => {
+        const t = swap("");
+        const msg = `Image not attached — ${err && err.message ? err.message : err}`;
+        console.warn("[hadron]", msg);
+        if (sid && t.offsetParent === null) imageErrors.set(sid, msg); // no composer on screen: the next one shown says it
+        else if (sid) t.dispatchEvent(new CustomEvent("hadron-image-error", { detail: msg, bubbles: true }));
+        else imageErrorToast(msg); // editor / notes have no status line of their own
+      });
+  }
+}
+
+// What stops a chat send: an upload still running here, or a placeholder whose
+// upload is gone (the page was reloaded under it) — null when the text may go.
+function imageUploadHold(text) {
+  const found = text.match(IMAGE_PLACEHOLDER_RE) || [];
+  if (found.some((p) => pendingImageUploads.has(p))) return "Wait for the image to upload…";
+  if (found.length) return `An image upload was interrupted — remove ${found[0]} and attach the image again`;
+  return null;
+}
+
+function clipboardImages(dt) {
+  const out = [];
+  for (const item of (dt && dt.items) || []) if (item.kind === "file") { const f = item.getAsFile(); if (isImageBlob(f)) out.push(f); }
+  if (!out.length) for (const f of (dt && dt.files) || []) if (isImageBlob(f)) out.push(f);
+  return out;
 }
 
 function handleImagePaste(e) {
   const ta = e.target;
   if (!ta || !ta.matches || !ta.matches(IMAGE_PASTE_TARGETS)) return;
-  const items = (e.clipboardData && e.clipboardData.items) || [];
-  let file = null;
-  for (const item of items) {
-    if (item.kind === "file" && /^image\//.test(item.type)) { file = item.getAsFile(); break; }
+  const files = clipboardImages(e.clipboardData);
+  const target = ta.dataset.sid || activeSessionId; // a chat composer uploads for its own agent
+  if (files.length && !target) return;
+  if (!files.length) {
+    // A file that is not an image, pasted into the chat: say so instead of nothing.
+    const types = [...((e.clipboardData && e.clipboardData.types) || [])];
+    if (ta.matches(".chat-input") && types.includes("Files") && !e.clipboardData.getData("text/plain")) {
+      ta.dispatchEvent(new CustomEvent("hadron-image-error", { detail: `Nothing attached — the clipboard holds a file that is not an image (${types.join(", ")})`, bubbles: true }));
+    }
+    return; // non-image paste (or no agent) falls through untouched
   }
-  if (!file || !activeSessionId) return; // non-image paste (or no agent) falls through untouched
   e.preventDefault();
-
-  // The chat composer gets the bare path (claude reads the file from its
-  // prompt); the markdown surfaces get an image tag.
-  const bare = ta.matches(".chat-input");
-  const placeholder = bare ? "[uploading image…]" : "![uploading…]()";
-  imagePasteInsert(ta, placeholder, ta.selectionStart, ta.selectionEnd);
-
-  const swap = (replacement) => {
-    const idx = ta.value.indexOf(placeholder);
-    if (idx === -1) return; // user removed it — don't fight them
-    imagePasteInsert(ta, replacement, idx, idx + placeholder.length);
-  };
-
-  fetch(`/api/sessions/${encodeURIComponent(activeSessionId)}/upload`, {
-    method: "POST",
-    headers: { "Content-Type": file.type },
-    body: file,
-  })
-    .then((r) => r.ok ? r.json() : Promise.reject(new Error(`upload failed (${r.status})`)))
-    .then((j) => swap(bare ? `${j.path} ` : `![screenshot](${j.path})`))
-    .catch(() => swap(""));
+  uploadImagesInto(ta, files, target);
 }
 
 document.addEventListener("paste", handleImagePaste);
