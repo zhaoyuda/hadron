@@ -780,13 +780,18 @@ function getLanguageFromPath(filePath) {
 /**
  * Copy text to clipboard. Uses navigator.clipboard when available (secure
  * contexts: localhost, HTTPS). Falls back to the hidden-textarea +
- * execCommand("copy") trick for plain-http Tailscale access.
+ * execCommand("copy") trick for plain-http Tailscale access (no
+ * navigator.clipboard at all) and when writeText is refused (a webview's
+ * permission policy). Call it from the click itself: both need the gesture.
  */
 function copyTextToClipboard(text) {
   if (navigator.clipboard && navigator.clipboard.writeText) {
-    return navigator.clipboard.writeText(text);
+    return navigator.clipboard.writeText(text).catch(() => copyViaTextarea(text));
   }
-  // Fallback: textarea trick
+  return copyViaTextarea(text);
+}
+
+function copyViaTextarea(text) {
   return new Promise((resolve, reject) => {
     const ta = document.createElement("textarea");
     ta.value = text;

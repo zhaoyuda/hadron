@@ -546,7 +546,7 @@ function chatDecorateCode(root) {
     hd.querySelector(".ci-code-copy").addEventListener("click", async (e) => {
       const text = (code || pre).textContent;
       let ok = false;
-      try { await navigator.clipboard.writeText(text); ok = true; } catch {}
+      try { await copyTextToClipboard(text); ok = true; } catch {} // artifacts.js: execCommand fallback for plain http
       e.target.textContent = ok ? "Copied" : "Copy failed";
       setTimeout(() => { e.target.textContent = "Copy"; }, 1500);
     });

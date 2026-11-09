@@ -116,6 +116,12 @@ try {
   const m1 = chat.locator(".ci-assistant").first();
   r.ok((await m1.locator(".ci-md h2").textContent()) === "看一下文件" && (await m1.locator(".ci-md li").count()) === 2, "the reply's markdown is rendered (h2 + list)");
   r.ok((await m1.locator(".ci-code .ci-code-lang").textContent()) === "js" && (await m1.locator(".ci-code .ci-code-copy").textContent()) === "Copy", "the code block has a header naming the language + Copy");
+  // Plain http over Tailscale is not a secure context: no navigator.clipboard.
+  // Copy must still work (execCommand fallback), never "Copy failed".
+  await page.evaluate(() => { window.__cb = Object.getOwnPropertyDescriptor(Navigator.prototype, "clipboard"); Object.defineProperty(Navigator.prototype, "clipboard", { get: () => undefined, configurable: true }); });
+  await m1.locator(".ci-code .ci-code-copy").click();
+  r.ok(await until(async () => (await m1.locator(".ci-code .ci-code-copy").textContent()) === "Copied"), `…Copy works without navigator.clipboard (plain http) — ${await m1.locator(".ci-code .ci-code-copy").textContent()}`);
+  await page.evaluate(() => { if (window.__cb) Object.defineProperty(Navigator.prototype, "clipboard", window.__cb); });
   r.ok((await m1.locator(".ci-think").count()) === 1 && !(await m1.locator(".ci-think").evaluate((d) => d.open)), "Thinking is one collapsed line");
   const readCard = m1.locator(".ci-tool");
   r.ok((await readCard.locator(".ci-tool-name").textContent()) === "Read" && (await readCard.locator(".ci-tool-sum").textContent()) === "src/app.js" && (await readCard.locator(".ci-tool-st").textContent()) === "✓", `Read card: one line, path relative to the cwd, ✓ from the result (${await readCard.locator(".ci-tool-hd").textContent()})`);
