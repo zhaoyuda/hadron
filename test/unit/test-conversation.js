@@ -234,9 +234,10 @@ console.log("\n[task notifications → notice]");
   ok(JSON.stringify(kinds) === JSON.stringify(["notice", "queue", "notice", "notice", "notice", "user", "user", "queue"]), `kinds: ${kinds.join(",")}`);
   const [q, dq, d, f, k] = conv.items;
   ok(dq.op === "dequeue", "a contentless dequeue stays a queue item (the client draws nothing for it)");
-  ok(q.via === "queue" && !q.dup && q.status === "completed" && q.summary === 'Agent "scan" & co finished' && q.durationMs === 125000 && q.toolUses === 7, `the enqueued notice parses status / summary (entities decoded) / duration / tools (${q.summary})`);
+  ok(q.via === "queue" && q.status === "completed" && q.summary === 'Agent "scan" & co finished' && q.durationMs === 125000 && q.toolUses === 7, `the enqueued notice parses status / summary (entities decoded) / duration / tools (${q.summary})`);
   ok(q.text === a && q.at === T(1), "…the raw envelope is its text");
-  ok(d.via === "record" && d.dup === true, "the user record of the same notice is the dup (the client hides it)");
+  ok(d.via === "record" && !d.dup && q.dup === true, "the user record of the same notice is the copy shown; its queue line becomes the dup (the client hides it)");
+  ok(JSON.stringify(d.hides) === JSON.stringify([q.id]) && f.hides === undefined, `…the record names the queue line it replaces (hides ${JSON.stringify(d.hides)}); an unpaired one names none`);
   ok(f.via === "record" && !f.dup && f.status === "failed", "a notice with no queue entry is a notice, not a dup");
   ok(k.via === "queue" && k.status === "killed", "a notice removed from the queue mid-turn is drawn once, from its enqueue (dequeue / remove add nothing)");
   ok(conv.items[5].kind === "user" && conv.items[5].text === "<task-notification> 我自己打的" && conv.items[6].kind === "user", "a person's prompt that starts with the tag (no origin / human origin) stays a prompt");
@@ -246,17 +247,112 @@ console.log("\n[task notifications → notice]");
     ok(!qline.dup, "a queued prompt's line is drawn while it waits");
     ingestRecord(conv, user("普通排队消息", 9.5));
     ok(qline.dup === true && qline.rev > rev0, "…its user record marks the queue line dup with a new rev (the client hides it on the next after= page)");
+    ok(JSON.stringify(conv.items.at(-1).hides) === JSON.stringify([qline.id]), "…and the bubble names that line in `hides`");
     ingestRecord(conv, user("普通排队消息", 9.6));
     ok(conv.items.filter((i) => i.kind === "user" && i.text === "普通排队消息").length === 2, "…a second identical prompt is still a bubble");
     ingestRecord(conv, { type: "queue-operation", operation: "enqueue", timestamp: T(9.7), sessionId: SID, content: "继续" });
     const cont = conv.items[conv.items.length - 1];
     ingestRecord(conv, { type: "queue-operation", operation: "remove", timestamp: T(9.8), sessionId: SID, content: "继续" });
     ingestRecord(conv, user("继续", 9.9));
-    ok(cont.kind === "queue" && !cont.dup, "…a prompt removed from the queue mid-turn is forgotten: a later identical prompt does not hide its line");
+    ok(cont.kind === "queue" && !cont.dup && conv.items.at(-1).hides === undefined, "…a prompt removed from the queue mid-turn is forgotten: a later identical prompt does not hide its line (nor name it)");
+  }
+  // A person's queued prompt that starts with the tag is not a notice (the queue record has no origin).
+  {
+    const n0 = conv.items.length;
+    ingestRecord(conv, { type: "queue-operation", operation: "enqueue", timestamp: T(11), sessionId: SID, content: "<task-notification> please explain this syntax" });
+    ingestRecord(conv, user("<task-notification> please explain this syntax", 11.1, { origin: { kind: "human" } }));
+    const [ql, ub] = conv.items.slice(n0);
+    ok(ql.kind === "queue" && ql.dup === true && ub.kind === "user", `a queued prompt starting with <task-notification> stays a prompt; its queue line is the dup (${ql.kind}, ${ub.kind})`);
+    // An explicit human origin wins even over a real-shaped envelope claude enqueued.
+    const shaped = env("bg9", "completed", "x");
+    ingestRecord(conv, { type: "queue-operation", operation: "enqueue", timestamp: T(11.2), sessionId: SID, content: shaped });
+    ingestRecord(conv, user(shaped, 11.3, { origin: { kind: "human" } }));
+    const shapedQ = conv.items[conv.items.length - 2];
+    ok(conv.items[conv.items.length - 1].kind === "user", "…origin human is always a prompt");
+    ok(shapedQ.kind === "notice" && shapedQ.via === "queue" && shapedQ.dup === true, "…and the queue line drawn as a notice is the hidden copy");
+    // Same with no origin at all: a pasted envelope is a person's prompt.
+    const pasted = env("bg10", "completed", "pasted");
+    ingestRecord(conv, { type: "queue-operation", operation: "enqueue", timestamp: T(11.21), sessionId: SID, content: pasted });
+    const pq = conv.items.at(-1);
+    ingestRecord(conv, user(pasted, 11.22));
+    ok(conv.items.at(-1).kind === "user" && pq.dup === true && conv.items.at(-1).hides?.includes(pq.id), "an envelope-shaped prompt with no origin is a bubble; its queue notice is hidden (and named in hides)");
+    // The same text queued twice: each bubble takes the oldest waiting line.
+    ingestRecord(conv, { type: "queue-operation", operation: "enqueue", timestamp: T(11.4), sessionId: SID, content: "continue" });
+    const c1 = conv.items[conv.items.length - 1];
+    ingestRecord(conv, { type: "queue-operation", operation: "enqueue", timestamp: T(11.5), sessionId: SID, content: "continue" });
+    const c2 = conv.items[conv.items.length - 1];
+    ingestRecord(conv, user("continue", 11.6));
+    ok(c1.dup === true && !c2.dup && JSON.stringify(conv.items.at(-1).hides) === JSON.stringify([c1.id]), "two identical queued prompts: the first bubble hides the first line");
+    ingestRecord(conv, user("continue", 11.7));
+    ok(c2.dup === true && JSON.stringify(conv.items.at(-1).hides) === JSON.stringify([c2.id]), "…the second bubble hides the second");
   }
   // A second record of an already-paired notice is not a dup again.
   ingestRecord(conv, user(a, 10, { origin: { kind: "task-notification" } }));
   ok(conv.items.at(-1).kind === "notice" && !conv.items.at(-1).dup, "the dup pairing is used once");
+  // claude's banner in front of the envelope: still the notice, drawn from the envelope, paired with its queue line.
+  {
+    const bc = createConversation();
+    const e = env("bg11", "completed", "banner");
+    ingestRecord(bc, { type: "queue-operation", operation: "enqueue", timestamp: T(1), sessionId: SID, content: e });
+    ingestRecord(bc, user("[SYSTEM NOTIFICATION - NOT USER INPUT]\nThis is an automated background-task event.\n" + e, 2, { origin: { kind: "task-notification" } }));
+    ok(bc.items.length === 2 && bc.items[1].kind === "notice" && !bc.items[1].dup && bc.items[0].dup === true && bc.items[1].text === e, "a banner-prefixed notice record is the notice (envelope text) and pairs with its queue line");
+    ingestRecord(bc, user("[SYSTEM NOTIFICATION - NOT USER INPUT]\nno envelope here", 3, { origin: { kind: "task-notification" } }));
+    ok(bc.items.at(-1).kind === "user", "…a task-notification origin with no envelope stays a bubble (nothing to parse)");
+  }
+  // The waiting lines are bounded by entries, not keys.
+  {
+    const bc = createConversation();
+    for (let i = 0; i < 500; i++) ingestRecord(bc, { type: "queue-operation", operation: "enqueue", timestamp: T(1 + i / 1000), sessionId: SID, content: "same" });
+    for (let i = 0; i < 500; i++) ingestRecord(bc, { type: "queue-operation", operation: "enqueue", timestamp: T(2 + i / 1000), sessionId: SID, content: env("n" + i, "completed", "s") });
+    ok(bc.queuedPrompt.length === 200 && bc.noticeSeen.length === 200, `queued prompts and notices are capped by entries (${bc.queuedPrompt.length}, ${bc.noticeSeen.length})`);
+  }
+  // Eviction is by entry age across texts: A1, B1, A2, then 198 more → A1 goes, B1 and A2 stay.
+  {
+    const bc = createConversation();
+    const enq = (t, i) => ingestRecord(bc, { type: "queue-operation", operation: "enqueue", timestamp: T(1 + i / 1000), sessionId: SID, content: t });
+    enq("A", 0); enq("B", 1); enq("A", 2);
+    for (let i = 0; i < 198; i++) enq("u" + i, 3 + i);
+    const keys = bc.queuedPrompt.map((e) => e.key);
+    ok(keys[0] === "B" && keys[1] === "A" && keys.length === 200, `the oldest ENTRY is evicted first (${keys.slice(0, 2).join(",")})`);
+  }
+  // A line evicted from the picture before its record: the entry keeps the id, not the item;
+  // the record is shown and names the line for a client still holding it.
+  {
+    const bc = createConversation({ maxItems: 2 });
+    const e = env("bg12", "completed", "ev");
+    ingestRecord(bc, { type: "queue-operation", operation: "enqueue", timestamp: T(1), sessionId: SID, content: e });
+    const qid = bc.items.at(-1).id;
+    ingestRecord(bc, { type: "queue-operation", operation: "enqueue", timestamp: T(1.5), sessionId: SID, content: "继续" });
+    const pid = bc.items.at(-1).id;
+    ingestRecord(bc, user("x", 2)); ingestRecord(bc, user("y", 3));
+    ok(bc.noticeSeen.length === 1 && bc.noticeSeen[0].item === null && bc.queuedPrompt[0].item === null, "an evicted queue line's entry waits on by id, its item released");
+    ingestRecord(bc, user(e, 4, { origin: { kind: "task-notification" } }));
+    ok(bc.items.at(-1).kind === "notice" && !bc.items.at(-1).dup && JSON.stringify(bc.items.at(-1).hides) === JSON.stringify([qid]), "…its record is the visible notice and names the evicted line");
+    ingestRecord(bc, user("继续", 5));
+    ok(bc.items.at(-1).kind === "user" && JSON.stringify(bc.items.at(-1).hides) === JSON.stringify([pid]), "…same for a queued prompt's bubble");
+  }
+  // The queue copy evicted by the record's own push: the record is the copy shown either way.
+  {
+    const bc = createConversation({ maxItems: 2 });
+    const e = env("bg14", "completed", "pair");
+    ingestRecord(bc, { type: "queue-operation", operation: "enqueue", timestamp: T(1), sessionId: SID, content: e });
+    ingestRecord(bc, user("x", 2));
+    ingestRecord(bc, user(e, 3, { origin: { kind: "task-notification" } }));
+    const rec = bc.items.at(-1);
+    ok(rec.kind === "notice" && !rec.dup && rec.hides?.length === 1, `a paired record whose queue copy was evicted is visible and still names it, for a client that holds it (dup ${rec.dup})`);
+    ok(!bc.items.some((i) => i.kind === "notice" && i.via === "queue"), "…and the queue copy is gone");
+  }
+  // A notice removed mid-turn waits for no record: the same text typed later by a person pairs with its own line.
+  {
+    const bc = createConversation();
+    const e = env("bg13", "completed", "rm");
+    const q = (op, i) => ingestRecord(bc, { type: "queue-operation", operation: op, timestamp: T(i), sessionId: SID, content: e });
+    q("enqueue", 1); const real = bc.items.at(-1);
+    q("remove", 2);
+    q("enqueue", 3); const fake = bc.items.at(-1);
+    ingestRecord(bc, user(e, 4));
+    ok(!real.dup && fake.dup === true && bc.items.at(-1).kind === "user", `a removed notice stays drawn; the later prompt hides only its own line (real ${!!real.dup}, fake ${!!fake.dup})`);
+  }
   const bad = createConversation();
   ingestRecord(bad, user("<task-notification><usage><duration_ms>12abc</duration_ms></usage>", 1, { origin: { kind: "task-notification" } }));
   ok(bad.items[0].kind === "notice" && bad.items[0].durationMs === null && bad.items[0].summary === null && bad.items[0].status === null, "malformed fields are null, never a NaN or a guess");

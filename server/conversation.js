@@ -27,7 +27,7 @@
  *              text = the whole envelope. Comes from the user record claude
  *              writes for it, or from the queue-operation that enqueued it (a
  *              notice removed from the queue mid-turn never gets a user record).
- *              The user record of a notice already seen via the queue is `dup`.
+ *              Once its user record lands, the queue line is `dup` (the record is shown).
  * Sidechain (subagent) records are ignored throughout. Records are deduped by
  * uuid. Nothing in an item is a session id; the conversation's identity on the
  * wire is a hash of it (conversationId), so /clear or a resume reads as a new
@@ -95,7 +95,6 @@ function contentText(c) {
 
 const ENVELOPE_RE = /^<command-name>([\s\S]*?)<\/command-name>/;
 const ARGS_RE = /<command-args>([\s\S]*?)<\/command-args>/;
-const NOTICE_RE = /^\s*<task-notification>/;
 const NOTICE_SEEN_MAX = 200;
 const unxml = (t) => t.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
 const tag = (text, name) => { const m = new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(text); return m ? m[1].trim() : null; };
@@ -113,9 +112,26 @@ function noticeItem(id, at, text, via) {
     ...clipText(text, TEXT_MAX),
   };
 }
-function rememberNotice(conv, text) {
-  conv.noticeSeen.set(text, true);
-  if (conv.noticeSeen.size > NOTICE_SEEN_MAX) conv.noticeSeen.delete(conv.noticeSeen.keys().next().value);
+// The shape claude writes (tag, task-id first, closing tag). The queue record
+// carries no origin, so a person's queued prompt that merely starts with the
+// tag must not pass for one.
+const NOTICE_SHAPE_RE = /^\s*<task-notification>\s*<task-id>[\s\S]*<\/task-notification>\s*$/;
+// The envelope a notice record carries, past any banner claude put in front of it.
+const noticeKey = (text) => { const i = text.indexOf("<task-notification>"); return i < 0 ? null : text.slice(i).trim(); };
+// Queue lines waiting for their record, oldest first, at most NOTICE_SEEN_MAX
+// entries: the oldest goes first (a list, so the order is by entry, not by text).
+// An entry outlives its line's eviction from the picture (item → null, id kept):
+// the record still names the line in `hides` for a client that holds it.
+// An entry shifted out by the cap is forgotten: its record names nothing, and a
+// client still holding that line shows both (past 200 waiting lines; accepted).
+function waitAdd(list, key, item) {
+  list.push({ key, id: item.id, item });
+  if (list.length > NOTICE_SEEN_MAX) list.shift();
+}
+function waitTake(list, key) {
+  if (key == null) return null;
+  const i = list.findIndex((e) => e.key === key);
+  return i < 0 ? null : list.splice(i, 1)[0];
 }
 const STDOUT_RE = /^<local-command-stdout>([\s\S]*?)<\/local-command-stdout>\s*$/;
 
@@ -127,7 +143,7 @@ export function conversationIdFor(sessionId) {
 export function createConversation({ maxItems = MAX_ITEMS } = {}) {
   return {
     items: [], ord: 0, rev: 0, maxItems,
-    byMsgId: new Map(), toolUse: new Map(), seen: new Map(), noticeSeen: new Map(), queuedPrompt: new Map(),
+    byMsgId: new Map(), toolUse: new Map(), seen: new Map(), noticeSeen: [], queuedPrompt: [],
     title: null, mode: null, permissionMode: null, lastAt: null,
     evicted: 0, skipped: 0, orphanResults: 0, truncated: false,
     offset: 0, ino: undefined, wideAt: undefined, complete: false,
@@ -143,6 +159,8 @@ function push(conv, item) {
     const gone = conv.items.shift();
     conv.evicted++;
     conv.truncated = true;
+    // A waiting line evicted from the picture: drop the reference, keep the id.
+    for (const l of [conv.noticeSeen, conv.queuedPrompt]) for (const e of l) if (e.item === gone) e.item = null;
     if (gone.kind === "assistant") {
       conv.byMsgId.delete(gone.msgId);
       for (const b of gone.blocks) if (b.type === "tool_use") conv.toolUse.delete(b.id);
@@ -194,22 +212,33 @@ function ingestUser(conv, rec) {
     push(conv, { id, kind: "command", at, name: env[1].trim().slice(0, 200), args: args ? args[1].trim().slice(0, 2000) : "" });
     return;
   }
-  // A notice is claude's own: marked by its origin, or enqueued by claude a moment ago.
-  // A person's prompt that merely starts with the tag (origin null / human) stays a prompt.
-  if (NOTICE_RE.test(text) && (rec.origin?.kind === "task-notification" || conv.noticeSeen.has(text))) {
-    const it = noticeItem(id, at, text, "record");
-    if (conv.noticeSeen.has(text)) { it.dup = true; conv.noticeSeen.delete(text); }
-    push(conv, it);
+  // A notice is claude's own, and claude marks every one by its origin. A person's
+  // prompt that looks like one (origin absent / human) stays a prompt.
+  const origin = rec.origin?.kind;
+  const key = noticeKey(text);
+  if (origin === "task-notification" && key !== null) {
+    // Like a typed prompt: the queue line drawn mid-turn was the placeholder, the
+    // record (where claude took it in) is the copy shown.
+    const q = waitTake(conv.noticeSeen, key);
+    if (q?.item) { q.item.dup = true; touch(conv, q.item); }
+    // `hides` names the queue line this record replaces, so a client still holding
+    // a line the server has since evicted (no dup update will come) can hide it.
+    push(conv, { ...noticeItem(id, at, key, "record"), ...(q ? { hides: [q.id] } : {}) });
     return;
   }
+  // The queue line drawn as a notice was this person's prompt: the bubble is the copy shown.
+  const misread = waitTake(conv.noticeSeen, text.trim());
+  if (misread?.item) { misread.item.dup = true; touch(conv, misread.item); }
   const out = STDOUT_RE.exec(text);
   if (out) { push(conv, { id, kind: "output", at, ...clipText(out[1], TEXT_MAX) }); return; }
   if (!text.trim() && !images) return;
   // A prompt typed mid-turn was drawn as claude's queue line first; once it is a
   // bubble, the queue line is its second copy.
-  const q = conv.queuedPrompt.get(text);
-  if (q) { q.dup = true; touch(conv, q); conv.queuedPrompt.delete(text); }
-  push(conv, { id, kind: "user", at, ...clipText(text, TEXT_MAX), ...(images ? { images } : {}) });
+  // The same text queued twice pairs in order: the oldest line goes first.
+  const q = waitTake(conv.queuedPrompt, text);
+  if (q?.item) { q.item.dup = true; touch(conv, q.item); }
+  const hides = [misread, q].filter(Boolean).map((h) => h.id);
+  push(conv, { id, kind: "user", at, ...clipText(text, TEXT_MAX), ...(images ? { images } : {}), ...(hides.length ? { hides } : {}) });
 }
 
 function ingestAssistant(conv, rec) {
@@ -264,21 +293,23 @@ export function ingestRecord(conv, rec) {
       if (seenBefore(conv, rec.uuid)) return;
       const op = str(rec.operation).slice(0, 40) || "unknown";
       const content = str(rec.content);
-      if (NOTICE_RE.test(content)) {
-        // Only the enqueue draws the notice; its dequeue / remove adds nothing.
+      if (NOTICE_SHAPE_RE.test(content)) {
+        // Only the enqueue draws the notice; its dequeue adds nothing. A remove
+        // took it mid-turn: no record follows, so it waits for nothing.
+        if (op === "remove") waitTake(conv.noticeSeen, content.trim());
         if (op !== "enqueue") return;
-        rememberNotice(conv, content);
-        push(conv, noticeItem(str(rec.uuid) || `q${conv.ord + 1}`, at, content, "queue"));
+        const it = noticeItem(str(rec.uuid) || `q${conv.ord + 1}`, at, content, "queue");
+        push(conv, it);
+        waitAdd(conv.noticeSeen, content.trim(), it);
         return;
       }
       // A prompt taken mid-turn (remove) never becomes a bubble: forget it, so a
       // later identical prompt does not hide this old line.
-      if (op === "remove") conv.queuedPrompt.delete(content);
+      if (op === "remove") waitTake(conv.queuedPrompt, content);
       const qi = { id: str(rec.uuid) || `q${conv.ord + 1}`, kind: "queue", at, op, ...clipText(str(rec.content), TEXT_MAX) };
       push(conv, qi);
       if (op === "enqueue" && content.trim()) {
-        conv.queuedPrompt.set(content, qi);
-        if (conv.queuedPrompt.size > NOTICE_SEEN_MAX) conv.queuedPrompt.delete(conv.queuedPrompt.keys().next().value);
+        waitAdd(conv.queuedPrompt, content, qi);
       }
       return;
     }

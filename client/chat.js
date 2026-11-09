@@ -52,6 +52,7 @@ function chatModel(sessionId) {
 }
 function chatFreshModel(sessionId) {
   return { sessionId, conversationId: null, generation: null, rev: null, items: new Map(), title: null, mode: null, permissionMode: null,
+    hidden: new Set(), // ids of queue lines a record named in `hides`: never drawn, whatever copy arrives later
     firstOrd: null, evicted: 0, skipped: 0, orphanResults: 0, readable: true, complete: true, offline: false, reason: null, open: new Set(), paused: false, unseen: 0,
     anchor: null, // {id, offset}: the item at the top of the view and its offset from it, while paused
     rebuild: null, // during a same-conversation cache rebuild: { anchor, lastOrd } to restore once the tail is back
@@ -113,9 +114,12 @@ function renderChatView(el, s) {
     if (!m.anchor) return false;
     let el = list.querySelector(`[data-id="${CSS.escape(m.anchor.id)}"]`);
     if (!el) return false;
+    const anchored = el;
     while (el && (el.hidden || el.classList.contains("ci-folded"))) el = el.previousElementSibling; // folded since: its fold row
     if (!el) return false;
-    scrollTo(scroll.scrollTop + (el.getBoundingClientRect().top - scroll.getBoundingClientRect().top) - m.anchor.offset);
+    // A stand-in goes to the top of the view: the anchored item's offset was into a box that is gone.
+    const offset = el === anchored ? m.anchor.offset : 0;
+    scrollTo(scroll.scrollTop + (el.getBoundingClientRect().top - scroll.getBoundingClientRect().top) - offset);
     return true;
   };
   // Only the READER pauses the follow: a scroll with no wheel / touch / key /
@@ -131,8 +135,15 @@ function renderChatView(el, s) {
   // A mouse held down on the list (the scrollbar, a text selection). Touch has
   // touchstart/touchmove; a panning finger ends in pointercancel, not pointerup,
   // and would leave this stuck.
-  scroll.addEventListener("pointerdown", (e) => { if (e.pointerType === "mouse") pointerDown = true; userInput(); });
-  const onPointerUp = () => { if (pointerDown) { pointerDown = false; userInput(); } };
+  // Only a press on something that opens or closes holds the stick (below); a
+  // tap or click on plain text does not, so it cannot strand a following reader.
+  const OPENER = "summary, .chat-fold, .ci-tool-hd, button, a, [role=button]";
+  scroll.addEventListener("pointerdown", (e) => { if (e.pointerType === "mouse") pointerDown = true; userInput(); if (e.target.closest?.(OPENER)) m.handAt = Date.now(); });
+  // Enter / Space on something in the list (a fold row, a tool card) opens it by hand.
+  scroll.addEventListener("keydown", (e) => { if ((e.key === "Enter" || e.key === " ") && e.target.closest?.(OPENER)) m.handAt = Date.now(); });
+  // A size change that landed while the mouse was held was skipped: put a
+  // following reader back on the tail once it is released.
+  const onPointerUp = () => { if (pointerDown) { pointerDown = false; userInput(); requestAnimationFrame(() => { if (!m.paused && !m.rebuild && !byHand() && scroll.clientHeight && !atBottom()) toBottom(); }); } };
   const onBlur = () => { pointerDown = false; }; // a drag released outside the window
   // Keyboard scrolling targets the body (the list is not focusable), not the composer.
   const onKey = (e) => { if (/^(PageUp|PageDown|Home|End|ArrowUp|ArrowDown| )$/.test(e.key) && !/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) && !e.target.isContentEditable) userInput(); };
@@ -164,9 +175,12 @@ function renderChatView(el, s) {
   const follow = () => { m.paused = false; m.unseen = 0; m.anchor = null; toBottom(); drawJump(); };
   // Content or viewport changing size under a following reader (late layout,
   // the tab shown again after display:none) keeps the tail on screen.
-  // Not right after the reader's own input: a tool card or Thinking opened by
-  // hand near the bottom stays where it was clicked.
-  const stick = new ResizeObserver(() => { if (!m.paused && !m.rebuild && !byReader() && scroll.clientHeight && !atBottom()) toBottom(); });
+  // Not right after the reader opened something by hand (a click, Enter /
+  // Space): a tool card, Thinking or fold opened near the bottom stays where it
+  // was. A wheel or touch scroll does not hold it — a reader who scrolled down
+  // to the tail and stays there is following.
+  const byHand = () => pointerDown || Date.now() - (m.handAt || 0) < 1000;
+  const stick = new ResizeObserver(() => { if (!m.paused && !m.rebuild && !byHand() && scroll.clientHeight && !atBottom()) toBottom(); });
   stick.observe(list); stick.observe(scroll); if (live) stick.observe(live);
   jump.addEventListener("click", follow);
   el.querySelector(".chat-tools").addEventListener("click", (e) => {
@@ -279,7 +293,8 @@ function renderChatView(el, s) {
     m.title = data.title; m.mode = data.mode; m.permissionMode = data.permissionMode;
     m.firstOrd = data.firstOrd; m.evicted = data.evicted || 0; m.skipped = data.skipped || 0; m.orphanResults = data.orphanResults || 0;
     m.readable = data.readable !== false; m.complete = data.complete !== false; m.reason = data.reason || null;
-    const { added, grew, first } = chatApplyItems(m, list, data.items || []);
+    const incoming = data.items || [];
+    const { added, grew, first } = chatApplyItems(m, list, incoming);
     if (m.rebuild) return true; // placed, not scrolled: finishRebuild decides
     if (m.paused) { if (added + grew) { m.unseen += added + grew; drawJump(); } if (first) restoreAnchor(); return true; }
     if (!first) return true; // an unchanged tick never moves the view
@@ -365,11 +380,36 @@ function chatLastItem(m) { let l = null; for (const it of m.items.values()) if (
 // messages block by block). Returns how many VISIBLE new items landed, how many
 // existing messages grew a visible block (text / tool call), and the first
 // node that is new or changed (where a multi-screen arrival starts).
+// A queue line (a typed prompt's, a notice's) is hidden by the server once its
+// record lands — unless the server evicted the line first: then no update for
+// it ever comes. The record names the line it replaces (`hides`, item ids): the
+// id is remembered (m.hidden, so a copy arriving later — a slow Load earlier —
+// lands hidden) and a line the client already holds is hidden here.
+function chatHiddenCopies(m, items) {
+  const inPage = new Set(items.map((it) => it.id));
+  const out = [];
+  for (const it of items) {
+    if (!Array.isArray(it.hides)) continue;
+    for (const id of it.hides) {
+      m.hidden.add(id);
+      const h = m.items.get(id);
+      if (!h || h.dup || inPage.has(id)) continue;
+      inPage.add(id);
+      // rev + 0.5 is a client-only marker (above the held copy, below the server's
+      // own dup update); it never feeds the cursor, which comes from data.rev / nextAfter.
+      out.push({ ...h, dup: true, rev: h.rev + 0.5 });
+    }
+  }
+  return out;
+}
 function chatApplyItems(m, list, items) {
   let added = 0, grew = 0, first = null, changed = false;
-  const sorted = [...items].sort((a, b) => a.ord - b.ord);
-  for (const it of sorted) {
+  const sorted = items.concat(chatHiddenCopies(m, items)).sort((a, b) => a.ord - b.ord);
+  for (let it of sorted) {
     const prev = m.items.get(it.id);
+    // A copy older than the one held (a page fetched before the item changed) never replaces it.
+    if (prev && it.rev < prev.rev) it = prev;
+    if (!it.dup && m.hidden.has(it.id)) it = { ...it, dup: true };
     const old = list.querySelector(`[data-id="${CSS.escape(it.id)}"]`);
     if (prev && old && prev.rev === it.rev) continue;
     m.items.set(it.id, it);
@@ -432,14 +472,16 @@ function chatFold(m, list) {
     if (it.kind === "user" || it.kind === "command") { closeSeg(); endRun(); inTurn = true; continue; }
     if (it.kind === "summary" || it.kind === "compact" || it.kind === "meta") { closeSeg(); endRun(); continue; }
     // A notice queued during the previous turn becomes its own prompt after
-    // it: its queue line was drawn mid-turn, the dup record starts the segment.
-    if (it.kind === "notice" && !inTurn) { closeSeg(); seg = { key: it.id, items: [it], quiet: !news(it), text: 0 }; inTurn = true; continue; }
+    // it: its queue line (hidden once the record lands) stays where it was,
+    // the record starts the segment.
     if (it.kind === "notice" && it.dup) { if (seg) seg.items.push(it); continue; }
+    if (it.kind === "notice" && !inTurn) { closeSeg(); seg = { key: it.id, items: [it], quiet: !news(it), text: 0 }; inTurn = true; continue; }
     if (!seg) { if (it.kind === "turn" || (it.kind === "assistant" && it.stopReason === "end_turn")) inTurn = false; continue; }
     seg.items.push(it);
     if (it.kind === "notice" && news(it)) seg.quiet = false;
     if (it.kind === "system" && it.level === "error") seg.quiet = false;
     if (it.kind === "assistant") {
+      if (it.error) seg.quiet = false;
       for (const b of it.blocks) {
         if (b.type === "tool_use") seg.quiet = false;
         else if (b.type === "text") seg.text += (b.text || "").length;
@@ -453,18 +495,26 @@ function chatFold(m, list) {
   for (const r of runs) for (const sg of r) for (const it of sg.items) auto.add(it.id);
   for (const r of runs) {
     if (r.length < 2) continue;
-    const key = r[0].key, open = m.foldOpen.has(key), n = r.length - 1;
+    // Open by any of its segments: "Load earlier" prepending to the run or a
+    // new update appended to it keeps a fold the reader opened open.
+    const key = r[0].key, keys = r.map((sg) => sg.key), open = keys.some((k) => m.foldOpen.has(k)), n = r.length - 1;
     if (!open) for (const sg of r.slice(0, -1)) for (const it of sg.items) folded.add(it.id);
-    let ctl = rows.get(key);
-    rows.delete(key);
+    let ctl = keys.map((k) => rows.get(k)).find(Boolean);
+    for (const k of keys) rows.delete(k);
     if (!ctl) {
       ctl = document.createElement("div");
       ctl.className = "chat-fold"; ctl.dataset.fold = key; ctl.setAttribute("role", "button"); ctl.tabIndex = 0;
       ctl.title = "Turns claude ran on its own when a background task reported, with no tool call and a short reply";
-      const toggle = () => { if (m.foldOpen.has(key)) m.foldOpen.delete(key); else m.foldOpen.add(key); chatFold(m, list); };
+      const toggle = () => {
+        m.handAt = Date.now();
+        const ks = (ctl.dataset.keys || "").split(" ").filter(Boolean);
+        if (ks.some((k) => m.foldOpen.has(k))) for (const k of ks) m.foldOpen.delete(k); else for (const k of ks) m.foldOpen.add(k);
+        chatFold(m, list);
+      };
       ctl.addEventListener("click", toggle);
       ctl.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
     }
+    ctl.dataset.fold = key; ctl.dataset.keys = keys.join(" ");
     ctl.textContent = open ? `▾ hide ${n} earlier background update${n === 1 ? "" : "s"}` : `▸ ${n} earlier background update${n === 1 ? "" : "s"}`;
     const at = nodes.get(r[0].items[0].id);
     if (ctl.nextElementSibling !== at) list.insertBefore(ctl, at);

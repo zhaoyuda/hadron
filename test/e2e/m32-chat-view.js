@@ -478,6 +478,73 @@ try {
   r.ok(await until(async () => (await page.locator('#chat-container .ci-assistant[data-id="a:q8"]').count()) === 1), "a task named \"…finished\" and an agent's completion land");
   r.ok(await page.locator('#chat-container .ci-assistant[data-id="a:q7"]').evaluate((el) => el.classList.contains("ci-auto")), "…the task whose NAME says finished is still a quiet heartbeat (dimmed)");
   r.ok(!(await page.locator('#chat-container .ci-assistant[data-id="a:q8"]').evaluate((el) => el.classList.contains("ci-auto"))), "…\"Agent … completed\" is news: not dimmed");
+  // An API error after a notice is news; Enter on a fold row opens it in place (the view does not run to the tail).
+  const tall = Array.from({ length: 12 }, (_, i) => `第 ${i + 1} 行。`).join("\n\n");
+  appendFileSync(transcript,
+    rec({ type: "queue-operation", operation: "enqueue", content: envl(9, "completed", "Monitor event: tick") }) +
+    rec({ type: "user", origin: { kind: "task-notification" }, message: { role: "user", content: envl(9, "completed", "Monitor event: tick") } }) +
+    rec({ type: "assistant", isApiErrorMessage: true, message: { id: "q9", role: "assistant", content: [{ type: "text", text: "You've hit your session limit" }], model: "<synthetic>", stop_reason: "end_turn" } }) +
+    autoTurn(10, "completed", "Monitor event: tick", tall) + autoTurn(11, "completed", "Monitor event: tick", "还在跑。"));
+  r.ok(await until(async () => (await page.locator('#chat-container .ci-assistant[data-id="a:q11"]').count()) === 1), "an API error after a notice and two heartbeats land");
+  r.ok(await page.locator('#chat-container .ci-assistant[data-id="a:q9"]').isVisible() && !(await page.locator('#chat-container .ci-assistant[data-id="a:q9"]').evaluate((el) => el.classList.contains("ci-auto"))), "…the API error is never dimmed or folded");
+  if (await page.locator("#chat-container .chat-jump").isVisible()) await page.locator("#chat-container .chat-jump").click();
+  const row10 = page.locator("#chat-container .chat-fold").last();
+  r.ok(await until(async () => (await row10.textContent()).includes("1 earlier") && !(await page.locator('#chat-container .ci-assistant[data-id="a:q10"]').isVisible())), "…the first heartbeat after it folds");
+  await row10.focus(); await page.waitForTimeout(1100);
+  const y0 = await row10.evaluate((el) => el.getBoundingClientRect().top);
+  await page.keyboard.press("Enter");
+  r.ok(await until(async () => await page.locator('#chat-container .ci-assistant[data-id="a:q10"]').isVisible()), "Enter on the fold row opens it");
+  await page.waitForTimeout(400);
+  const y1 = await row10.evaluate((el) => el.getBoundingClientRect().top);
+  r.ok(Math.abs(y1 - y0) < 4, `…in place: the row did not move (${Math.round(y0)} → ${Math.round(y1)}), the view did not run to the tail`);
+  // A click on plain text is not an open: late layout under a following reader still keeps the tail.
+  const scr = page.locator("#chat-container .chat-scroll");
+  const atTail = () => scr.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 4);
+  await scr.hover(); await page.mouse.wheel(0, 100000);
+  r.ok(await until(atTail), "scrolled down to the tail by wheel");
+  await page.waitForTimeout(1100);
+  await page.locator('#chat-container .ci-assistant[data-id="a:q11"] .ci-md').first().click();
+  await page.locator('#chat-container .ci-assistant[data-id="a:q11"]').evaluate((el) => { el.style.paddingBottom = "900px"; });
+  await page.waitForTimeout(300);
+  r.ok(await atTail(), "a click on reply text, then the content grows: the following view stays on the tail");
+  await page.locator('#chat-container .ci-assistant[data-id="a:q11"]').evaluate((el) => { el.style.paddingBottom = ""; });
+
+  // A queue line the server evicted before its record landed gets no dup update: the record names it (`hides`).
+  {
+    const res = await page.evaluate(() => {
+      const m = { hidden: new Set(), items: new Map([
+        ["q1", { id: "q1", kind: "notice", via: "queue", ord: 5, rev: 5, text: "x" }],
+        ["q2", { id: "q2", kind: "queue", op: "enqueue", ord: 6, rev: 6, text: "继续" }],
+        ["q3", { id: "q3", kind: "queue", op: "enqueue", ord: 50, rev: 50, text: "kept" }],
+        ["q4", { id: "q4", kind: "queue", op: "enqueue", ord: 7, rev: 7, text: "继续", dup: true }],
+      ]) };
+      const page1 = [
+        { id: "r1", kind: "notice", via: "record", ord: 60, rev: 60, text: "x", hides: ["q1"] },
+        { id: "u1", kind: "user", ord: 61, rev: 61, text: "继续", hides: ["q2"] },
+        { id: "u2", kind: "user", ord: 62, rev: 62, text: "kept", hides: ["q3"] },
+        { id: "q3", kind: "queue", op: "enqueue", ord: 50, rev: 63, text: "kept", dup: true },
+        { id: "u3", kind: "user", ord: 64, rev: 64, text: "继续", hides: ["q4", "gone"] },
+        { id: "u4", kind: "user", ord: 65, rev: 65, text: "继续" },
+      ];
+      return chatHiddenCopies(m, page1).map((x) => `${x.id}:${x.dup}:${x.rev > m.items.get(x.id).rev}`).join(",");
+    });
+    r.ok(res === "q1:true:true,q2:true:true", `a held queue line named by its record's hides is hidden; one in the page, already hidden or unknown is left alone; text alone hides nothing (${res})`);
+  }
+  // Either arrival order: a line named by a record that arrives LATER (a slow Load earlier) lands hidden,
+  // and a copy older than the one held never replaces it.
+  {
+    const res = await page.evaluate(() => {
+      const m = chatFreshModel("probe"), list = document.createElement("div");
+      chatApplyItems(m, list, [{ id: "u9", kind: "user", ord: 20, rev: 20, text: "继续", hides: ["q9"] }]);
+      chatApplyItems(m, list, [{ id: "q9", kind: "queue", op: "enqueue", ord: 3, rev: 3, text: "继续" }]);
+      const late = m.items.get("q9").dup === true;
+      chatApplyItems(m, list, [{ id: "q8", kind: "queue", op: "enqueue", ord: 2, rev: 30, text: "a", dup: true }]);
+      chatApplyItems(m, list, [{ id: "q8", kind: "queue", op: "enqueue", ord: 2, rev: 2, text: "a" }]);
+      const stale = m.items.get("q8").dup === true && m.items.get("q8").rev === 30;
+      return `${late},${stale}`;
+    });
+    r.ok(res === "true,true", `a queue line arriving after the record that hides it lands hidden; an older copy never replaces a newer one (${res})`);
+  }
 
   // ── a new conversation id (adopt / resume / clear) paints the new conversation ──
   const SID2 = randomUUID();
