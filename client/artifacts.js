@@ -784,15 +784,21 @@ function getLanguageFromPath(filePath) {
  * navigator.clipboard at all) and when writeText is refused (a webview's
  * permission policy). Call it from the click itself: both need the gesture.
  */
-function copyTextToClipboard(text) {
+// `{ retry: false }` skips the textarea after a REFUSED writeText: a write with
+// no gesture behind it (a pane's OSC 52) would only steal the terminal's focus
+// and hide the refusal the caller turns into a one-click offer.
+function copyTextToClipboard(text, { retry = true } = {}) {
   if (navigator.clipboard && navigator.clipboard.writeText) {
-    return navigator.clipboard.writeText(text).catch(() => copyViaTextarea(text));
+    const w = navigator.clipboard.writeText(text);
+    return retry ? w.catch(() => copyViaTextarea(text)) : w;
   }
   return copyViaTextarea(text);
 }
 
 function copyViaTextarea(text) {
   return new Promise((resolve, reject) => {
+    const prev = document.activeElement; // the terminal's textarea, the composer…
+    const restore = () => { try { if (prev && prev !== document.body && prev.isConnected) prev.focus({ preventScroll: true }); } catch {} };
     const ta = document.createElement("textarea");
     ta.value = text;
     ta.style.cssText = "position:fixed;top:-9999px;left:-9999px;opacity:0;";
@@ -801,10 +807,10 @@ function copyViaTextarea(text) {
     ta.select();
     try {
       const ok = document.execCommand("copy");
-      document.body.removeChild(ta);
+      document.body.removeChild(ta); restore();
       if (ok) resolve(); else reject(new Error("execCommand copy failed"));
     } catch (e) {
-      document.body.removeChild(ta);
+      document.body.removeChild(ta); restore();
       reject(e);
     }
   });

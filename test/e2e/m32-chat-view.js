@@ -138,14 +138,14 @@ try {
   // ── incremental: a new exchange lands without rebuilding what is on screen ──
   await m1.evaluate((el) => { el.dataset.mark = "kept"; });
   const scroll = chat.locator(".chat-scroll");
-  await scroll.evaluate((el) => { el.scrollTop = el.scrollHeight; });
+  await scroll.evaluate((el) => { el.dispatchEvent(new WheelEvent("wheel")); el.scrollTop = el.scrollHeight; });
   appendFileSync(transcript, user("再加一行") + asst("m4", { type: "text", text: "加好了 — 第二轮。" }, { stop_reason: "end_turn" }));
   r.ok(await until(async () => (await chat.locator(".ci-assistant").count()) === 4 && (await chat.locator(".ci-user").count()) === 2), "an appended exchange appears within the poll");
   r.ok((await m1.getAttribute("data-mark")) === "kept", "…the elements of unchanged items were left alone (marker survived)");
   r.ok(await until(async () => scroll.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 48)), "…and the view followed the tail (reader was at the bottom)");
 
   // ── scrolled up: the tail waits, a pill counts the new items ──
-  await scroll.evaluate((el) => { el.scrollTop = 0; });
+  await scroll.evaluate((el) => { el.dispatchEvent(new WheelEvent("wheel")); el.scrollTop = 0; });
   await scroll.dispatchEvent("scroll");
   r.ok(await until(async () => (await chat.locator(".chat-jump").isVisible())), "scrolled to the top → the ↓ pill appears");
   appendFileSync(transcript, user("第三轮") + asst("m5", { type: "text", text: "第三轮回复。" }, { stop_reason: "end_turn" }));
@@ -250,7 +250,7 @@ try {
   r.ok(await until(async () => (await chat2.locator(".ci").count()) === 200), `a long conversation opens on its last page (${await chat2.locator(".ci").count()} items of 242)`);
   r.ok(await until(async () => (await chat2.locator(".chat-earlier").isVisible()) && (await chat2.locator(".chat-earlier").textContent()) === "Load earlier (42 more)"), `…with "Load earlier (42 more)" on top (${await chat2.locator(".chat-earlier").textContent()})`);
   const sc2 = chat2.locator(".chat-scroll");
-  await sc2.evaluate((el) => { el.scrollTop = 0; });
+  await sc2.evaluate((el) => { el.dispatchEvent(new WheelEvent("wheel")); el.scrollTop = 0; });
   const topText = await chat2.locator(".ci").first().getAttribute("data-id");
   const topY = await chat2.locator(".ci").first().evaluate((el) => el.getBoundingClientRect().top);
   await chat2.locator(".chat-earlier").click();
@@ -276,7 +276,9 @@ try {
   r.ok(await mt.locator(".ci-think").evaluate((d) => d.open), "…and Thinking is still open");
 
   // ── scrolled up, then away and back: the reader's place is kept ──
-  await sc2.evaluate((el) => { el.scrollTop = 900; });
+  if (await chat2.locator(".chat-jump").isVisible()) await chat2.locator(".chat-jump").click(); // a known start: following, nothing counted
+  r.ok(await until(async () => !(await chat2.locator(".chat-jump").isVisible())), "following before the scroll-up (pill hidden)");
+  await sc2.evaluate((el) => { el.dispatchEvent(new WheelEvent("wheel")); el.scrollTop = 900; });
   await sc2.dispatchEvent("scroll");
   r.ok(await until(async () => (await chat2.locator(".chat-jump").isVisible())), "scrolled up → pill");
   const placeId = await sc2.evaluate((el) => { const top = el.getBoundingClientRect().top; return [...el.querySelectorAll(".ci")].find((c) => c.getBoundingClientRect().bottom > top).dataset.id; });
@@ -304,7 +306,7 @@ try {
   r.ok((await sc3.evaluate((el) => el.scrollHeight)) > (await sc3.evaluate((el) => el.clientHeight)) * 2 && !(await page.locator("#chat-container .chat-jump").isVisible()), "…the reply is several screens tall and no pill is up (nothing unseen)");
 
   // ── a message that grows while the reader is away counts, and keeps its nodes ──
-  await sc3.evaluate((el) => { el.scrollTop = 0; });
+  await sc3.evaluate((el) => { el.dispatchEvent(new WheelEvent("wheel")); el.scrollTop = 0; });
   await sc3.dispatchEvent("scroll");
   r.ok(await until(async () => (await page.locator("#chat-container .chat-jump").isVisible())), "scrolled up again");
   appendFileSync(transcript, user("想一下") + asst("mg", { type: "thinking", thinking: "thinking first, a long answer follows" }));
@@ -400,7 +402,7 @@ try {
 
   // ── the same, with the reader scrolled up: the place survives the rebuild ──
   const sc4 = page.locator("#chat-container .chat-scroll");
-  await sc4.evaluate((el) => { el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - 1500); });
+  await sc4.evaluate((el) => { el.dispatchEvent(new WheelEvent("wheel")); el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - 1500); });
   await sc4.dispatchEvent("scroll");
   r.ok(await until(async () => (await page.locator("#chat-container .chat-jump").isVisible())), "scrolled up in the rebuilt picture → pill");
   const keepId = await sc4.evaluate((el) => { const top = el.getBoundingClientRect().top; return [...el.querySelectorAll(".ci")].find((c) => c.getBoundingClientRect().bottom > top).dataset.id; });
@@ -412,6 +414,24 @@ try {
   r.ok(await until(async () => (await page.locator('#chat-container .ci-assistant[data-id="a:mc"]').count()) === 1 && Math.abs((await page.locator(`#chat-container .ci[data-id="${keepId}"]`).evaluate((el) => el.getBoundingClientRect().top)) - keepY) < 4 && (await page.locator("#chat-container .chat-jump").textContent()) === "↓ 2 new", 15000), `back after a rebuild while scrolled up: the item the reader was on is where it was and the exchange written meanwhile is counted (${await page.locator("#chat-container .chat-jump").textContent()})`);
   await page.locator("#chat-container .chat-jump").click();
   r.ok(await until(async () => (await sc4.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 48))), "…jump → bottom");
+
+  // ── only the reader pauses the follow (prod 2026-11-09: "↓ 2808 new" climbing
+  // for a reader who never left the bottom — layout moved the view, and every
+  // scroll event counted as the reader's) ──
+  const atEnd = () => sc4.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 48);
+  const jumpV = () => page.locator("#chat-container .chat-jump").isVisible();
+  await page.locator("#chat-container .ci").last().evaluate((el) => { const d = document.createElement("div"); d.className = "m32-late"; d.style.height = "3000px"; el.appendChild(d); });
+  r.ok(await until(async () => (await atEnd()) && !(await jumpV())), "content growing under a following reader (late layout) → still at the bottom, no pill");
+  await sc4.evaluate((el) => { el.scrollTop = 0; }); // no wheel/touch/key: the browser's doing, not the reader's
+  await sc4.dispatchEvent("scroll");
+  r.ok(await until(async () => (await atEnd()) && !(await jumpV())), "…a scroll with no reader input behind it (scroll anchoring, a re-shown tab) puts the view back on the tail, no pill");
+  appendFileSync(transcript, user("还在底部") + asst("mf", { type: "text", text: "跟着走。" }, { stop_reason: "end_turn" }));
+  r.ok(await until(async () => (await page.locator('#chat-container .ci-assistant[data-id="a:mf"]').count()) === 1 && (await atEnd()) && !(await jumpV())), "…and the next exchange lands on screen, nothing counted");
+  await sc4.evaluate((el) => { el.dispatchEvent(new WheelEvent("wheel")); el.scrollTop = 0; });
+  await sc4.dispatchEvent("scroll");
+  r.ok(await until(async () => await jumpV()), "…a wheel up still pauses it (pill)");
+  await page.locator("#chat-container .chat-jump").click();
+  r.ok(await until(async () => (await atEnd()) && !(await jumpV())), "…jump → following again");
 
   // ── a new conversation id (adopt / resume / clear) paints the new conversation ──
   const SID2 = randomUUID();

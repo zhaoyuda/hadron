@@ -100,6 +100,7 @@ function renderChatView(el, s) {
   // The reader's place: the item whose box spans the top of the view (binary
   // search over the list, items are stacked in ord order) and its offset.
   const takeAnchor = () => {
+    if (!scroll.clientHeight) return; // hidden (another tab): every rect is 0, the place would be lost
     const kids = [...list.children].filter((c) => !c.hidden), top = scroll.getBoundingClientRect().top;
     if (!kids.length) { m.anchor = null; return; }
     let lo = 0, hi = kids.length - 1;
@@ -115,9 +116,37 @@ function renderChatView(el, s) {
     scrollTo(scroll.scrollTop + (el.getBoundingClientRect().top - scroll.getBoundingClientRect().top) - m.anchor.offset);
     return true;
   };
+  // Only the READER pauses the follow: a scroll with no wheel / touch / key /
+  // scrollbar drag behind it is layout (an image or code block finishing its
+  // height, the browser's scroll anchoring, a hidden tab shown again) — a
+  // following view is put back on the tail instead of counting "↓ N new".
+  let userScrollAt = 0, pointerDown = false;
+  const userInput = () => { userScrollAt = Date.now(); };
+  const byReader = () => pointerDown || Date.now() - userScrollAt < 1000;
+  scroll.addEventListener("wheel", userInput, { passive: true });
+  scroll.addEventListener("touchstart", userInput, { passive: true });
+  scroll.addEventListener("touchmove", userInput, { passive: true });
+  // A mouse held down on the list (the scrollbar, a text selection). Touch has
+  // touchstart/touchmove; a panning finger ends in pointercancel, not pointerup,
+  // and would leave this stuck.
+  scroll.addEventListener("pointerdown", (e) => { if (e.pointerType === "mouse") pointerDown = true; userInput(); });
+  const onPointerUp = () => { if (pointerDown) { pointerDown = false; userInput(); } };
+  const onBlur = () => { pointerDown = false; }; // a drag released outside the window
+  // Keyboard scrolling targets the body (the list is not focusable), not the composer.
+  const onKey = (e) => { if (/^(PageUp|PageDown|Home|End|ArrowUp|ArrowDown| )$/.test(e.key) && !/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) && !e.target.isContentEditable) userInput(); };
+  window.addEventListener("pointerup", onPointerUp);
+  window.addEventListener("pointercancel", onPointerUp);
+  window.addEventListener("blur", onBlur);
+  window.addEventListener("keydown", onKey, true);
   scroll.addEventListener("scroll", () => {
     if (programmatic !== null && Math.abs(scroll.scrollTop - programmatic) < 2) { programmatic = null; return; }
     programmatic = null;
+    if (!byReader()) {
+      // A paused view that something else took to the latest is following.
+      if (m.paused) { if (!m.rebuild && scroll.clientHeight && atBottom()) follow(); else takeAnchor(); }
+      else if (!m.rebuild && !atBottom()) toBottom();
+      return;
+    }
     const paused = !atBottom();
     if (paused) takeAnchor(); else m.anchor = null;
     if (paused === m.paused) return;
@@ -131,6 +160,12 @@ function renderChatView(el, s) {
     jump.title = m.unseen ? `${m.unseen} new since you scrolled up — jump to the latest` : "Jump to the latest";
   };
   const follow = () => { m.paused = false; m.unseen = 0; m.anchor = null; toBottom(); drawJump(); };
+  // Content or viewport changing size under a following reader (late layout,
+  // the tab shown again after display:none) keeps the tail on screen.
+  // Not right after the reader's own input: a tool card or Thinking opened by
+  // hand near the bottom stays where it was clicked.
+  const stick = new ResizeObserver(() => { if (!m.paused && !m.rebuild && !byReader() && scroll.clientHeight && !atBottom()) toBottom(); });
+  stick.observe(list); stick.observe(scroll); if (live) stick.observe(live);
   jump.addEventListener("click", follow);
   el.querySelector(".chat-tools").addEventListener("click", (e) => {
     chatExpandAll = !chatExpandAll; if (typeof saveUIState === "function") saveUIState();
@@ -307,7 +342,7 @@ function renderChatView(el, s) {
   };
   const composer = chatComposer(el, m, sessionId, { list });
   const dialogCard = chatDialogCard(el, sessionId);
-  chatTeardown.set(el, () => { composer.flush(); if (chatActiveComposer === composer) chatActiveComposer = null; });
+  chatTeardown.set(el, () => { stick.disconnect(); window.removeEventListener("pointerup", onPointerUp); window.removeEventListener("pointercancel", onPointerUp); window.removeEventListener("blur", onBlur); window.removeEventListener("keydown", onKey, true); composer.flush(); if (chatActiveComposer === composer) chatActiveComposer = null; });
   // Draw what the model already holds (back from another tab) before the first
   // poll — at the reader's place when they had scrolled up, with the pill.
   if (m.items.size) {

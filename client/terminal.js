@@ -34,7 +34,7 @@ function registerClipboardOsc(t) {
     // Safari refuses clipboard writes outside a user gesture (installed web app included):
     // hand the text to a one-click offer instead of dropping it.
     if (typeof copyTextToClipboard === "function") {
-      copyTextToClipboard(text).catch(() => { if (typeof offerClipboardCopy === "function") offerClipboardCopy(text); });
+      copyTextToClipboard(text, { retry: false }).catch(() => { if (typeof offerClipboardCopy === "function") offerClipboardCopy(text); });
     }
     return true; // handled — swallow the sequence so it never prints
   });
