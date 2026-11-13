@@ -416,6 +416,7 @@ const get = (p, auth = true) => fetch(`${BASE}${p}`, { headers: H(auth) });
 const patch = (p, body, auth = true) => fetch(`${BASE}${p}`, { method: "PATCH", headers: H(auth), body: JSON.stringify(body) });
 const record = (id) => JSON.parse(readFileSync(join(WS, ".hadron", "agents", `${id}.json`), "utf-8"));
 let TFILE;
+const SID_FRESH = "7d1e0c2a-5b3f-4e8a-9c6d-2f4b8a1e3c5d"; // claude before its first turn: no transcript file
 function seed() {
   const dir = join(WS, ".hadron", "agents");
   mkdirSync(dir, { recursive: true });
@@ -423,6 +424,10 @@ function seed() {
   writeFileSync(join(dir, "talker.json"), JSON.stringify({
     id: "talker", name: "Talker", group: "Workers", cwd: WS,
     runtime: { desiredRuntime: "claude", observedRuntime: "shell", cleanExitAt: now, sessionId: SID, confidence: "manual", lastObservedAt: now, lastPersistedAt: now },
+  }));
+  writeFileSync(join(dir, "fresh.json"), JSON.stringify({
+    id: "fresh", name: "Fresh", group: "Workers", cwd: WS,
+    runtime: { desiredRuntime: "claude", observedRuntime: "shell", cleanExitAt: now, sessionId: SID_FRESH, confidence: "manual", lastObservedAt: now, lastPersistedAt: now },
   }));
   writeFileSync(join(dir, "shelly.json"), JSON.stringify({ id: "shelly", name: "Shelly", group: "Workers", cwd: WS }));
   writeFileSync(join(dir, "gone.json"), JSON.stringify({ id: "gone", name: "Gone", group: "Workers", cwd: WS, archived: true, archivedAt: now, draft: { text: "old", deviceId: "d", revision: 3, attachments: [] } }));
@@ -482,6 +487,15 @@ async function main() {
   const c4 = await (await get("/api/sessions/talker/conversation")).json();
   ok(c4.items.length === 3 && c4.complete === false && c4.readable === false, "a vanished transcript: the cached picture stays, complete:false, readable:false (stale, not 'ask again')");
   writeFileSync(TFILE, keep);
+
+  // Claude before its first turn: the session id is known, the transcript is not written yet.
+  const f0 = await (await get("/api/sessions/fresh/conversation")).json();
+  ok(f0.reason === "no transcript yet" && f0.items.length === 0 && f0.conversationId === conversationIdFor(SID_FRESH) && f0.rev === undefined, `no transcript file yet → reason "no transcript yet", empty, no cursor (${f0.reason})`);
+  const ffile = join(CONFIG, "projects", claudeProjectDir(WS), `${SID_FRESH}.jsonl`);
+  writeFileSync(ffile, line(user("第一句", 1)));
+  const f1 = await (await get("/api/sessions/fresh/conversation")).json();
+  ok(!f1.reason && f1.items.length === 1 && f1.items[0].text === "第一句" && f1.readable === true, "…the first turn written → the next tail request has it");
+  ok(!JSON.stringify(f0).includes(SID_FRESH), "…the session id is on no empty-state body");
 
   console.log("\n[draft API]");
   ok((await get("/api/sessions/talker/draft", false)).status === 401 && (await patch("/api/sessions/talker/draft", {}, false)).status === 401, "401 without the token");

@@ -552,6 +552,18 @@ try {
   const adopt = await api("POST", "/api/sessions/alpha/adopt", { sessionId: SID2 });
   r.ok(adopt.status === 200, `adopt a second session id (${adopt.status})`);
   r.ok(await until(async () => (await ci.count()) === 2 && (await page.locator("#chat-container .ci-user .ci-bubble").textContent()).includes("新会话")), `…the chat shows the new conversation, not a blank one (${await ci.count()} items)`);
+
+  // ── claude before its first turn: no transcript file yet → an empty state that fills in, never Offline ──
+  const SID3 = randomUUID();
+  const adopt3 = await api("POST", "/api/sessions/alpha/adopt", { sessionId: SID3, force: true });
+  r.ok(adopt3.status === 200, `adopt a session id whose transcript is not written yet (${adopt3.status})`);
+  const emptyEl = page.locator("#chat-container .chat-empty");
+  r.ok(await until(async () => (await emptyEl.count()) === 1 && (await emptyEl.textContent()).includes("waiting for claude's first turn")), `…the chat says it waits for the first turn (${await emptyEl.count() ? await emptyEl.textContent() : "no empty state"})`);
+  await page.waitForTimeout(2500); // a few polls in the empty state
+  r.ok(await bannerEl.isHidden(), `…no Offline banner while it waits (${await bannerEl.isHidden() ? "hidden" : await bannerEl.textContent()})`);
+  writeFileSync(join(CONFIG, "projects", claudeProjectDir(ws), `${SID3}.jsonl`), rec({ type: "user", sessionId: SID3, cwd: ws, message: { role: "user", content: "第一轮" } }) + asst("f1", { type: "text", text: "开始了。" }, { stop_reason: "end_turn" }));
+  r.ok(await until(async () => (await ci.count()) === 2 && (await page.locator("#chat-container .ci-user .ci-bubble").textContent()).includes("第一轮")), `…the first turn written → it appears without a reload (${await ci.count()} items)`);
+  r.ok(await bannerEl.isHidden() && (await emptyEl.count()) === 0, "…the empty state and banner are gone");
   r.ok(pageErrors.length === 0, `no page errors (${pageErrors.join("; ") || "none"})`);
 } catch (e) {
   r.fail(`exception: ${e.stack || e}`);

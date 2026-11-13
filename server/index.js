@@ -1145,9 +1145,11 @@ function conversationFor(s) {
   } while (readable && !c.conv.complete && Date.now() < deadline);
   if (c.conv.skipped && c.conv.skipped !== c.warnedSkipped) { c.warnedSkipped = c.conv.skipped; warnOnce(`conversation-skipped:${s.id}:${c.conv.skipped}`, `[${s.id}] ${c.conv.skipped} transcript record(s) longer than ${MAX_LINE >> 20} MB skipped — the chat view is a floor (\`hadron doctor\` has the row)`); }
   if (c.conv.orphanResults && !c.conv.evicted && c.conv.orphanResults !== c.warnedOrphans) { c.warnedOrphans = c.conv.orphanResults; warnOnce(`conversation-orphan:${s.id}:${c.conv.orphanResults}`, `[${s.id}] ${c.conv.orphanResults} tool result(s) found no tool_use in the transcript — those blocks show no result (\`hadron doctor\` has the row)`); }
-  if (!readable && !c.warnedUnreadable) { c.warnedUnreadable = true; warnOnce(`conversation-unreadable:${s.id}`, `[${s.id}] transcript unreadable while the chat view is open — the cached picture is served as stale`); }
+  // A missing file is claude before its first turn — an empty conversation, not a fault.
+  const missing = !readable && c.conv.items.length === 0 && (() => { try { statSync(file); return false; } catch (e) { return e.code === "ENOENT"; } })();
+  if (!readable && !missing && !c.warnedUnreadable) { c.warnedUnreadable = true; warnOnce(`conversation-unreadable:${s.id}`, `[${s.id}] transcript unreadable while the chat view is open — the cached picture is served as stale`); }
   else if (readable) c.warnedUnreadable = false;
-  return { conv: c.conv, conversationId: conversationIdFor(sid), readable };
+  return { conv: c.conv, conversationId: conversationIdFor(sid), readable, missing };
 }
 const conversationSweep = setInterval(() => {
   const cut = Date.now() - CONVERSATION_IDLE_MS;
@@ -1164,6 +1166,8 @@ app.get("/api/sessions/:id/conversation", (req, res) => {
   if (limit !== undefined && !(limit >= 1 && limit <= PAGE_MAX)) return res.status(400).json({ error: `limit must be 1-${PAGE_MAX}` });
   const r = conversationFor(s);
   if (!r) return res.json({ conversationId: null, reason: "no session", items: [] });
+  // No picture to serve: an empty-state answer (no rev, no generation — the client keeps polling the tail).
+  if (r.missing) return res.json({ conversationId: r.conversationId, reason: "no transcript yet", items: [] });
   if (!r.readable && r.conv.items.length === 0) return res.json({ conversationId: r.conversationId, reason: "transcript unreadable", items: [] });
   // `readable:false` = the transcript could not be read on this request and
   // the page is the cached picture (stale) — distinct from complete:false

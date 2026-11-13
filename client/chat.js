@@ -265,7 +265,7 @@ function renderChatView(el, s) {
   const drawEmpty = () => {
     const empty = list.querySelector(".chat-empty");
     if (m.items.size) { if (empty) empty.remove(); return; }
-    const text = m.reason === "no session" ? "No conversation yet — this agent is not running claude, or claude has not written its first turn." : m.reason === "transcript unreadable" ? "The transcript could not be read." : m.reason === "token" ? "Sign-in needed — the server rejected the token." : m.offline ? "Could not reach the server." : "Nothing in this conversation yet.";
+    const text = m.reason === "no session" ? "No conversation yet — this agent is not running claude, or claude has not written its first turn." : m.reason === "no transcript yet" ? "No conversation yet — waiting for claude's first turn." : m.reason === "transcript unreadable" ? "The transcript could not be read — retrying." : m.reason === "token" ? "Sign-in needed — the server rejected the token." : m.offline ? "Could not reach the server." : "Nothing in this conversation yet.";
     if (empty) empty.textContent = text; else list.insertAdjacentHTML("beforeend", `<div class="chat-empty">${esc(text)}</div>`);
   };
 
@@ -343,6 +343,17 @@ function renderChatView(el, s) {
         m.offline = false; if (m.reason === "token") m.reason = null;
         pages++;
         if (!data.conversationId) { m.reason = data.reason || null; m.conversationId = null; break; }
+        // An empty-state answer (no transcript yet / unreadable with nothing cached) carries no
+        // rev: never a page. The cursor stays, the poll goes on, and the first turn fills it in.
+        // One for a different conversation (adopted / resumed / cleared to a session with no
+        // transcript yet) drops the old picture first, as applyPage would.
+        if (data.reason) {
+          if (data.conversationId !== m.conversationId) {
+            Object.assign(m, chatFreshModel(sessionId), { open: m.open, outbox: m.outbox, outboxGone: m.outboxGone, conversationId: data.conversationId });
+            list.innerHTML = "";
+          }
+          m.reason = data.reason; if (m.items.size) m.readable = false; break;
+        }
         if (!applyPage(data, after !== null)) { after = null; continue; } // dropped: refetch the tail
         // A tail page says `more` for the EARLIER items it could not hold
         // (nextAfter = rev): nothing to page forward from.
