@@ -506,6 +506,14 @@ export function contextFromPane(rawLines) {
 }
 const clampPct = (n) => Math.max(0, Math.min(100, n));
 
+function dialogAtBottom(rawLines, dialog) {
+  let last = "";
+  for (let i = rawLines.length - 1; i >= 0; i--) if (rawLines[i].trim()) { last = rawLines[i].trim(); break; }
+  if (dialog.hints.some((h) => h.trim() === last)) return true;
+  const opt = last.replace(/^❯\s*/, "").match(/^(\d+)\.\s+(.*)$/);
+  return !!opt && dialog.options.some((o) => o.n === Number(opt[1]));
+}
+
 export function detectState(rawLines, opts = {}) {
   // ── Step 0: Alt-screen (full-screen TUI) short-circuit ──
   // When the pane is in the alternate screen buffer, it's a full-screen TUI
@@ -534,6 +542,20 @@ export function detectState(rawLines, opts = {}) {
     }
   }
   const hasPrompt = promptIdx >= 0;
+
+  // A dialog claude is showing replaces the composer: no prompt line, the
+  // dialog at the bottom. The tool line above it reads "⎿ Waiting…" — waiting
+  // for THIS answer — so the dialog wins before any working indicator (prod
+  // 2026-11-13: once the user's own ❯ line had scrolled off, "Waiting…" fell
+  // into the scan window and a pane at an "Ask rule … overrides auto mode"
+  // permission read as working; the chat showed no card).
+  // The dialog must be the LAST thing on the pane — its hint row (or an option)
+  // the bottom line: a dialog quoted in claude's output with a tool block under
+  // it is transcript, not a question.
+  if (!hasPrompt) {
+    const dialog = parseDialog(rawLines);
+    if (dialog && dialogAtBottom(rawLines, dialog)) return { state: "blocked", blockReason: "Needs input", substatus: null, dialog };
+  }
 
   // ── Step 2: Build scan window ──
   // "above": content lines above the prompt (or bottom of pane if no prompt).

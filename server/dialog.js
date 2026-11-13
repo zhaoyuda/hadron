@@ -157,6 +157,9 @@ export function parseDialog(rawLines) {
       const ind = text.split("\n").filter((l) => l.trim()).map((l) => l.match(/^\s*/)[0].length);
       const m = ind.length ? Math.min(...ind) : 0;
       if (m) text = text.split("\n").map((l) => l.slice(m)).join("\n");
+      // newer claude draws a long command with a │ border down its left edge
+      const lines = text.split("\n");
+      if (lines.every((l) => !l.trim() || /^│/.test(l))) text = lines.map((l) => l.replace(/^│ ?/, "")).join("\n");
     }
     if (text.trim()) sections.push({ code, text });
     cur = [];

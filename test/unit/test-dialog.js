@@ -65,6 +65,14 @@ console.log("1. parser — the installed claude's dialogs (fixtures captured fro
   ok(d2 && d2.kind === "permission" && d2.options.length === 3 && d2.key !== d.key, `Write dialog: permission, 3 options, a different key (${d2?.options.length})`);
   const wf = parseDialog(fixture("blocked-dialog-webfetch-v2"));
   ok(wf && wf.kind === "permission" && wf.options.length === 3 && wf.cancel === true && wf.amend === false && /\(esc\)/.test(wf.options[2].label), `WebFetch: permission, 3 options, no hint line — Esc comes from the "(esc)" option, no amend (${wf?.kind})`);
+  {
+    const ar = parseDialog(fixture("blocked-dialog-ask-rule"));
+    const code = ar?.sections.find((x) => x.code)?.text || "";
+    ok(ar && ar.kind === "permission" && ar.title === "Bash command" && ar.question === "Do you want to proceed?", `"Ask rule … overrides auto mode" permission parses (${ar?.kind}, ${ar?.title})`);
+    ok(ar && ar.options.map((o) => `${o.n}.${o.label.slice(0, 3)}`).join(" ") === "1.Yes 2.Yes 3.No" && ar.options[1].detail?.startsWith("/usr/bin/python3") && ar.cancel && ar.amend, `…three options, option 2's wrapped command as its detail, Esc + Tab (${ar?.options.map((o) => o.n).join(",")})`);
+    ok(code.startsWith("R=/tmp/hooktest/repo2;") && !code.includes("│") && code.split("\n").length === 2, `…the command without the │ border claude draws down its edge (${code.slice(0, 30)})`);
+    ok(ar && ar.sections.some((x) => !x.code && x.text.includes("Ask rule Bash(rm -rf *) overrides auto mode")), "…the ask-rule note is a text section");
+  }
   const am = parseDialog(fixture("blocked-dialog-bash-amend"));
   ok(am && am.options[0] && /tell Claude what/.test(am.options[0].label) && am.options[0].text === true, `after Tab, option 1 is the text option ("${am?.options[0]?.label}")`);
   const q = parseDialog(fixture("blocked-dialog-question-v2"));

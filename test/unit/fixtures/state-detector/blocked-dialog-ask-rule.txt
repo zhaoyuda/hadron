@@ -1,0 +1,31 @@
+● Write(/tmp/hooktest/run_test.sh)
+  ⎿  Wrote 48 lines to /tmp/hooktest/run_test.sh
+       1 #!/bin/sh
+       2 # Pre-commit size-guard test. Builds a scratch repo, stages one case at a time,
+     … +38 lines (ctrl+o to expand)
+
+● Bash(chmod +x /Users/u/.claude/git-hooks/pre-commit /tmp/hooktest/run_test.sh && sh /tmp/hooktest/run_test.sh 2>&1 | tail -25)
+  ⎿  === MUST BLOCK ===
+       ok    2 MB json                         BLOCK
+     … +13 lines (ctrl+o to expand)
+
+● Bash(R=/tmp/hooktest/repo2; rm -rf $R; mkdir -p $R/spikes/t999.raw; git -C $R init -q; git -C $R config user.email t@t; git -C $R config user.name t; /usr/bin/python…)
+  ⎿  Waiting…
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Bash command
+ Show the blocked-commit message rendering
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+   │ R=/tmp/hooktest/repo2; rm -rf $R; mkdir -p $R/spikes/t999.raw; git -C $R init -q; git -C $R config user.email t@t; git -C $R config user.name t; /usr/bin/python3 -c
+   │ "open('$R/spikes/t999.raw/q1_pop_pairs.json','w').write('x'*46630000)"; git -C $R add -A; git -C $R commit -m "test" 2>&1 | head -20
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Ask rule Bash(rm -rf *) overrides auto mode for this command.
+ /permissions to let auto mode decide
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for: R=/tmp/hooktest/repo2; rm -rf $R; mkdir -p $R/spikes/t999.raw; git -C $R init -q; git -C $R config user.email t@t; git -C $R config user.name t;
+      /usr/bin/python3 -c "open('$R/spikes/t999.raw/q1_pop_pairs.json','w').write('x'*46630000)"; git -C $R add -A; git -C $R commit -m "test" 2>&1 | head -20
+   3. No
+
+ Esc to cancel · Tab to amend

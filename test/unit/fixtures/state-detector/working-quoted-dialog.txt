@@ -1,0 +1,7 @@
+● The captured menu looks like this:
+  ❯ 1. Yes
+    2. No
+  Esc to cancel
+
+● Bash(sleep 60)
+  ⎿  Running… (4s · timeout 2m)

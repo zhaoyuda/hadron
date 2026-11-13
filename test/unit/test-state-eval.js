@@ -142,6 +142,11 @@ const EXPECTED = {
   "blocked-permission-allow-deny":     { state: "blocked", blockReason: "Needs input" },
   "blocked-selection-4options":        { state: "blocked", blockReason: "Needs input" },
   "blocked-dialog-bash-v2": { state: "blocked", blockReason: "Needs input" },
+  // claude's "Ask rule … overrides auto mode" permission with the user's own ❯ line scrolled off:
+  // the tool's "⎿ Waiting…" above the dialog is waiting for this answer, not work (prod 2026-11-13)
+  "blocked-dialog-ask-rule": { state: "blocked", blockReason: "Needs input" },
+  // a dialog QUOTED in claude's output with a tool running under it, no prompt line visible: transcript, not a question
+  "working-quoted-dialog": { state: "working" },
   "blocked-dialog-bash-amend": { state: "blocked", blockReason: "Needs input" },
   "blocked-dialog-write-v2": { state: "blocked", blockReason: "Needs input" },
   "blocked-dialog-webfetch-v2": { state: "blocked", blockReason: "Needs input" },
