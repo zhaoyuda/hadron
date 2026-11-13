@@ -9,7 +9,7 @@
  *
  * Run: node test/unit/test-state-machine.js
  */
-import { nextState } from "../../server/state-detector.js";
+import { nextState, StateDetector } from "../../server/state-detector.js";
 
 let passed = 0, failed = 0;
 function ok(cond, msg) {
@@ -77,6 +77,51 @@ console.log("\n[blocked hysteresis — needs 2 consecutive blocked snaps]");
   T(m, { cmd: "node", snap: sBlockedInput });
   const d = T(m, { cmd: "node", snap: sToolStrong });
   ok(m.blockedHits === 0 && d && d.state === "working", "blocked streak cleared by a working frame");
+}
+
+console.log("\n[a block whose reason changes while it stays blocked]");
+{
+  const lim = { state: "blocked", blockReason: "Usage limit" }, mod = { state: "blocked", blockReason: "Model unavailable" };
+  const m = machine("blocked", { blockReason: "Usage limit" });
+  ok(T(m, { cmd: "node", snap: lim }) === null, "same reason again → no decision");
+  ok(T(m, { cmd: "node", snap: mod }) === null, "one snap of a new reason does not change it");
+  let d = T(m, { cmd: "node", snap: mod });
+  ok(d && !d.state && d.blockReason === "Model unavailable", `two in a row → { blockReason } with no state change (${JSON.stringify(d)})`);
+  m.blockReason = "Model unavailable";
+  T(m, { cmd: "node", snap: lim });
+  T(m, { cmd: "node", snap: mod });
+  ok(T(m, { cmd: "node", snap: lim }) === null, "a flicker between reasons never changes it");
+  T(m, { cmd: "node", snap: sPrompt, canTransition: false });
+  ok(T(m, { cmd: "node", snap: lim }) === null, "a non-blocked snap in between restarts the count");
+  d = T(m, { cmd: "node", snap: { state: "blocked" } });
+  ok(d === null, "a blocked snap without a reason never clears it");
+}
+for (const [label, between] of [
+  ["a shell tick", { cmd: "zsh", snap: { state: "blocked", blockReason: "Model unavailable", altScreen: true } }],
+  ["an alt-screen tick", { cmd: "node", snap: { state: "blocked", blockReason: "Model unavailable", altScreen: true } }],
+  ["a non-agent tick", { cmd: "python3", snap: { state: "blocked", blockReason: "Model unavailable" } }],
+]) {
+  const mod = { state: "blocked", blockReason: "Model unavailable" };
+  const m = machine("blocked", { blockReason: "Usage limit" });
+  T(m, { cmd: "node", snap: mod });
+  T(m, between);
+  ok(T(m, { cmd: "node", snap: mod }) === null, `${label} in between restarts the count`);
+}
+{
+  // the wrapper: the reason lands on the session, the state (and attention) stays
+  const session = { id: "rr", state: "idle" };
+  const det = new StateDetector("rr", session, { poll: false });
+  det.stateEnteredAt = 0;
+  const lim = { state: "blocked", blockReason: "Usage limit" }, mod = { state: "blocked", blockReason: "Model unavailable" };
+  det._applySnap("claude", lim, false); det._applySnap("claude", lim, false);
+  ok(session.state === "blocked" && session.blockReason === "Usage limit", `detector: blocked · Usage limit (${session.state} ${session.blockReason})`);
+  const rev = session.attentionRev, entered = det.stateEnteredAt;
+  det._applySnap("claude", mod, false); det._applySnap("claude", mod, false);
+  ok(session.state === "blocked" && session.blockReason === "Model unavailable", `detector: …then Model unavailable on the session (${session.blockReason})`);
+  ok(session.attentionRev === rev && det.stateEnteredAt === entered, "…no new entry: attention not raised again, state clock kept");
+  session._manualOverrideUntil = Date.now() + 60000;
+  det._applySnap("claude", lim, false); det._applySnap("claude", lim, false);
+  ok(session.blockReason === "Model unavailable", `…a manual override in force keeps the reason (${session.blockReason})`);
 }
 
 console.log("\n[stale thinking vs strong indicator at idle]");

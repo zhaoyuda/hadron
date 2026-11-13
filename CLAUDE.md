@@ -111,9 +111,17 @@ npm test
 #                            MCP server's callback error, a tool result, deliberately not an API block
 #                            (apiErrorReason, classification only: it never decides `blocked`); contextFromPane
 #                            reads claude's context footer only from the bottom 16 rows under the last ❯ prompt line —
-#                            a reply quoting "91% context used" is null, so is the phrase with no prompt line at all)
+#                            a reply quoting "91% context used" is null, so is the phrase with no prompt line at all;
+#                            every fixture reads the same with 30 blank rows under it — the tail / bottom-5 windows count
+#                            from the last DRAWN row, a pane not yet full no longer hides an API error or a ❯ 1. selection;
+#                            only text below the composer's ❯ line can block on a dialog phrase, and only text below the
+#                            operator's previous ❯ prompt can be the API error — an error above a later prompt, or a reply
+#                            quoting "Do you want to proceed?", is superseded and reads null)
 #   + test-state-machine.js (nextState reducer — temporal transitions; idle/done refresh a shell substatus
-#                            in place, a turn ending with a shell still running settles to done)
+#                            in place, a turn ending with a shell still running settles to done; a block whose reason
+#                            changes (Usage limit → Model unavailable) refreshes blockReason after 2 snaps in a row —
+#                            { blockReason } decision, no new entry: attention not re-raised, state clock kept; a shell / non-agent /
+#                            alt-screen tick in between restarts the count, a manual override in force keeps the reason)
 #   + test-security.js      (auth, cwd policy, injection, concurrency over HTTP)
 #   + test-annotations.js / test-message.js / test-upload.js (v0.8 surfaces; message to a
 #                            bare-shell pane is refused 409 unless force — no paste into zsh)

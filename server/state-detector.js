@@ -560,8 +560,12 @@ export function detectState(rawLines, opts = {}) {
   // ── Step 2: Build scan window ──
   // "above": content lines above the prompt (or bottom of pane if no prompt).
   // These are the lines where active working indicators would appear.
-  // "tail": last 15 raw lines, used for background/blocked checks.
-  const tail = rawLines.slice(Math.max(0, rawLines.length - 15));
+  // "tail": last 15 drawn lines, used for background/blocked checks.
+  // Counted from the last drawn row: a pane not yet full has blank rows under
+  // the content, and those must not push the content out of the window.
+  let end = rawLines.length;
+  while (end > 0 && !rawLines[end - 1].trim()) end--;
+  const tail = rawLines.slice(Math.max(0, end - 15), end);
 
   // Collect non-chrome content lines above the prompt (up to 20 lines).
   // If no prompt, collect from the bottom of the pane.
@@ -700,7 +704,7 @@ export function detectState(rawLines, opts = {}) {
   // ── Step 5: Blocked checks ──
 
   // 5a. Selection prompt (❯ 1. Option text) — check bottom of pane
-  const bottom5 = rawLines.slice(Math.max(0, rawLines.length - 5));
+  const bottom5 = rawLines.slice(Math.max(0, end - 5), end); // the last 5 DRAWN rows (see `tail`)
   for (const line of bottom5) {
     if (SELECTION_PROMPT_RE.test(line.trim())) {
       return { state: "blocked", blockReason: "Needs input", substatus: null, dialog: parseDialog(rawLines) };
@@ -709,7 +713,12 @@ export function detectState(rawLines, opts = {}) {
 
   // 5b. Permission / input dialogs — `dialog` is the parsed card (server/dialog.js),
   // null when the pane shows a shape the parser does not read (the card hands over).
-  if (WAITING_INPUT_RE.test(tailText)) {
+  // Only what is still live: with a prompt line on screen, a dialog sits BELOW
+  // it (the composer is gone while claude asks) — the same words above it are a
+  // reply quoting them. An API error counts only below the operator's last
+  // prompt: one above a later "❯ try again" was answered already.
+  const liveFrom = (i) => tail.slice(Math.max(0, i + 1 - (end - tail.length)));
+  if (WAITING_INPUT_RE.test(hasPrompt ? liveFrom(promptIdx).join("\n") : tailText)) {
     return { state: "blocked", blockReason: "Needs input", substatus: null, dialog: parseDialog(rawLines) };
   }
 
@@ -721,7 +730,9 @@ export function detectState(rawLines, opts = {}) {
 
   // 5d. API error — a line that BEGINS with one of Claude Code's error messages,
   // or a retry banner whose head is a real error rather than the generic "API error"
-  const apiErr = findApiError(tail);
+  let lastAsked = -1; // the operator's last prompt above the composer
+  for (let i = promptIdx - 1; i >= 0 && hasPrompt; i--) if (/^❯/.test(rawLines[i].trim()) && !/^❯\s+\d+\./.test(rawLines[i].trim())) { lastAsked = i; break; }
+  const apiErr = findApiError(lastAsked >= 0 ? liveFrom(lastAsked) : tail);
   if (apiErr !== null) {
     return { state: "blocked", blockReason: apiErrorReason(apiErr), substatus: null };
   }
@@ -753,13 +764,15 @@ function _findToolName(lines, fromIdx) {
  * one poll's inputs, mutate the counters and return a decision:
  *   - { state, blockReason?, substatus? } → change to `state`
  *   - { substatus }                       → keep state, refresh substatus only
+ *   - { blockReason }                     → stay blocked, the reason changed
  *   - null                                → no change
  *
  * Kept side-effect-free (only mutates the passed-in `m`) so it can be unit-tested
  * without tmux. The class wrapper applies decisions via _setState.
  *
  * `m` fields: current, blockReason, substatus, notWorking, inconclusive, blockedHits,
- *             shellHits, settleThreshold (default 8), inconclusiveThreshold (2).
+ *             shellHits, reasonHits + pendingReason (a new block reason seen in a row),
+ *             settleThreshold (default 8), inconclusiveThreshold (2).
  * inputs: cmd, snap (from detectState), contentChanged, canTransition.
  */
 export function nextState(m, { cmd, snap, contentChanged, canTransition }) {
@@ -768,6 +781,9 @@ export function nextState(m, { cmd, snap, contentChanged, canTransition }) {
   const isAgent = AGENT_PROCESS_RE.test(cmd);
   const isShell = SHELL_RE.test(cmd);
   const current = m.current;
+  // A reason refresh counts only consecutive agent, main-screen blocked reads —
+  // a shell / non-agent / alt-screen tick in between starts it over.
+  if (!(isAgent && !snap?.altScreen && snap?.state === "blocked")) { m.reasonHits = 0; m.pendingReason = null; }
 
   // ── Shell foreground ──
   if (isShell) {
@@ -836,6 +852,13 @@ export function nextState(m, { cmd, snap, contentChanged, canTransition }) {
     if (current !== "blocked" && m.blockedHits >= 2 && canTransition) {
       return { state: "blocked", blockReason: snap.blockReason };
     }
+    // Still blocked, for another reason now (a usage limit, then the model
+    // went away): the card says what to do NOW. Same 2-snap hysteresis.
+    if (current === "blocked" && snap.blockReason && snap.blockReason !== m.blockReason) {
+      m.reasonHits = m.pendingReason === snap.blockReason ? (m.reasonHits || 0) + 1 : 1;
+      m.pendingReason = snap.blockReason;
+      if (m.reasonHits >= 2) { m.reasonHits = 0; m.pendingReason = null; return { blockReason: snap.blockReason }; }
+    } else { m.reasonHits = 0; m.pendingReason = null; }
     return null;
   }
   m.blockedHits = 0;
@@ -1087,6 +1110,8 @@ export class StateDetector {
       inconclusive: this.inconclusiveCount,
       blockedHits: this.blockedCount,
       shellHits: this.shellDoneCount,
+      reasonHits: this.reasonHits || 0,
+      pendingReason: this.pendingReason || null,
       settleThreshold: this.settleThreshold,
       inconclusiveThreshold: this.inconclusiveThreshold,
     };
@@ -1096,10 +1121,16 @@ export class StateDetector {
     this.inconclusiveCount = m.inconclusive;
     this.blockedCount = m.blockedHits;
     this.shellDoneCount = m.shellHits;
+    this.reasonHits = m.reasonHits;
+    this.pendingReason = m.pendingReason;
 
     if (decision) {
       if (decision.state) {
         this._setState(decision.state, decision.blockReason, decision.substatus);
+      } else if (decision.blockReason && this.session.state === "blocked"
+        && !(this.session._manualOverrideUntil && Date.now() < this.session._manualOverrideUntil)) {
+        this.session.blockReason = decision.blockReason;
+        console.log(`[state-detector] Session "${this.session.id}" blocked: ${decision.blockReason}`);
       } else if (decision.substatus !== undefined) {
         this.session.substatus = decision.substatus;
       }

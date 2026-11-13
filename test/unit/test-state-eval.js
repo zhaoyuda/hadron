@@ -307,6 +307,39 @@ for (const file of files) {
   }
 }
 
+// A pane not yet full: blank rows under the content change nothing (the tail
+// window counts from the last drawn row — before, 15 blank rows hid an API error).
+{
+  console.log("\n[blank rows under the content]");
+  let bad = 0;
+  for (const f of files) {
+    const exp = EXPECTED[f.replace(/\.txt$/, "")];
+    if (!exp || exp.input) continue;
+    const lines = readFileSync(join(FIXTURES_DIR, f), "utf-8").split("\n");
+    const a = detectState(lines), b = detectState([...lines, ...Array(30).fill("")]);
+    if ((a.state ?? null) !== (b.state ?? null) || a.blockReason !== b.blockReason) { bad++; console.log(`  ✗ FAIL: ${f} + 30 blank rows → ${b.state} ${b.blockReason ?? ""} (alone ${a.state} ${a.blockReason ?? ""})`); }
+  }
+  if (!bad) { console.log("  ✓ every fixture reads the same with 30 blank rows under it"); passed++; } else failed += bad;
+}
+
+// What a later turn superseded is not live: an API error above a later "❯ try
+// again" and a reply quoting a dialog question above the composer read at-prompt,
+// with or without blank rows under them (astra25: the drawn-row tail reached them).
+{
+  console.log("\n[superseded text is not live]");
+  const box = ["", "─".repeat(60), "❯ ", "─".repeat(60), "  ⏵⏵ bypass permissions on (shift+tab to cycle)"];
+  const oldErr = ["❯ run the tests", "● API Error: 500 {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"Internal server error\"}}", "", "❯ try again", "", "● All 12 tests pass.", ...box];
+  const liveErr = ["❯ run the tests", "", "● All 12 tests pass.", "", "❯ try again", "● API Error: 500 {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"Internal server error\"}}", ...box];
+  const quoted = ["❯ what does claude ask before a command?", "", "● It shows a dialog headed \"Do you want to proceed?\" with numbered options.", ...box];
+  for (const [lines, want, label] of [[oldErr, null, "an API error above a later prompt"], [liveErr, "blocked", "an API error under the last prompt"], [quoted, null, "a reply quoting \"Do you want to proceed?\""]]) {
+    for (const pad of [0, 3, 20]) {
+      const r = detectState([...lines, ...Array(pad).fill("")]);
+      if ((r.state ?? null) === want) { console.log(`  ✓ ${label} + ${pad} blank rows → ${r.state ?? "at prompt"}${r.blockReason ? ` · ${r.blockReason}` : ""}`); passed++; }
+      else { console.log(`  ✗ FAIL: ${label} + ${pad} blank rows → ${r.state} ${r.blockReason ?? ""} (want ${want})`); failed++; }
+    }
+  }
+}
+
 // apiErrorReason on heads the fixtures do not carry: the retry banner's status codes
 // and rate-limit metadata heads, and the generic / unknown fallbacks. The classifier
 // never decides `blocked` (detection is API_ERROR_LINE_RE / RETRY_ERROR_LINE_RE); it

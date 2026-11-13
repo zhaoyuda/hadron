@@ -371,6 +371,9 @@ async function main() {
   a = await msg(id, { text: "/model overtake", requestId: rid(), when: "idle" });
   ok(a.status === 200 && a.json.entry?.state === "handed" && typed().includes("/model overtake") && !typed().includes("ordinary-first"),
     `…a switch after it goes past it (${a.status} ${a.json?.entry?.state})`);
+  // claude answers the switch with the error again (that model is unavailable too):
+  // the typed switch above is superseded text, the block is the screen drawn again
+  tmuxS(["send-keys", "-t", paneOf(id), "MODELERR", "Enter"]);
   a = await msg(id, { text: "/model second", requestId: rid(), when: "idle" });
   ok(a.status === 202, `…a second switch inside the settle window queues (${a.status})`);
   ok(await until(() => typed().includes("/model second"), 10000) && !typed().includes("ordinary-first"), "…and the dispatcher takes it past the message too, the block still up");
