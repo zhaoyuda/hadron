@@ -51,7 +51,7 @@ function chatModel(sessionId) {
   return m;
 }
 function chatFreshModel(sessionId) {
-  return { sessionId, conversationId: null, generation: null, rev: null, items: new Map(), title: null, mode: null, permissionMode: null,
+  return { sessionId, conversationId: null, generation: null, rev: null, items: new Map(), title: null, mode: null, permissionMode: null, model: null, effort: null,
     hidden: new Set(), // ids of queue lines a record named in `hides`: never drawn, whatever copy arrives later
     firstOrd: null, evicted: 0, skipped: 0, orphanResults: 0, readable: true, complete: true, offline: false, reason: null, open: new Set(), paused: false, unseen: 0,
     anchor: null, // {id, offset}: the item at the top of the view and its offset from it, while paused
@@ -81,14 +81,14 @@ function renderChatView(el, s) {
   const sessionId = s.id;
   const m = chatModel(sessionId);
   el.innerHTML = `<div class="chat">
-    <div class="chat-hdr"><span class="chat-title"></span><span class="chat-mode"></span><span class="chat-note"></span><span class="chat-tools" title="Open every tool card">${chatExpandAll ? "Collapse tools" : "Expand tools"}</span></div>
+    <div class="chat-hdr"><span class="chat-title"></span><span class="chat-note"></span><span class="chat-tools" title="Open every tool card">${chatExpandAll ? "Collapse tools" : "Expand tools"}</span></div>
     <div class="chat-banner" hidden></div>
     <div class="chat-scroll"><div class="chat-earlier" hidden></div><div class="chat-list"></div><div class="chat-live" hidden></div></div>
     <div class="chat-jump" hidden>↓</div>
     <div class="chat-notice" hidden></div>
     <div class="chat-outbox" hidden></div>
     <div class="chat-dialog" hidden></div>
-    <div class="chat-composer"><button class="chat-attach" title="Attach images (or paste / drop them here)">📎</button><input class="chat-attach-in" type="file" accept="image/*" multiple hidden><textarea class="chat-input" rows="1" placeholder="Message claude — Enter to send, Shift+Enter for a new line"></textarea><button class="chat-send" title="Send (Enter)">↑</button><div class="chat-draft-st"></div></div>
+    <div class="chat-composer"><button class="chat-attach" title="Attach images (or paste / drop them here)">📎</button><input class="chat-attach-in" type="file" accept="image/*" multiple hidden><textarea class="chat-input" rows="1" placeholder="Message claude — ↵ to send, ⇧↵ for a new line"></textarea><div class="chat-btns"><button class="chat-stop" title="Stop claude's turn (Esc in the pane)" hidden>■</button><button class="chat-send" title="Send (Enter)">↑</button></div><div class="chat-bar"><button class="chat-pick chat-pick-model" type="button"></button><button class="chat-pick chat-pick-effort" type="button"></button><span class="chat-perm"></span><span class="chat-bar-gap"></span><span class="chat-ring" hidden></span><div class="chat-menu" hidden></div></div><div class="chat-draft-st"></div></div>
   </div>`;
   const scroll = el.querySelector(".chat-scroll"), list = el.querySelector(".chat-list"), jump = el.querySelector(".chat-jump"), live = el.querySelector(".chat-live");
   // A programmatic scroll is consumed by the first scroll event that finds the
@@ -209,9 +209,8 @@ function renderChatView(el, s) {
   });
 
   const drawHeader = () => {
-    const title = el.querySelector(".chat-title"), mode = el.querySelector(".chat-mode"), note = el.querySelector(".chat-note");
+    const title = el.querySelector(".chat-title"), note = el.querySelector(".chat-note");
     title.textContent = m.title || "Conversation";
-    mode.textContent = m.permissionMode && m.permissionMode !== "default" ? m.permissionMode : "";
     // Warnings get a banner of their own (never the ellipsized header slot);
     // bookkeeping notes stay in the header.
     let warn = "";
@@ -290,7 +289,7 @@ function renderChatView(el, s) {
     // The cursor advances only as far as this page: a tick cut short resumes
     // from nextAfter, not from the server's head (items would be lost for good).
     m.conversationId = data.conversationId; m.generation = data.generation; m.rev = data.more ? data.nextAfter : data.rev;
-    m.title = data.title; m.mode = data.mode; m.permissionMode = data.permissionMode;
+    m.title = data.title; m.mode = data.mode; m.permissionMode = data.permissionMode; m.model = data.model || null; m.effort = data.effort || null;
     m.firstOrd = data.firstOrd; m.evicted = data.evicted || 0; m.skipped = data.skipped || 0; m.orphanResults = data.orphanResults || 0;
     m.readable = data.readable !== false; m.complete = data.complete !== false; m.reason = data.reason || null;
     const incoming = data.items || [];
@@ -370,7 +369,7 @@ function renderChatView(el, s) {
   };
   const composer = chatComposer(el, m, sessionId, { list });
   const dialogCard = chatDialogCard(el, sessionId);
-  chatTeardown.set(el, () => { stick.disconnect(); window.removeEventListener("pointerup", onPointerUp); window.removeEventListener("pointercancel", onPointerUp); window.removeEventListener("blur", onBlur); window.removeEventListener("keydown", onKey, true); composer.flush(); if (chatActiveComposer === composer) chatActiveComposer = null; });
+  chatTeardown.set(el, () => { stick.disconnect(); window.removeEventListener("pointerup", onPointerUp); window.removeEventListener("pointercancel", onPointerUp); window.removeEventListener("blur", onBlur); window.removeEventListener("keydown", onKey, true); composer.flush(); composer.dispose(); if (chatActiveComposer === composer) chatActiveComposer = null; });
   // Draw what the model already holds (back from another tab) before the first
   // poll — at the reader's place when they had scrolled up, with the pill.
   if (m.items.size) {
@@ -566,7 +565,7 @@ function chatItemEl(m, it) {
       chatRenderAssistant(m, div, it);
       break;
     case "command":
-      div.innerHTML = `<div class="ci-line"><span class="ci-cmd">/${esc(it.name)}</span> ${esc(it.args || "")}</div>${when}`;
+      div.innerHTML = `<div class="ci-line"><span class="ci-cmd">/${esc(String(it.name || "").replace(/^\//, ""))}</span> ${esc(it.args || "")}</div>${when}`;
       break;
     case "output":
       div.innerHTML = `<details class="ci-out"><summary>command output <span class="ci-dim">${esc(chatCount(it.text))}</span></summary><pre>${esc(it.text || "")}</pre></details>`;
@@ -792,11 +791,14 @@ function chatDraftReplace(sessionId, placeholder, replacement) {
 const chatRequestId = () => `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 // Has claude recorded this handed message as a user turn? Same text (a clipped
 // bubble matches its prefix), recorded no earlier than the send.
+function chatCommandText(it) { return `/${String(it.name || "").replace(/^\//, "")}${it.args ? ` ${it.args}` : ""}`; }
 function chatObserved(m, row) {
   const t0 = Date.parse(row.at || "") - 5000;
   for (const it of m.items.values()) {
-    if (it.kind !== "user" || typeof it.text !== "string") continue;
     if (Number.isFinite(t0) && it.at && Date.parse(it.at) < t0) continue;
+    // A slash command is recorded as a command item, never a prompt.
+    if (it.kind === "command" && row.text.startsWith("/")) { if (chatCommandText(it) === row.text.trim()) return true; continue; }
+    if (it.kind !== "user" || typeof it.text !== "string") continue;
     if (it.text === row.text || (it.truncated && row.text.startsWith(it.text)) || (row.truncated && it.text.startsWith(row.text))) return true;
   }
   return false;
@@ -919,6 +921,31 @@ function chatDialogCard(el, sessionId) {
     render(d, isAnswered ? "answered" : null);
   };
   return { tick };
+}
+
+// The composer bar's pickers. Aliases are claude's own (/model sonnet|opus|haiku|fable,
+// with "[1m]" for the 1M-context window); efforts are /effort's levels.
+const CHAT_MODELS = [
+  { alias: "fable", family: "fable", long: false, label: "Fable" },
+  { alias: "fable[1m]", family: "fable", long: true, label: "Fable · 1M context" },
+  { alias: "opus", family: "opus", long: false, label: "Opus" },
+  { alias: "opus[1m]", family: "opus", long: true, label: "Opus · 1M context" },
+  { alias: "sonnet", family: "sonnet", long: false, label: "Sonnet" },
+  { alias: "sonnet[1m]", family: "sonnet", long: true, label: "Sonnet · 1M context" },
+  { alias: "haiku", family: "haiku", long: false, label: "Haiku" },
+];
+const CHAT_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+const CHAT_PERM_LABEL = { default: "Ask", auto: "Auto", acceptEdits: "Accept edits", plan: "Plan", bypassPermissions: "Bypass", dontAsk: "Don't ask" };
+function chatCap(s) { return s === "xhigh" ? "XHigh" : s.charAt(0).toUpperCase() + s.slice(1); }
+// "claude-opus-5-5" → "Opus 5.5", "claude-fable-5-1[1m]" → "Fable 5.1 (1M context)";
+// a label claude printed ("Opus 5.5 (1M context)") is shown as it is.
+// Mirrors server/outbox.js SWITCH_BLOCKS.
+const CHAT_SWITCH_BLOCKS = new Set(["Model unavailable", "Usage limit", "Context full", "Login needed"]);
+function chatModelLabel(model) {
+  if (!model) return "";
+  const mm = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(\[1m\])?$/i.exec(model);
+  if (!mm) return model;
+  return `${chatCap(mm[1].toLowerCase())} ${mm[2]}${mm[3] ? `.${mm[3]}` : ""}${mm[4] ? " (1M context)" : ""}`;
 }
 
 function chatComposer(el, m, sessionId, { list }) {
@@ -1116,7 +1143,7 @@ function chatComposer(el, m, sessionId, { list }) {
   const label = (row) => {
     switch (row.state) {
       case "pending": case "sending": return "Sending…";
-      case "queued": return row.stale ? "Written for an earlier conversation — held" : "Send after this turn";
+      case "queued": return row.stale ? "Written for an earlier conversation — held" : row.idleOnly ? "Switches once claude is at its prompt" : "Send after this turn";
       case "handed":
         if (m.readable === false || !m.conversationId) return "Handed to the terminal"; // no transcript to see it recorded in
         // Pasted while claude was working: claude takes it with its next step and
@@ -1152,7 +1179,7 @@ function chatComposer(el, m, sessionId, { list }) {
       const st = document.createElement("span"); st.className = "ob-st"; st.textContent = label(row);
       meta.appendChild(st);
       const act = (name, lbl, title) => { const b = document.createElement("span"); b.className = "ob-act"; b.dataset.act = name; b.textContent = lbl; b.title = title; b.addEventListener("click", () => action(name, row)); meta.appendChild(b); };
-      if (row.state === "queued") { if (!row.stale) act("now", "Send now", "Send it now, dialog or not — into a dialog the text lands wherever its cursor is"); act("edit", "Edit", row.stale ? "Take it back into the composer, for this conversation" : "Take it back into the composer"); act("cancel", "×", "Cancel — not sent"); }
+      if (row.state === "queued") { if (!row.stale && !row.idleOnly) act("now", "Send now", "Send it now, dialog or not — into a dialog the text lands wherever its cursor is"); act("edit", "Edit", row.stale ? "Take it back into the composer, for this conversation" : "Take it back into the composer"); act("cancel", "×", "Cancel — not sent"); }
       if (row.state === "failed") { act("retry", "Retry", "Send it again"); act("edit", "Edit", "Take it back into the composer"); act("discard", "Discard", "Forget it"); }
       if (row.state === "uncertain") { act("retry", "Send again", "Send it again — if the first one did land, claude gets it twice"); act("edit", "Edit", "Take it back into the composer — if the first one did land, claude gets it twice"); act("discard", "Discard", "Forget it"); }
       div.appendChild(text); div.appendChild(meta);
@@ -1160,7 +1187,7 @@ function chatComposer(el, m, sessionId, { list }) {
     }
     // Several messages waiting: one button folds them into a single queued
     // message (in order, a blank line between) — one paste, one bubble.
-    const queued = rows.filter((r) => r.state === "queued" && !r.stale);
+    const queued = rows.filter((r) => r.state === "queued" && !r.stale && !r.idleOnly); // a /model pick is never folded into a message
     if (queued.length > 1) {
       const bar = document.createElement("div"); bar.className = "ob-row ob-merge";
       const b = document.createElement("span"); b.className = "ob-act"; b.dataset.act = "merge"; b.textContent = `Merge ${queued.length} into one message`; b.title = "Send them as one message, in this order";
@@ -1183,7 +1210,7 @@ function chatComposer(el, m, sessionId, { list }) {
     row.state = "pending"; delete row.error; drawOutbox();
     let r = null, j = {};
     try {
-      r = await fetch(api("/message"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: row.text, requestId: row.id, when: "auto", deviceId }) });
+      r = await fetch(api("/message"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: row.text, requestId: row.id, when: row.idleOnly ? "idle" : "auto", deviceId }) });
       j = await r.json().catch(() => ({}));
     } catch { r = null; }
     if (!m.outbox.has(row.id)) return; // removed meanwhile
@@ -1223,7 +1250,7 @@ function chatComposer(el, m, sessionId, { list }) {
       try { r = await fetch(api(`/outbox/${encodeURIComponent(row.id)}`), { method: "DELETE" }); } catch {}
       if (r && r.status === 409) { row.state = "sending"; drawOutbox(); return; } // the first one IS going out
       m.outbox.delete(row.id); m.outboxGone.set(row.id, Date.now());
-      const fresh = { id: chatRequestId(), text: row.text, state: "pending", at: new Date().toISOString(), server: false };
+      const fresh = { id: chatRequestId(), text: row.text, state: "pending", at: new Date().toISOString(), server: false, ...(row.idleOnly ? { idleOnly: true } : {}) };
       m.outbox.set(fresh.id, fresh); post(fresh);
     } else if (name === "discard") remove(row, true);
     else if (name === "now") {
@@ -1310,7 +1337,7 @@ function chatComposer(el, m, sessionId, { list }) {
         if (m.outboxGone.has(e.id)) continue;
         const row = m.outbox.get(e.id);
         if (row) { if (row.state !== "pending") Object.assign(row, { state: e.state, error: e.error, handedAt: e.handedAt, handedWhile: e.handedWhile, at: e.at, stale: e.stale, server: true }, fresh ? { text: e.text, truncated: false } : {}); }
-        else m.outbox.set(e.id, { id: e.id, text: e.text, truncated: !fresh && Boolean(e.truncated), state: e.state, at: e.at, error: e.error, handedAt: e.handedAt, handedWhile: e.handedWhile, stale: e.stale, server: true });
+        else m.outbox.set(e.id, { id: e.id, text: e.text, idleOnly: e.idleOnly === true, truncated: !fresh && Boolean(e.truncated), state: e.state, at: e.at, error: e.error, handedAt: e.handedAt, handedWhile: e.handedWhile, stale: e.stale, server: true });
       }
       if (fresh) for (const row of m.outbox.values()) if (row.server && row.state !== "pending" && !seen.has(row.id)) m.outbox.delete(row.id);
     }
@@ -1319,13 +1346,102 @@ function chatComposer(el, m, sessionId, { list }) {
     // paste that got lost stays as a row that never goes, which is the truth;
     // the label says so once the turn is over.
     for (const row of m.outbox.values()) if (row.state === "handed" && chatObserved(m, row)) remove(row, true);
-    drawOutbox();
+    drawOutbox(); drawBar();
     if (local && !local.synced && !inflight && !timer && !conflict && Date.now() - lastTry > CHAT_DRAFT_RETRY_MS) sync();
   };
+  // ── the bar under the input: model ▾ · effort ▾ · permission mode · context ring ──
+  // Model and effort come from the transcript (the last assistant record, or
+  // claude's own "Set model to …" output); a pick is sent as `/model <alias>` /
+  // `/effort <level>` through the outbox, so it shows up as a row until claude
+  // records the command, and the new value arrives the same way as any other.
+  // Picks are offered only at claude's prompt: a slash command typed mid-turn
+  // would be queued as a message.
+  const barEl = el.querySelector(".chat-bar"), menu = el.querySelector(".chat-menu");
+  const pickModel = el.querySelector(".chat-pick-model"), pickEffort = el.querySelector(".chat-pick-effort");
+  const permEl = el.querySelector(".chat-perm"), ring = el.querySelector(".chat-ring"), stopBtn = el.querySelector(".chat-stop");
+  let menuKind = null, stopping = 0;
+  const pending = (prefix) => [...m.outbox.values()].some((r) => r.text.startsWith(prefix) && r.state !== "failed" && r.state !== "uncertain");
+  const barBlock = () => {
+    const st = sess()?.state;
+    if (!m.conversationId) return "No claude conversation in this agent";
+    if (st === "working") return "Claude is working — switch once the turn is over";
+    // claude refusing a turn at its empty prompt (the server's SWITCH_BLOCKS) —
+    // a model switch is the way out of "Model unavailable", so it is offered.
+    const sw = sess();
+    if (st === "blocked" && !sw?.dialog && CHAT_SWITCH_BLOCKS.has(sw?.blockReason)) return "";
+    if (st === "blocked") return "Claude is waiting on a dialog — answer it first";
+    if (st !== "idle" && st !== "done") return "Claude is not at its prompt";
+    return "";
+  };
+  const closeMenu = () => { menu.hidden = true; menu.innerHTML = ""; menuKind = null; };
+  const choose = (text) => {
+    closeMenu();
+    // when:"idle" — the server holds it until claude is at its prompt, however
+    // stale this tab's picture of the state is.
+    const row = { id: chatRequestId(), text, idleOnly: true, state: "pending", at: new Date().toISOString(), server: false };
+    m.outbox.set(row.id, row); post(row); drawBar();
+  };
+  const openMenu = (kind) => {
+    if (menuKind === kind) { closeMenu(); return; }
+    const why = barBlock();
+    menuKind = kind;
+    let rows = "";
+    if (kind === "model") {
+      const cur = (m.model || "").toLowerCase(), cur1m = /1m/.test(cur);
+      rows = CHAT_MODELS.map((o) => `<div class="chat-menu-row${cur.includes(o.family) && cur1m === o.long ? " chat-menu-cur" : ""}" data-v="${esc(o.alias)}">${esc(o.label)}</div>`).join("")
+        + `<div class="chat-menu-note">Sends /model — claude also saves it as the default for new sessions.</div>`;
+    } else {
+      rows = CHAT_EFFORTS.map((e) => `<div class="chat-menu-row${m.effort === e ? " chat-menu-cur" : ""}" data-v="${e}">${chatCap(e)}</div>`).join("")
+        + `<div class="chat-menu-note">Sends /effort to this session.</div>`;
+    }
+    menu.innerHTML = (why ? `<div class="chat-menu-why">${esc(why)}</div>` : "") + rows;
+    menu.classList.toggle("chat-menu-off", !!why);
+    menu.style.left = `${(kind === "model" ? pickModel : pickEffort).offsetLeft}px`;
+    menu.hidden = false;
+    for (const r of menu.querySelectorAll(".chat-menu-row")) r.addEventListener("click", () => {
+      if (barBlock()) return;
+      choose(kind === "model" ? `/model ${r.dataset.v}` : `/effort ${r.dataset.v}`);
+    });
+  };
+  pickModel.addEventListener("click", () => openMenu("model"));
+  pickEffort.addEventListener("click", () => openMenu("effort"));
+  const onDocDown = (e) => { if (!menu.hidden && !barEl.contains(e.target)) closeMenu(); };
+  document.addEventListener("pointerdown", onDocDown, true);
+  menu.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(); });
+  stopBtn.addEventListener("click", async () => {
+    stopping = Date.now(); drawBar();
+    try { await fetch(api("/interrupt"), { method: "POST" }); } catch {}
+  });
+  const drawBar = () => {
+    if (!el.isConnected) return;
+    const s = sess(), why = barBlock();
+    const mPend = pending("/model "), ePend = pending("/effort ");
+    pickModel.textContent = `${mPend ? "switching…" : chatModelLabel(m.model) || "Model"} ▾`;
+    pickEffort.textContent = `${ePend ? "switching…" : m.effort ? chatCap(m.effort) : "Effort"} ▾`;
+    for (const b of [pickModel, pickEffort]) { b.classList.toggle("chat-pick-off", !!why); b.title = why || (b === pickModel ? "Switch model (/model)" : "Switch effort (/effort)"); }
+    if (menuKind && !menu.hidden) { const w = menu.querySelector(".chat-menu-why"); if (!!why !== !!w || (w && w.textContent !== why)) { const k = menuKind; menuKind = null; openMenu(k); } }
+    const pm = m.permissionMode;
+    permEl.textContent = pm ? CHAT_PERM_LABEL[pm] || pm : "";
+    permEl.title = pm ? `Permission mode: ${pm} (Shift+Tab in the terminal cycles it)` : "";
+    const c = s && s.context;
+    if (c && Number.isFinite(c.pct)) {
+      const pct = Math.max(0, Math.min(100, c.pct)), r = 7, len = 2 * Math.PI * r;
+      ring.hidden = false;
+      ring.className = `chat-ring${c.level === "hot" ? " chat-ring-hot" : c.level === "warn" ? " chat-ring-warn" : ""}`;
+      ring.innerHTML = `<svg width="18" height="18" viewBox="0 0 18 18"><circle cx="9" cy="9" r="${r}" class="chat-ring-bg"/><circle cx="9" cy="9" r="${r}" class="chat-ring-fg" stroke-dasharray="${(len * pct / 100).toFixed(2)} ${len.toFixed(2)}" transform="rotate(-90 9 9)"/></svg>`;
+      ring.title = typeof contextLine === "function" ? contextLine(s) : `context ${Math.round(pct)}% used`;
+    } else { ring.hidden = true; ring.innerHTML = ""; }
+    const working = s && s.state === "working" && !!m.conversationId;
+    if (!working) stopping = 0;
+    stopBtn.hidden = !working;
+    stopBtn.disabled = !!stopping && Date.now() - stopping < 3000;
+  };
+  drawBar();
   const flush = () => { clearTimeout(timer); timer = null; if (local && !local.synced) sync(); };
   const focus = () => { try { if (!matchMedia("(pointer: coarse)").matches) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } } catch {} };
   drawOutbox();
-  const c = { tick, flush, focus };
+  const dispose = () => document.removeEventListener("pointerdown", onDocDown, true);
+  const c = { tick, flush, focus, dispose };
   chatActiveComposer = c;
   return c;
 }

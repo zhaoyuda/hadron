@@ -25,6 +25,12 @@
  *   - the POST lost on the wire → "Not sure this was sent", never resent on
  *     its own, "Send again" delivers exactly once
  *   - an image pasted into the composer is uploaded and its path inserted
+ *   - the bar under the input: model "Opus 5.5" and effort "Medium" from the
+ *     transcript, permission mode, context ring; a pick while working is
+ *     refused in the menu, at the prompt it sends `/model sonnet` through the
+ *     outbox ("switching…" until claude records the command) and the bar shows
+ *     claude's own "Set model to …" label; ■ appears only while working and
+ *     sends one Escape to the pane (POST /interrupt, 409 when idle)
  *
  * Run: node test/e2e/m33-composer.js
  */
@@ -44,7 +50,7 @@ const SID = randomUUID();
 const now = () => new Date().toISOString();
 const rec = (o) => JSON.stringify({ uuid: randomUUID(), timestamp: now(), ...o }) + "\n";
 const user = (text) => rec({ type: "user", message: { role: "user", content: text } });
-const asst = (id, text) => rec({ type: "assistant", message: { id, role: "assistant", content: [{ type: "text", text }], model: "claude-x", usage: { input_tokens: 10, output_tokens: 5 }, stop_reason: "end_turn" } });
+const asst = (id, text) => rec({ type: "assistant", effort: "medium", message: { id, role: "assistant", content: [{ type: "text", text }], model: "claude-opus-5-5", usage: { input_tokens: 10, output_tokens: 5 }, stop_reason: "end_turn" } });
 let transcript, ws;
 const FIXDIR = mkdtempSync(join(tmpdir(), "hadron-m33-fix-"));
 const FIXTURE = join(FIXDIR, "claude"); // the fixture script (test/e2e/fixtures/claude-m33.sh) installed under the name claude
@@ -79,6 +85,7 @@ async function until(fn, timeout = 12000) {
   while (Date.now() - start < timeout) { if (await fn()) return true; await wait(200); }
   return fn();
 }
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 const api = (method, path, body) => fetch(`${env.baseUrl}${path}`, { method, headers: authHeaders(env.token), ...(body ? { body: JSON.stringify(body) } : {}) });
 const draft = async () => (await (await api("GET", "/api/sessions/alpha/draft")).json()).draft;
 const outbox = async () => (await (await api("GET", "/api/sessions/alpha/outbox")).json()).outbox;
@@ -549,6 +556,37 @@ try {
   });
   r.ok(await until(async () => /\.png/.test(await ta.inputValue()) && !(await ta.inputValue()).includes("uploading")), "an image dropped on the composer is attached");
   await ta.fill("");
+
+  // ── the bar under the input: model ▾ · effort ▾ · permission mode · context ring ──
+  const pickM = chat.locator(".chat-pick-model"), pickE = chat.locator(".chat-pick-effort");
+  r.ok(await until(async () => (await pickM.textContent()) === "Opus 5.5 ▾" && (await pickE.textContent()) === "Medium ▾"), `the bar reads the transcript's model + effort ("${await pickM.textContent()}" / "${await pickE.textContent()}")`);
+  await api("PATCH", "/api/sessions/alpha", { state: "working" });
+  r.ok(await until(async () => (await chat.locator(".chat-stop").isVisible()) && /switch once the turn is over/.test(await pickM.getAttribute("title"))), "while working: ■ shows and the pickers say why they wait");
+  await pickM.click();
+  const menu = chat.locator(".chat-menu");
+  r.ok(await until(async () => (await menu.isVisible()) && /switch once the turn is over/.test(await menu.textContent())), "…the menu opens with the reason, rows inert");
+  await menu.locator(".chat-menu-row", { hasText: /^Sonnet$/ }).click();
+  await sleep(400);
+  r.ok(!typed().join("\n").includes("/model") && (await chat.locator(".ob-row").count()) === 0, "…a click on a row while working sends nothing");
+  await page.keyboard.press("Escape").catch(() => {});
+  await page.mouse.click(5, 5);
+  r.ok(await until(async () => !(await menu.isVisible())), "a click outside closes the menu");
+  const linesBefore = typed().length;
+  await chat.locator(".chat-stop").click();
+  r.ok(await until(() => { tmux(["send-keys", "-t", tmuxName, "Enter"]); return typed().slice(linesBefore).some((l) => l.includes("\x1b")); }, 5000), "■ sends one Escape to the pane");
+  await api("PATCH", "/api/sessions/alpha", { state: "idle" });
+  r.ok(await until(async () => !(await chat.locator(".chat-stop").isVisible())), "idle: ■ goes");
+  const intr = await api("POST", "/api/sessions/alpha/interrupt", {});
+  r.ok(intr.status === 409, `POST /interrupt while idle → 409 (${intr.status})`);
+  await pickM.click();
+  r.ok(await until(async () => (await menu.isVisible()) && /saves it as the default for new sessions/.test(await menu.textContent()) && (await menu.locator(".chat-menu-cur").textContent()) === "Opus"), "at the prompt the menu marks the current model and says /model also sets the default");
+  await menu.locator(".chat-menu-row", { hasText: /^Sonnet$/ }).click();
+  r.ok(await until(() => typed().join("\n").includes("/model sonnet"), 15000), "picking Sonnet types /model sonnet into the pane");
+  r.ok(await until(async () => (await chat.locator(".ci-cmd", { hasText: "model" }).textContent()) === "/model"), "the command is drawn as claude records it, one slash (/model)");
+  r.ok(await until(async () => (await pickM.textContent()) === "Sonnet 5.5 ▾" && (await chat.locator(".ob-row").count()) === 0, 15000), `…claude's "Set model to Sonnet 5.5" lands, the bar shows it and the row goes ("${await pickM.textContent()}")`);
+  await pickE.click();
+  await menu.locator(".chat-menu-row", { hasText: /^High$/ }).click();
+  r.ok(await until(async () => (await pickE.textContent()) === "High ▾" && (await chat.locator(".ob-row").count()) === 0, 15000), `effort → /effort high, the bar shows High ("${await pickE.textContent()}")`);
 
   await page.screenshot({ path: join(screenshotDir(), "m33-composer.png") });
   r.ok(pageErrors.length === 0, `no page errors (${pageErrors.join("; ")})`);

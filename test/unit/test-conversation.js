@@ -110,6 +110,29 @@ console.log("[ingestRecord — pure]");
   ok(!JSON.stringify(conversationWire(conv)).includes(SID), "no session id anywhere on the wire");
 }
 
+console.log("\n[model + effort — the composer bar]");
+{
+  const conv = createConversation();
+  ok(conv.model === null && conv.effort === null, "a fresh conversation knows no model or effort");
+  ingestRecord(conv, asst([{ type: "text", text: "hi" }], 1, "mm1", { stop: "end_turn", effort: "high" }));
+  ok(conv.model === "claude-x" && conv.effort === "high", `the assistant record's message.model and top-level effort (${conv.model} / ${conv.effort})`);
+  ingestRecord(conv, { type: "assistant", uuid: uid(), timestamp: T(2), isApiErrorMessage: true, effort: "bogus", message: { id: "mm2", role: "assistant", model: "<synthetic>", content: [{ type: "text", text: "Prompt is too long" }] } });
+  ok(conv.model === "claude-x" && conv.effort === "high", "a <synthetic> / API-error record and an unknown effort move neither");
+  ingestRecord(conv, user("<local-command-stdout>Set model to \u001b[1mOpus 5.5 (1M context)\u001b[22m and saved as your default for new sessions</local-command-stdout>", 3));
+  ok(conv.model === "Opus 5.5 (1M context)", `"Set model to …" output (ANSI bold) → the label claude printed (${conv.model})`);
+  ingestRecord(conv, user("<local-command-stdout>Kept model as `Sonnet 5.5 (default)`</local-command-stdout>", 4));
+  ok(conv.model === "Sonnet 5.5", `"Kept model as …" with backticks and " (default)" → ${conv.model}`);
+  ingestRecord(conv, user("<local-command-stdout>Set effort level to xhigh: deeper reasoning</local-command-stdout>", 5));
+  ok(conv.effort === "xhigh", `"Set effort level to xhigh…" → ${conv.effort}`);
+  ingestRecord(conv, user("<local-command-stdout>Set effort level to turbo</local-command-stdout>", 6));
+  ok(conv.effort === "xhigh", "an effort level outside low…max/auto is ignored");
+  ingestRecord(conv, user("Set model to Evil", 7));
+  ok(conv.model === "Sonnet 5.5", "a prompt that merely says \"Set model to …\" is not claude's output");
+  ingestRecord(conv, asst([{ type: "text", text: "ok" }], 8, "mm3", { stop: "end_turn", effort: "medium" }));
+  const w = conversationWire(conv, {});
+  ok(w.model === "claude-x" && w.effort === "medium", `the next assistant record wins again, and the wire carries both (${w.model} / ${w.effort})`);
+}
+
 console.log("\n[clipping + odd shapes]");
 {
   const conv = createConversation();

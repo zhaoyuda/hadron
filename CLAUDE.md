@@ -510,6 +510,19 @@ npm test
 #                            paste it twice) and the operator's Enter in Primary submits it once; a record that cannot be
 #                            saved (agents dir 0o500) → 500 "not queued", nothing on the record, never delivered; dispatch
 #                            waits for the detector's first post-boot verdict (detector.verdictSeen);
+#                            `when:"idle"` (the composer bar's /model and /effort) is an `idleOnly` entry (persisted): queued while
+#                            the pane is anything but idle/done or a no-dialog block claude shows at its empty prompt (SWITCH_BLOCKS:
+#                            Model unavailable / Usage limit / Context full / Login needed — a switch is the way out; a ✻ "Retrying
+#                            in" banner on screen still holds it, the chat bar offers the pickers there too; during such a block a switch goes past
+#                            queued ordinary messages — they wait on the block it ends — on the route and in the dispatcher, switches
+#                            keep their own order, heldBehind in outbox.js), held under the pane lock when the fresh capture shows a turn
+#                            (a spinner line counts only if a second capture 1.1 s later differs — a leftover never moves) or a
+#                            dialog, when claude's ❯ input line is not in the bottom 16 drawn rows or the pane is on the alternate
+#                            screen (an editor — never typed into) or the box holds a draft (text in the box — the ❯ row down to the ──── border — that is not claude's dim SGR-2 suggestion,
+#                            read with capture-pane -e — the pick would join it), or a paste was handed < 3 s ago; "Send now" cannot force it
+#                            (202 still queued), and anything posted after a queued entry queues behind it, re-checked under the
+#                            lock so a message cannot overtake a pick being judged (order kept); POST /interrupt sends Escape
+#                            only after re-checking working + no shell + no dialog on a fresh capture under the lock (409 else);
 #                            no tmux buffers / temp files / token left behind)
 #   + test-dialog.js        (permission cards — server/dialog.js parseDialog over the pane: the dialog claude shows
 #                            (fixtures blocked-dialog-*-v2 from claude 2.1.304: Bash / Write / WebFetch permission, the
@@ -801,7 +814,16 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                            agent and back; the POST aborted on the wire → "Not sure this was sent" after GET /outbox
 #                            finds nothing, never resent on its own, "Send again" delivers exactly once; an image pasted
 #                            into .chat-input is uploaded and its bare path inserted (markdown.js IMAGE_PASTE_TARGETS);
-#                            a handed row not seen as a bubble for 20 s says "Handed to claude, not in the conversation yet" — no pointer to Primary by default)
+#                            a handed row not seen as a bubble for 20 s says "Handed to claude, not in the conversation yet" — no pointer to Primary by default;
+#                            the bar under the input (Claude-app style): model ▾ / effort ▾ from the transcript (conversation.js: the last
+#                            assistant record's message.model + top-level effort, or claude's own "Set model to …" / "Set effort level to …"
+#                            output — ANSI and backticks stripped; <synthetic> / API-error records never move it; wire `model`/`effort`),
+#                            the permission mode, a context ring (sessions' `context`, contextLine tooltip); a pick is `/model <alias>` /
+#                            `/effort <level>` through the outbox, offered only at claude's prompt (working/blocked → the menu says why, rows
+#                            inert), "switching…" until claude records the command (chatObserved matches command items), the menu says
+#                            /model also saves claude's default for new sessions; ■ only while working → POST /api/sessions/:id/interrupt
+#                            (one Escape under the pane lock; 409 unless the pane reads working or when a shell is in the foreground);
+#                            a recorded command is drawn with one slash)
 #   + test/e2e/m34-permission-cards.js (permission cards under the chat view — chat.js chatDialogCard reading
 #                            `dialog` off the 3-s sessions poll, against test/e2e/fixtures/claude-m34.sh exec'd into the
 #                            pane: a .chat-dialog card between the outbox and the composer with the kind badge + title,

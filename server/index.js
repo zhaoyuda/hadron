@@ -11,7 +11,7 @@ import { connect as netConnect } from "net";
 import { networkInterfaces, hostname, tmpdir, homedir } from "os";
 import { URL } from "url";
 import { randomBytes, createHash } from "crypto";
-import { StateDetector, isShellCmd, POLL_INTERVAL_MS, raiseAttention, ackByTurn, setProbeObserver } from "./state-detector.js";
+import { StateDetector, detectState, isShellCmd, POLL_INTERVAL_MS, raiseAttention, ackByTurn, setProbeObserver } from "./state-detector.js";
 import { probeClaudeCaps, RuntimeTracker, performResume, BOOT, isClaudeCmd, decideResume, verifyAdoption, UUID_RE, PINNED_CONFIDENCE, sessionFileExists, claudeProjectDir } from "./resume.js";
 import { randomUUID } from "crypto";
 import { loadAgents, loadAgent, saveAgent, saveAgentLocked, archiveAgent, deleteAgent, initWorkspace, getWorkspaceDir, appendAgentField, removeAgentArtifact, isSelfWrite } from "./agent-store.js";
@@ -30,7 +30,7 @@ import { startHeartbeat } from "./heartbeat.js";
 import { readQuota } from "./quota.js";
 import { validateCheckpoint, safeCheckpoint, verifyHookClaim, applyHookClaim } from "./checkpoint.js";
 import { createConversation, readConversation, conversationWire, conversationIdFor, validateDraftPatch, safeDraft, draftEmpty, PAGE_MAX, MAX_LINE } from "./conversation.js";
-import { validateEntry as validateOutboxEntry, safeOutbox, pruneOutbox, makeRoom as outboxMakeRoom, withPaneLock, outboxWire, dispatchable as outboxDispatchable, entryStale as outboxEntryStale, OUTBOX_MAX } from "./outbox.js";
+import { validateEntry as validateOutboxEntry, safeOutbox, pruneOutbox, makeRoom as outboxMakeRoom, withPaneLock, outboxWire, entryStale as outboxEntryStale, entryReady as outboxEntryReady, recentlyHanded as outboxRecentlyHanded, switchable as outboxSwitchable, switchBlock as outboxSwitchBlock, heldBehind as outboxHeldBehind, SWITCH_BLOCKS as OUTBOX_SWITCH_BLOCKS, OUTBOX_MAX } from "./outbox.js";
 import {
   listAnnotations, createAnnotation, updateAnnotation, deleteAnnotation,
   sendAnnotations, resolveAnnotation, reopenAnnotations, retryDispatch,
@@ -1860,6 +1860,44 @@ app.post("/api/sessions/:id/send-keys", async (req, res) => {
   }
 });
 
+// Stop the turn claude is running (the chat composer's ■): one Escape, which
+// claude takes as "interrupt". Only while the pane reads `working` — Escape at
+// a dialog would answer it (that is the card's Cancel) and at the prompt it
+// does nothing useful; anything else is a 409 carrying the state. A shell in
+// the foreground is refused like a message is. Acks attention like a keystroke.
+app.post("/api/sessions/:id/interrupt", async (req, res) => {
+  const { id } = req.params;
+  if (!isValidId(id)) return res.status(400).json({ error: "invalid id" });
+  const s = sessions.get(id);
+  if (!s) return res.status(404).json({ error: "session not found" });
+  if (s.state !== "working") return res.status(409).json({ error: `nothing to stop — the agent is ${s.state || "unknown"}`, state: s.state || null });
+  const tmuxName = tmuxSessionName(id);
+  const shell = paneShellCheck(tmuxName)();
+  if (shell) return res.status(409).json({ error: `the pane is a ${shell} prompt — nothing to stop`, shell });
+  try {
+    // Judged again under the lock — a delivery ahead of us may have changed the
+    // screen, and the detector reads a tick behind it: a dialog already up
+    // would take the Escape as its Cancel. An unreadable screen sends nothing.
+    const refused = await withPaneLock(id, async () => {
+      if (s.state !== "working") return { status: 409, body: { error: `nothing to stop — the agent is ${s.state || "unknown"}`, state: s.state || null } };
+      const sh = paneShellCheck(tmuxName)();
+      if (sh) return { status: 409, body: { error: `the pane is a ${sh} prompt — nothing to stop`, shell: sh } };
+      let lines;
+      try { lines = (await tmuxAsync(["capture-pane", "-t", tmuxName, "-p"], { timeout: 2000 })).split("\n"); }
+      catch (e) { return { status: 503, body: { error: `the pane could not be read (${e.message}) — nothing sent` } }; }
+      if (parseDialog(lines)) return { status: 409, body: { error: "claude is asking something — answer or cancel the dialog instead", state: "blocked" } };
+      await tmuxAsync(["send-keys", "-t", tmuxName, "Escape"]);
+      return null;
+    });
+    if (refused) return res.status(refused.status).json(refused.body);
+    monitors.get(id)?.wake();
+    ackByInput(id);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Answer the dialog claude is showing (chat view, G4 — the card's buttons).
 // {action: "option", n, text?} types the option's digit (then the text and
 // Enter when the option opens a text field); {action: "cancel"} sends Escape;
@@ -1983,8 +2021,8 @@ app.post("/api/sessions/:id/message", async (req, res) => {
   // is at its prompt when `when` is "auto" and the pane is working or blocked.
   if (requestId !== undefined) {
     if (enter !== true || force !== false) return res.status(400).json({ error: "a requestId delivery always presses Enter and never pastes into a shell" });
-    if (when !== "now" && when !== "auto") return res.status(400).json({ error: "when must be \"now\" or \"auto\"" });
-    const v = validateOutboxEntry({ text, requestId, deviceId });
+    if (when !== "now" && when !== "auto" && when !== "idle") return res.status(400).json({ error: "when must be \"now\", \"auto\" or \"idle\"" });
+    const v = validateOutboxEntry({ text, requestId, deviceId, idleOnly: when === "idle" });
     if (v.error) return res.status(400).json({ error: v.error });
     const s = sessions.get(id);
     // The live list is mutated in place (entries are shared with in-flight
@@ -1996,8 +2034,11 @@ app.post("/api/sessions/:id/message", async (req, res) => {
     const entry = v.entry;
     const curConv = currentConversationId(s);
     if (curConv) entry.conversationId = curConv;
+    // Anything still queued ahead of it (a held dialog, a model pick waiting
+    // for the prompt) goes first: the new entry queues behind it.
+    const ahead = outboxHeldBehind(s, entry, s.outbox, (e) => outboxEntryStale(e, curConv));
     s.outbox.push(entry);
-    if (when === "auto" && !outboxDispatchable(s, monitors.get(s.id)?.verdictSeen)) {
+    if (when !== "now" && (ahead || !outboxEntryReady(s, monitors.get(s.id)?.verdictSeen, entry) || (entry.idleOnly && outboxRecentlyHanded(s.outbox)))) {
       // Not persisted = not queued: a 500 must not be followed by a delivery.
       try { await saveAgentLocked(s); } catch (e) {
         s.outbox.splice(s.outbox.indexOf(entry), 1);
@@ -2006,7 +2047,7 @@ app.post("/api/sessions/:id/message", async (req, res) => {
       return res.status(202).json({ ok: true, queued: true, entry });
     }
     entry.state = "sending";
-    const done = await withPaneLock(id, () => deliverOutboxEntry(s, entry, { auto: when === "auto" }));
+    const done = await withPaneLock(id, () => deliverOutboxEntry(s, entry, { auto: when !== "now" }));
     if (done.state === "queued") {
           if (done.saveError) {
             const e = done.saveError; delete done.saveError;
@@ -2054,6 +2095,84 @@ function paneShellCheck(tmuxName) {
   };
 }
 
+// Does the screen show a turn running? A strong indicator (an executing tool,
+// a retry) says so at once; a `stale` one — a spinner line that may be a
+// leftover above the prompt — only if the screen moves: a live spinner and its
+// timer redraw within a second, a leftover never does. An unreadable second
+// look counts as a turn (hold, ask again).
+async function turnOnScreen(tmuxName, lines) {
+  const snap = detectState(lines);
+  // claude's refusal at its empty prompt (Model unavailable, …) is no turn —
+  // unless a retry banner says claude is still trying on its own.
+  if (snap.state === "blocked") return !OUTBOX_SWITCH_BLOCKS.has(snap.blockReason) || lines.some((l) => /Retrying in\b/.test(l));
+  if (snap.state !== "working") return false;
+  if (!snap.stale) return true;
+  await new Promise((r) => setTimeout(r, 1100));
+  try { return (await tmuxAsync(["capture-pane", "-t", tmuxName, "-p"], { timeout: 2000 })) !== lines.join("\n"); }
+  catch { return true; }
+}
+
+// Is claude at its own input prompt, with the input box empty? An idleOnly
+// entry (/model, /effort) goes only there: not into a full-screen editor or
+// pager (alternate screen — the detector calls claude's prompt editor idle),
+// not into anything that is not claude's ❯ input line near the bottom of what
+// is drawn, and not onto a draft the operator left in the box (the paste would
+// join it and Enter submit both). claude's own suggestion in an empty box is
+// drawn dim (SGR 2, claude 2.1.x) — that is no draft. Read with -e for the
+// attributes. An unreadable probe is "no" — held, asked again next second.
+const PROMPT_TAIL_ROWS = 16;
+const SGR_RE = /\x1b\[([0-9;]*)m/y;
+export function promptInputEmpty(styledLine) {
+  const at = styledLine.indexOf("❯");
+  if (at < 0) return false;
+  let dim = false;
+  for (let i = at + 1; i < styledLine.length;) {
+    SGR_RE.lastIndex = i;
+    const m = SGR_RE.exec(styledLine);
+    if (m) {
+      const ps = m[1] === "" ? ["0"] : m[1].split(";");
+      for (let k = 0; k < ps.length; k++) {
+        const p = ps[k];
+        // 38/48/58 take a colour as their own parameters (5;n or 2;r;g;b) — a
+        // "2" there is a colour mode, never dim.
+        if (p === "38" || p === "48" || p === "58") { k += ps[k + 1] === "5" ? 2 : ps[k + 1] === "2" ? 4 : 1; continue; }
+        if (p === "0" || p === "22") dim = false;
+        else if (p === "2") dim = true;
+      }
+      i = SGR_RE.lastIndex;
+      continue;
+    }
+    if (styledLine[i] === "\x1b") return false; // another escape: not a shape we know
+    if (!/\s/.test(styledLine[i]) && !dim) return false;
+    i++;
+  }
+  return true;
+}
+async function atClaudePrompt(tmuxName) {
+  let styled;
+  try {
+    const alt = (await tmuxAsync(["display-message", "-t", tmuxName, "-p", "#{alternate_on}"], { timeout: 2000 })).trim();
+    if (alt !== "0") return false;
+    styled = (await tmuxAsync(["capture-pane", "-e", "-t", tmuxName, "-p"], { timeout: 2000 })).split("\n");
+  } catch { return false; }
+  const plain = (l) => l.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+  let end = styled.length;
+  while (end > 0 && !plain(styled[end - 1]).trim()) end--;
+  for (let i = end - 1; i >= Math.max(0, end - PROMPT_TAIL_ROWS); i--) {
+    const t = plain(styled[i]).trim();
+    if (!/^❯/.test(t) || /^❯\s+\d+\./.test(t)) continue;
+    // The input box is the ❯ row and its continuation rows, down to claude's
+    // ──── border (a draft may start with a newline: "❯" alone, text below).
+    if (!promptInputEmpty(styled[i])) return false;
+    for (let j = i + 1; j < end; j++) {
+      if (/^─{3,}/.test(plain(styled[j]).trim())) break;
+      if (!promptInputEmpty("❯" + styled[j])) return false;
+    }
+    return true;
+  }
+  return false;
+}
+
 // One outbox entry into the pane. Runs under the agent's pane lock; the entry
 // is already marked `sending` by the caller (synchronously, so a dispatcher
 // tick cannot pick it a second time while the lock is held by someone else).
@@ -2072,7 +2191,17 @@ async function deliverOutboxEntry(s, entry, { auto = false } = {}) {
     const shellCheck = paneShellCheck(tmuxName);
     const shell = shellCheck();
     if (shell) throw Object.assign(new Error(`agent is not running — its pane is at a ${shell} prompt`), { shell });
-    if (auto) {
+    // An idleOnly entry (a slash command from the composer bar) is re-judged
+    // under the lock — on every path, "Send now" included: only at claude's
+    // prompt, never mid-turn and never right after a paste that may have
+    // started a turn the detector has not read yet.
+    const idleHold = entry.idleOnly && (!outboxSwitchable(s) || outboxRecentlyHanded(s.outbox));
+    // Order: an entry queued ahead of this one (a picker held a moment ago
+    // while this delivery waited for the lock) goes first — never overtaken.
+    const idx = s.outbox.indexOf(entry);
+    const cur = currentConversationId(s);
+    const behind = auto && idx > 0 && outboxHeldBehind(s, entry, s.outbox.slice(0, idx), (e) => outboxEntryStale(e, cur));
+    if (auto || entry.idleOnly) {
       // The detector's verdict is a tick behind and a quiet pane is captured only
       // every 5th tick: read the screen now. A dialog holds the entry — and so
       // does a tmux that does not answer: an unknown screen is never pasted into
@@ -2087,7 +2216,7 @@ async function deliverOutboxEntry(s, entry, { auto = false } = {}) {
         warnOnce(`outbox-capture:${s.id}`, `[outbox] ${s.id}: the pane could not be captured (${e.message}) — queued messages are held until it can; \`hadron doctor\` has the note`);
       }
       if (lines) { delete s.outboxCaptureFails; delete s.outboxCaptureRetryAt; }
-      if (!lines || parseDialog(lines)) {
+      if (!lines || idleHold || behind || parseDialog(lines) || (entry.idleOnly && (!(await atClaudePrompt(tmuxName)) || await turnOnScreen(tmuxName, lines)))) {
         entry.state = "queued";
         // Not persisted = not queued (same rule as the non-dispatchable branch):
         // the caller decides what a failed save means on its path.
@@ -2124,8 +2253,12 @@ function startOutboxDispatcher() {
       }
       if (s.outbox.some((e) => e.state === "sending")) continue;
       const cur = currentConversationId(s);
-      const next = s.outbox.find((e) => e.state === "queued" && !outboxEntryStale(e, cur));
-      if (!next || !outboxDispatchable(s, monitors.get(s.id)?.verdictSeen)) continue;
+      const queued = s.outbox.filter((e) => e.state === "queued" && !outboxEntryStale(e, cur));
+      let next = queued[0];
+      // A switch may go past ordinary messages held by a block it can end.
+      if (next && !next.idleOnly && outboxSwitchBlock(s)) next = queued.find((e) => e.idleOnly) || next;
+      if (!next || !outboxEntryReady(s, monitors.get(s.id)?.verdictSeen, next)) continue;
+      if (next.idleOnly && outboxRecentlyHanded(s.outbox)) continue;
       if (s.outboxCaptureRetryAt && Date.now() < s.outboxCaptureRetryAt) continue; // capture failing: backed off
       next.state = "sending";
       withPaneLock(s.id, () => deliverOutboxEntry(s, next, { auto: true }))
@@ -2157,6 +2290,7 @@ app.post("/api/sessions/:id/outbox/:entryId/send", async (req, res) => {
   if (outboxEntryStale(entry, currentConversationId(s))) return res.status(409).json({ error: "this message was written for an earlier conversation — take it back into the composer first", entry: { ...entry, stale: true } });
   entry.state = "sending";
   const done = await withPaneLock(id, () => deliverOutboxEntry(s, entry));
+  if (done.state === "queued") { delete done.saveError; return res.status(202).json({ ok: true, queued: true, entry: done, error: "a model/effort switch goes only at claude's prompt — it is still queued" }); }
   if (done.state !== "handed") return res.status(409).json({ error: done.error, entry: done });
   res.json({ ok: true, entry: done });
 });

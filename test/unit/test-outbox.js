@@ -51,6 +51,10 @@ writeFileSync(join(HOME, ".profile"), `export PATH="${FIX}:$PATH"\n`);
 writeFileSync(join(HOME, ".bashrc"), `export PATH="${FIX}:$PATH"\n`);
 const FIXTURE = join(FIX, "claude");
 const DLG = join(T, "dialog.txt");
+// claude refusing a turn at its empty prompt / a block claude is still retrying (state-detector fixtures).
+for (const [to, from] of [["model.txt", "blocked-model-issue.txt"], ["ratelim.txt", "blocked-retry-banner-dot-in-message.txt"]]) {
+  writeFileSync(join(T, to), readFileSync(new URL(`./fixtures/state-detector/${from}`, import.meta.url), "utf-8").split("\n").filter((l) => l.trim()).slice(-14).join("\n") + "\n");
+}
 // claude's Bash permission dialog (the blocked-dialog-bash-v2 shape) — what the
 // fixture paints on a DIALOG line, pinned at the bottom like claude does.
 writeFileSync(DLG, `──────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -76,8 +80,21 @@ if [ -z "$HADRON_FIX_REEXEC" ]; then HADRON_FIX_REEXEC=1 exec -a claude bash "$0
 LOG="$1"; DLG="$2"
 printf '\\n❯ \\n'
 while IFS= read -r line; do
+  if [ -n "$SPIN" ] && { [ "$line" = DIALOG ] || [ "$line" = IDLE ] || [ "$line" = WORK ] || [ "$line" = STALE ]; }; then kill "$SPIN" 2>/dev/null; wait "$SPIN" 2>/dev/null; SPIN=; fi
   if [ "$line" = DIALOG ]; then printf '\\e[2J\\e[H'; yes '' | head -n 40; cat "$DLG"; continue; fi
   if [ "$line" = IDLE ]; then printf '\\e[2J\\e[H\\n❯ \\n'; continue; fi
+  if [ "$line" = WORK ]; then ( i=1; while :; do printf '\\e[2J\\e[H\\n✻ Thinking… (%ss · 12 tokens)\\n\\n❯ \\n' "$i"; i=$((i+1)); sleep 0.3; done ) & SPIN=$!; continue; fi
+  if [ "$line" = EDITOR ]; then printf '\\e[?1049h\\e[2J\\e[Hsome notes in an editor\\n'; continue; fi
+  if [ "$line" = NOEDITOR ]; then printf '\\e[?1049l\\e[2J\\e[H\\n❯ \\n'; continue; fi
+  if [ "$line" = DRAFT ]; then printf '\\e[2J\\e[H\\n❯ half-typed thought\\n'; continue; fi
+  if [ "$line" = DRAFT2 ]; then printf '\\e[2J\\e[H\\n────────\\n❯ \\n  second line of a draft\\n────────\\n  footer text\\n'; continue; fi
+  if [ "$line" = DRAFT3 ]; then printf '\\e[2J\\e[H\\n❯ \\e[38;2;170;180;190mcoloured draft\\e[0m\\n'; continue; fi
+  if [ "$line" = BOXED ]; then printf '\\e[2J\\e[H\\n────────\\n❯\\302\\240\\n────────\\n  footer text\\n'; continue; fi
+  if [ "$line" = HINT ]; then printf '\\e[2J\\e[H\\n❯\\302\\240\\e[2mtry this\\e[0m\\n'; continue; fi
+  if [ "$line" = MODELERR ]; then printf '\\e[2J\\e[H'; yes '' | head -n 40; cat "$(dirname "$DLG")/model.txt"; continue; fi
+  if [ "$line" = RATELIM ]; then printf '\\e[2J\\e[H'; yes '' | head -n 40; cat "$(dirname "$DLG")/ratelim.txt"; continue; fi
+  if [ "$line" = NOPROMPT ]; then printf '\\e[2J\\e[Hplain output, no prompt\\n'; continue; fi
+  if [ "$line" = STALE ]; then printf '\\e[2J\\e[H\\n✻ Thinking… (3s · 12 tokens)\\n\\n❯ \\n'; continue; fi
   printf '%s\\n' "$line" >> "$LOG"; printf '\\n❯ \\n'
 done
 `);
@@ -218,6 +235,172 @@ async function main() {
   await until(async () => (await listed(id))?.state === "idle", 8000);
   await sleep(2500);
   ok(!typed().includes("HOLD-SAVE-FAIL"), "…and it is never delivered");
+
+  console.log("\n2e. when:idle (the composer bar's /model): never pasted mid-turn, whatever the cached state says");
+  tmuxS(["send-keys", "-t", paneOf(id), "WORK", "Enter"]); // a turn on screen: the detector reads working on its own after the override
+  await sleep(300);
+  await setState(id, "working");
+  const idi = rid();
+  a = await msg(id, { text: "/model sonnet", requestId: idi, when: "idle" });
+  ok(a.status === 202 && a.json.entry?.state === "queued" && a.json.entry.idleOnly === true, `202 queued while working, idleOnly on the entry (${a.status})`);
+  ok(onDisk(id).outbox?.find((e) => e.id === idi)?.idleOnly === true, "…idleOnly persisted on the record");
+  const idAfter = rid();
+  b = await msg(id, { text: "after-the-switch", requestId: idAfter, when: "auto" });
+  ok(b.status === 202 && b.json.entry?.state === "queued", `an ordinary message behind it queues too — order kept (${b.status})`);
+  const sni = await api("POST", `/api/sessions/${id}/outbox/${idi}/send`);
+  ok(sni.status === 202 && sni.json.entry?.state === "queued", `"Send now" cannot force it mid-turn (${sni.status} ${sni.json?.entry?.state})`);
+  await sleep(1500);
+  ok(!typed().includes("/model sonnet") && !typed().includes("after-the-switch"), "nothing pasted while working");
+  // The screen says working, the (manual) verdict says idle: only the under-lock read holds it.
+  await setState(id, "idle");
+  await sleep(1500);
+  ok(!typed().includes("/model sonnet") && ["queued", "sending"].includes((await outbox(id)).find((e) => e.id === idi)?.state), "the screen shows a turn running → held under the lock though the verdict says idle");
+  tmuxS(["send-keys", "-t", paneOf(id), "IDLE", "Enter"]);
+  ok(await until(() => typed().includes("/model sonnet"), 10000), "delivered once claude is at its prompt");
+  ok(await until(() => typed().includes("after-the-switch"), 8000), "…and the message behind it follows");
+  const tl = typed();
+  ok(tl.indexOf("/model sonnet") < tl.indexOf("after-the-switch"), "…in that order");
+  // A paste handed a moment ago may have started a turn the detector has not read.
+  await until(async () => (await listed(id))?.state === "idle", 8000);
+  const idps = rid(), idm = rid();
+  a = await msg(id, { text: "prompt-just-sent", requestId: idps, when: "auto" });
+  b = await msg(id, { text: "/effort high", requestId: idm, when: "idle" });
+  ok(a.status === 200 && b.status === 202, `right after a handed paste → held (${a.status}/${b.status})`);
+  ok(await until(() => typed().includes("/effort high"), 10000), "…and delivered once the settle window passed");
+  // A leftover spinner line above the prompt (claude leaves one after a turn):
+  // the screen never moves, so it is not a turn — the pick goes.
+  tmuxS(["send-keys", "-t", paneOf(id), "STALE", "Enter"]);
+  await sleep(3500);
+  await setState(id, "idle");
+  const idst = rid();
+  a = await msg(id, { text: "/model haiku", requestId: idst, when: "idle" });
+  ok(a.status === 200 && a.json.entry?.state === "handed", `a static leftover spinner is not a turn → handed (${a.status} ${a.json?.entry?.state})`);
+  // A pick that is being judged (the 1.1-s second look) while a message is posted
+  // behind it: the pick goes back to queued, the message must not overtake it.
+  tmuxS(["send-keys", "-t", paneOf(id), "WORK", "Enter"]);
+  await sleep(3500); // past the settle window of the pick handed above: the pick reaches the lock
+  await setState(id, "idle"); // verdict says idle, the screen animates a turn
+  const idr1 = rid(), idr2 = rid();
+  const p1 = msg(id, { text: "/model opus", requestId: idr1, when: "idle" });
+  await sleep(150);
+  const p2 = msg(id, { text: "after-opus", requestId: idr2, when: "auto" });
+  const [r1, r2] = await Promise.all([p1, p2]);
+  ok(r1.status === 202 && r2.status === 202, `both held while the turn runs (${r1.status}/${r2.status} ${r2.json?.entry?.state})`);
+  await sleep(1000);
+  ok(!typed().includes("after-opus") && !typed().includes("/model opus"), "…nothing typed mid-turn, the message did not overtake the pick");
+  tmuxS(["send-keys", "-t", paneOf(id), "IDLE", "Enter"]);
+  ok(await until(() => typed().includes("after-opus"), 12000), "…both delivered once at the prompt");
+  const tl2 = typed();
+  ok(tl2.indexOf("/model opus") !== -1 && tl2.indexOf("/model opus") < tl2.indexOf("after-opus"), "…the pick first");
+  // Only at claude's own ❯ prompt: a screen without one (verdict idle — an
+  // inconclusive screen keeps it) holds the pick, and so does a full-screen editor.
+  tmuxS(["send-keys", "-t", paneOf(id), "NOPROMPT", "Enter"]);
+  await sleep(3500);
+  await setState(id, "idle");
+  const idnp = rid();
+  a = await msg(id, { text: "/model noprompt", requestId: idnp, when: "idle" });
+  ok(a.status === 202 && a.json.entry?.state === "queued", `no ❯ prompt on screen → held under the lock (${a.status} ${a.json?.entry?.state})`);
+  await sleep(1500);
+  ok(!typed().includes("/model noprompt"), "…nothing typed");
+  tmuxS(["send-keys", "-t", paneOf(id), "IDLE", "Enter"]);
+  ok(await until(() => typed().includes("/model noprompt"), 10000), "…delivered once the prompt is back");
+  tmuxS(["send-keys", "-t", paneOf(id), "EDITOR", "Enter"]);
+  await sleep(3500);
+  await setState(id, "idle");
+  const ided = rid();
+  a = await msg(id, { text: "/model ineditor", requestId: ided, when: "idle" });
+  ok(a.status === 202 && a.json.entry?.state === "queued", `a full-screen editor in the pane → held (${a.status} ${a.json?.entry?.state})`);
+  await sleep(1500);
+  ok(!typed().includes("/model ineditor"), "…nothing typed into the editor");
+  tmuxS(["send-keys", "-t", paneOf(id), "NOEDITOR", "Enter"]);
+  await setState(id, "idle");
+  ok(await until(() => typed().includes("/model ineditor"), 10000), "…delivered once the editor is closed");
+  // A draft the operator left in claude's input box: the pick would join it and
+  // Enter submit both — held until the box is empty. claude's own dim suggestion
+  // in an empty box is no draft.
+  tmuxS(["send-keys", "-t", paneOf(id), "DRAFT", "Enter"]);
+  await sleep(3500);
+  await setState(id, "idle");
+  const iddr = rid();
+  a = await msg(id, { text: "/model ondraft", requestId: iddr, when: "idle" });
+  ok(a.status === 202 && a.json.entry?.state === "queued", `text in claude's input box → held (${a.status} ${a.json?.entry?.state})`);
+  await sleep(1500);
+  ok(!typed().includes("/model ondraft"), "…nothing typed onto the draft");
+  tmuxS(["send-keys", "-t", paneOf(id), "DRAFT2", "Enter"]);
+  await sleep(1500);
+  ok(!typed().includes("/model ondraft"), "…a draft on the box's second row holds it too");
+  tmuxS(["send-keys", "-t", paneOf(id), "DRAFT3", "Enter"]);
+  await sleep(1500);
+  ok(!typed().includes("/model ondraft"), "…and a truecolour draft (38;2;… is a colour, not dim)");
+  tmuxS(["send-keys", "-t", paneOf(id), "HINT", "Enter"]);
+  ok(await until(() => typed().includes("/model ondraft"), 10000), "…delivered once the box is empty (a dim suggestion is no draft)");
+  // claude's real layout: ──── / empty ❯ / ──── / footer — the footer is outside the box.
+  tmuxS(["send-keys", "-t", paneOf(id), "BOXED", "Enter"]);
+  await sleep(3500);
+  await setState(id, "idle");
+  a = await msg(id, { text: "/model boxed", requestId: rid(), when: "idle" });
+  ok(a.status === 200 && a.json.entry?.state === "handed", `an empty box between ──── borders with a footer below → handed (${a.status} ${a.json?.entry?.state})`);
+  // "Model unavailable" at claude's empty prompt: a switch is the way out — it goes.
+  // A usage limit claude is still retrying on its own is a turn — held.
+  tmuxS(["send-keys", "-t", paneOf(id), "RATELIM", "Enter"]);
+  ok(await until(async () => (await listed(id))?.blockReason === "Usage limit", 8000), "a retrying usage-limit screen reads blocked · Usage limit");
+  await sleep(3500);
+  const idrl = rid();
+  a = await msg(id, { text: "/model whileretry", requestId: idrl, when: "idle" });
+  await sleep(1500);
+  ok(a.status === 202 && !typed().includes("/model whileretry"), `…a switch is held while claude retries (${a.status})`);
+  ok((await api("DELETE", `/api/sessions/${id}/outbox/${idrl}`)).status === 200, "…and can be cancelled");
+  tmuxS(["send-keys", "-t", paneOf(id), "IDLE", "Enter"]);
+  await until(async () => (await listed(id))?.state !== "blocked", 8000);
+  tmuxS(["send-keys", "-t", paneOf(id), "MODELERR", "Enter"]);
+  ok(await until(async () => (await listed(id))?.blockReason === "Model unavailable", 8000), "the model-issue screen reads blocked · Model unavailable");
+  a = await msg(id, { text: "/model recover", requestId: rid(), when: "idle" });
+  ok(a.status === 200 && a.json.entry?.state === "handed" && typed().includes("/model recover"), `…a model switch goes through that block (${a.status} ${a.json?.entry?.state})`);
+  b = await msg(id, { text: "ordinary-while-blocked", requestId: rid(), when: "auto" });
+  ok(b.status === 202 || (await listed(id))?.state !== "blocked", `…an ordinary message still waits out a block (${b.status})`);
+  tmuxS(["send-keys", "-t", paneOf(id), "IDLE", "Enter"]);
+  ok(await until(() => typed().includes("ordinary-while-blocked"), 10000), "…delivered once the block is gone");
+  await until(async () => ["idle", "done"].includes((await listed(id))?.state), 8000);
+  // The other order: a message queued during the block, THEN a switch — the switch
+  // goes past it (the message waits on the block the switch ends), the message after.
+  tmuxS(["send-keys", "-t", paneOf(id), "MODELERR", "Enter"]);
+  ok(await until(async () => (await listed(id))?.blockReason === "Model unavailable", 8000), "model-issue screen again");
+  b = await msg(id, { text: "ordinary-first", requestId: rid(), when: "auto" });
+  ok(b.status === 202, `…an ordinary message queues behind the block (${b.status})`);
+  await sleep(3500); // past the settle window of the last handed entry
+  a = await msg(id, { text: "/model overtake", requestId: rid(), when: "idle" });
+  ok(a.status === 200 && a.json.entry?.state === "handed" && typed().includes("/model overtake") && !typed().includes("ordinary-first"),
+    `…a switch after it goes past it (${a.status} ${a.json?.entry?.state})`);
+  a = await msg(id, { text: "/model second", requestId: rid(), when: "idle" });
+  ok(a.status === 202, `…a second switch inside the settle window queues (${a.status})`);
+  ok(await until(() => typed().includes("/model second"), 10000) && !typed().includes("ordinary-first"), "…and the dispatcher takes it past the message too, the block still up");
+  tmuxS(["send-keys", "-t", paneOf(id), "IDLE", "Enter"]);
+  ok(await until(() => typed().includes("ordinary-first"), 10000) && typed().includes("/model overtake") && typed().indexOf("/model overtake") < typed().indexOf("ordinary-first"),
+    "…and the message is delivered after the switch, once the block is gone");
+  await until(async () => ["idle", "done"].includes((await listed(id))?.state), 8000);
+  const v1 = await msg(id, { text: "x", requestId: rid(), when: "later" });
+  ok(v1.status === 400 && /idle/.test(v1.json.error), `when:"later" → 400 naming the choices (${v1.status})`);
+
+  console.log("\n2f. /interrupt — Escape only into a running turn, judged under the lock");
+  await until(async () => ["idle", "done"].includes((await listed(id))?.state), 8000);
+  let it = await api("POST", `/api/sessions/${id}/interrupt`);
+  ok(it.status === 409 && ["idle", "done"].includes(it.json.state), `at the prompt → 409 nothing to stop (${it.status} ${it.json?.state})`);
+  tmuxS(["send-keys", "-t", paneOf(id), "DIALOG", "Enter"]);
+  await sleep(300);
+  await setState(id, "working"); // the verdict lags the dialog
+  it = await api("POST", `/api/sessions/${id}/interrupt`);
+  ok(it.status === 409 && /dialog/.test(it.json.error), `a dialog on screen while the verdict says working → 409, no Escape (${it.status} ${it.json?.error})`);
+  tmuxS(["send-keys", "-t", paneOf(id), "WORK", "Enter"]);
+  await sleep(300);
+  await setState(id, "working");
+  const before = typed().length;
+  it = await api("POST", `/api/sessions/${id}/interrupt`);
+  ok(it.status === 200 && it.json.ok === true, `working → 200 (${it.status})`);
+  tmuxS(["send-keys", "-t", paneOf(id), "Enter"]);
+  ok(await until(() => typed().slice(before).some((l) => l.includes("\x1b")), 3000), "…the pane got the Escape");
+  tmuxS(["send-keys", "-t", paneOf(id), "IDLE", "Enter"]);
+  await until(async () => (await listed(id))?.state === "idle", 8000);
+  ok(!typed().slice(before).some((l) => /DIALOG/.test(l)), "no stray keys");
 
   console.log("\n3. `when: now` does not wait for the dialog");
   await setState(id, "blocked");

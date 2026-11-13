@@ -140,11 +140,23 @@ export function conversationIdFor(sessionId) {
   return "c-" + createHash("sha256").update(sessionId).digest("hex").slice(0, 16);
 }
 
+// What /model and /effort print: the new setting shows before the next reply.
+const EFFORT_RE = /^(low|medium|high|xhigh|max|auto)$/;
+const SET_MODEL_RE = /^(?:Set model to|Kept model as)\s+(.+?)(?:\s+and saved as your default for new sessions)?\s*$/;
+const SET_EFFORT_RE = /^(?:Set effort level to|Kept effort level as)\s+([A-Za-z]+)/;
+function noteSetting(conv, raw) {
+  const text = String(raw).replace(/\u001b\[[0-9;]*m/g, "").replace(/`/g, "").trim();
+  const mm = SET_MODEL_RE.exec(text);
+  if (mm) { const label = mm[1].replace(/\s*\(default\)\s*$/, "").trim(); if (label && label.length <= 60) conv.model = label; return; }
+  const em = SET_EFFORT_RE.exec(text);
+  if (em && EFFORT_RE.test(em[1].toLowerCase())) conv.effort = em[1].toLowerCase();
+}
+
 export function createConversation({ maxItems = MAX_ITEMS } = {}) {
   return {
     items: [], ord: 0, rev: 0, maxItems,
     byMsgId: new Map(), toolUse: new Map(), seen: new Map(), noticeSeen: [], queuedPrompt: [],
-    title: null, mode: null, permissionMode: null, lastAt: null,
+    title: null, mode: null, permissionMode: null, model: null, effort: null, lastAt: null,
     evicted: 0, skipped: 0, orphanResults: 0, truncated: false,
     offset: 0, ino: undefined, wideAt: undefined, complete: false,
     generation: 0,
@@ -230,7 +242,7 @@ function ingestUser(conv, rec) {
   const misread = waitTake(conv.noticeSeen, text.trim());
   if (misread?.item) { misread.item.dup = true; touch(conv, misread.item); }
   const out = STDOUT_RE.exec(text);
-  if (out) { push(conv, { id, kind: "output", at, ...clipText(out[1], TEXT_MAX) }); return; }
+  if (out) { noteSetting(conv, out[1]); push(conv, { id, kind: "output", at, ...clipText(out[1], TEXT_MAX) }); return; }
   if (!text.trim() && !images) return;
   // A prompt typed mid-turn was drawn as claude's queue line first; once it is a
   // bubble, the queue line is its second copy.
@@ -247,6 +259,10 @@ function ingestAssistant(conv, rec) {
   if (!m || typeof m !== "object") return;
   const at = safeAt(rec.timestamp);
   if (at) conv.lastAt = at;
+  // The model and effort the session runs at: what the last real reply was made
+  // with (claude's local refusals carry "<synthetic>" and say nothing about it).
+  if (typeof m.model === "string" && m.model !== "<synthetic>" && !rec.isApiErrorMessage) conv.model = m.model.slice(0, 100);
+  if (typeof rec.effort === "string" && EFFORT_RE.test(rec.effort)) conv.effort = rec.effort;
   const msgId = str(m.id) || str(rec.uuid) || `a${conv.ord + 1}`;
   let item = conv.byMsgId.get(msgId);
   const fresh = !item;
@@ -445,7 +461,7 @@ export function conversationWire(conv, { conversationId = null, after, before, l
   }
   const first = all.length ? all[0].ord : null;
   return {
-    conversationId, title: conv.title, mode: conv.mode, permissionMode: conv.permissionMode,
+    conversationId, title: conv.title, mode: conv.mode, permissionMode: conv.permissionMode, model: conv.model, effort: conv.effort,
     rev: conv.rev, nextAfter, generation: conv.generation, count: all.length, firstOrd: first, lastAt: conv.lastAt,
     complete: conv.complete, truncated: conv.truncated, evicted: conv.evicted,
     // A floor, not the whole truth, when these are non-zero: records over

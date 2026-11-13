@@ -2935,7 +2935,6 @@ mark.ann-mark.ann-mark-flash { background: rgba(210, 153, 34, .8); outline: 1px 
 .chat { display: flex; flex-direction: column; height: 100%; min-height: 0; position: relative; background: var(--bg); font-size: 14px; }
 .chat-hdr { display: flex; align-items: baseline; gap: 10px; padding: 6px 12px; border-bottom: 1px solid var(--border); color: var(--text2); flex-shrink: 0; font-size: 12px; }
 .chat-title { font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 50%; }
-.chat-mode { font-family: 'JetBrains Mono', Menlo, monospace; color: var(--yellow); }
 .chat-note { margin-left: auto; color: var(--text3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .chat-banner { flex-shrink: 0; padding: 5px 12px; font-size: 12px; color: var(--yellow); background: rgba(210, 153, 34, 0.10); border-bottom: 1px solid var(--border); }
@@ -3054,7 +3053,34 @@ mark.ann-mark.ann-mark-flash { background: rgba(210, 153, 34, .8); outline: 1px 
 .chat-attach { width: 30px; height: 34px; margin-bottom: 2px; border: none; background: none; color: var(--text3); font-size: 16px; cursor: pointer; border-radius: 6px; }
 .chat-attach:hover { background: rgba(255,255,255,0.06); }
 .chat-composer.chat-drop { outline: 2px dashed var(--blue); outline-offset: -2px; }
+.chat-btns { display: flex; gap: 6px; align-items: end; }
+.chat-stop { width: 34px; height: 34px; margin-bottom: 2px; border-radius: 50%; border: 1px solid var(--border); background: var(--bg2); color: var(--text); font-size: 12px; cursor: pointer; }
+.chat-stop:hover { background: rgba(255,255,255,0.08); }
+.chat-stop:disabled { opacity: 0.5; cursor: default; }
+.chat-stop[hidden] { display: none; }
+/* the bar under the input: model ▾ · effort ▾ · permission mode · draft status · context ring */
+.chat-bar { grid-column: 1 / -1; position: relative; display: flex; align-items: center; gap: 4px; min-height: 22px; font-size: 12px; color: var(--text3); }
+.chat-pick { border: none; background: none; color: var(--text2); font: inherit; font-size: 12px; padding: 2px 6px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+.chat-pick:hover { background: rgba(255,255,255,0.06); color: var(--text); }
+.chat-pick-off { color: var(--text3); }
+.chat-perm { padding: 2px 6px; white-space: nowrap; }
+.chat-bar-gap { flex: 1; }
 .chat-draft-st { grid-column: 1 / -1; min-height: 14px; font-size: 11px; color: var(--text3); padding: 0 4px; }
+.chat-ring { display: inline-flex; cursor: default; }
+.chat-ring[hidden] { display: none; }
+.chat-ring-bg { fill: none; stroke: var(--border); stroke-width: 2.5; }
+.chat-ring-fg { fill: none; stroke: var(--text2); stroke-width: 2.5; stroke-linecap: round; }
+.chat-ring-warn .chat-ring-fg { stroke: var(--yellow); }
+.chat-ring-hot .chat-ring-fg { stroke: #f85149; }
+.chat-menu { position: absolute; bottom: 30px; z-index: 20; min-width: 200px; padding: 4px; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.4); font-size: 13px; }
+.chat-menu[hidden] { display: none; }
+.chat-menu-row { padding: 5px 10px; border-radius: 5px; cursor: pointer; color: var(--text); }
+.chat-menu-row:hover { background: rgba(56,139,253,0.15); }
+.chat-menu-cur::after { content: " ✓"; color: var(--blue); }
+.chat-menu-off .chat-menu-row { color: var(--text3); cursor: default; }
+.chat-menu-off .chat-menu-row:hover { background: none; }
+.chat-menu-why { padding: 4px 10px 6px; color: var(--yellow); font-size: 11px; }
+.chat-menu-note { padding: 6px 10px 2px; color: var(--text3); font-size: 11px; border-top: 1px solid var(--border); margin-top: 4px; }
 .chat-draft-off { color: var(--yellow); }
 /* the dialog card (G4): claude's permission / plan / question dialog, parsed from the pane */
 .chat-dialog { flex-shrink: 0; display: flex; flex-direction: column; margin: 0 auto; width: 100%; max-width: 860px; box-sizing: border-box; padding: 0 20px; max-height: 45%; overflow: hidden; }
