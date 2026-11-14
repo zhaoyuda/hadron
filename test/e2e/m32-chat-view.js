@@ -7,7 +7,10 @@
  *     the reply's markdown rendered (heading, list), a code block with a sticky
  *     header naming the language + Copy, a collapsed Thinking line, tool cards
  *     collapsed to one line (name + path relative to the agent's cwd, ✓ / ✗ from
- *     the result), the Edit card expanding to a −/+ diff and its error result,
+ *     the result) behind a run summary row ("Read a file, edited a file · +1 −1
+ *     · 1 failed") until it is opened, the Edit card expanding to a −/+ diff and
+ *     its error result; the density switch (Verbose opens every card, Standard
+ *     folds them again),
  *     the turn's duration under the reply
  *   - a record appended to the transcript lands within the poll WITHOUT
  *     rebuilding the elements already on screen (a marker set on the old
@@ -123,6 +126,13 @@ try {
   r.ok(await until(async () => (await m1.locator(".ci-code .ci-code-copy").textContent()) === "Copied"), `…Copy works without navigator.clipboard (plain http) — ${await m1.locator(".ci-code .ci-code-copy").textContent()}`);
   await page.evaluate(() => { if (window.__cb) Object.defineProperty(Navigator.prototype, "clipboard", window.__cb); });
   r.ok((await m1.locator(".ci-think").count()) === 1 && !(await m1.locator(".ci-think").evaluate((d) => d.open)), "Thinking is one collapsed line");
+  // Read (m1) then Edit (m2) with nothing said between: one tool run, drawn
+  // as a summary row until opened (CHAT_RULES.toolRun, Standard density).
+  const grp = chat.locator(".ci-group");
+  r.ok((await grp.count()) === 1 && /Read a file, edited a file/.test(await grp.textContent()) && /\+1 −1/.test(await grp.textContent()) && /1 failed/.test(await grp.textContent()) && (await grp.locator(".ci-tool-st").textContent()) === "✗", `the Read + Edit run is one summary row with counts, +/− and the failure (${(await grp.textContent()).trim()})`);
+  r.ok(!(await m1.locator(".ci-tool").isVisible()) && !(await chat.locator(".ci-assistant").nth(1).locator(".ci-tool").isVisible()), "…its cards are hidden behind it");
+  await grp.click();
+  r.ok(await until(async () => await m1.locator(".ci-tool").isVisible()), "…a click on the row shows each card");
   const readCard = m1.locator(".ci-tool");
   r.ok((await readCard.locator(".ci-tool-name").textContent()) === "Read" && (await readCard.locator(".ci-tool-sum").textContent()) === "src/app.js" && (await readCard.locator(".ci-tool-st").textContent()) === "✓", `Read card: one line, path relative to the cwd, ✓ from the result (${await readCard.locator(".ci-tool-hd").textContent()})`);
   r.ok(!(await readCard.evaluate((el) => el.classList.contains("open"))) && !(await readCard.locator(".ci-tool-body").isVisible()), "…collapsed");
@@ -154,11 +164,11 @@ try {
   await chat.locator(".chat-jump").click();
   r.ok(await until(async () => (await scroll.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 48)) && !(await chat.locator(".chat-jump").isVisible())), "…click jumps to the bottom and hides the pill");
 
-  // ── Expand tools ──
-  await chat.locator(".chat-tools").click();
-  r.ok(await until(async () => (await chat.locator(".ci-tool.open").count()) === 2), "Expand tools opens every tool card");
-  await chat.locator(".chat-tools").click();
-  r.ok(await until(async () => (await chat.locator(".ci-tool.open").count()) === 0), "…Collapse tools closes them all, the one opened by hand included");
+  // ── density switch ──
+  await chat.locator('.chat-dens[data-d="verbose"]').click();
+  r.ok(await until(async () => (await chat.locator(".ci-tool.open").count()) === 2 && (await chat.locator(".ci-group").count()) === 0), "Verbose opens every tool card, no summary row");
+  await chat.locator('.chat-dens[data-d="standard"]').click();
+  r.ok(await until(async () => (await chat.locator(".ci-tool.open").count()) === 0 && (await chat.locator(".ci-group").count()) === 1 && !(await chat.locator(".ci-group").evaluate((el) => el.classList.contains("open")))), "…Standard closes them all and folds the run again, the hand-opened ones included");
 
   // ── generation: a shorter file replaces the transcript ──
   writeFileSync(transcript, user("从头来") + asst("m9", { type: "text", text: "新的开始。" }, { stop_reason: "end_turn" }));
@@ -351,8 +361,10 @@ try {
   appendFileSync(transcript, asst("mw", { type: "tool_use", id: "t-w2", name: "Bash", input: { command: "pwd" } }));
   const stW2 = page.locator('#chat-container .ci-assistant[data-id="a:mw"] [data-tool="t-w2"] .ci-tool-st');
   r.ok(await until(async () => (await stW2.count()) === 1 && (await stW2.evaluate((el) => getComputedStyle(el, "::before").content)) === '"…"'), "a second call without a result: …");
+  const grpW = page.locator('#chat-container .ci-assistant[data-id="a:mw"] .ci-group');
+  r.ok(await until(async () => (await grpW.count()) === 1 && /Ran 2 commands/.test(await grpW.textContent()) && (await grpW.locator(".ci-group-now").isVisible()) && /Bash pwd/.test(await grpW.locator(".ci-group-now").textContent()) && (await grpW.locator(".ci-tool-st").evaluate((el) => getComputedStyle(el, "::before").content)) === '"…"'), "…the two calls are one row \"Ran 2 commands\" with \"…\" and \"· Bash pwd\" while the pane works");
   await api("PATCH", "/api/sessions/alpha", { state: "done" });
-  r.ok(await until(async () => (await stW2.evaluate((el) => getComputedStyle(el, "::before").content)) === '"–"' && !(await live.isVisible())), `…done → the glyph is "–" without the message being re-rendered, no live line (${await stW2.evaluate((el) => getComputedStyle(el, "::before").content)})`);
+  r.ok(await until(async () => (await stW2.evaluate((el) => getComputedStyle(el, "::before").content)) === '"–"' && !(await live.isVisible()) && !(await grpW.locator(".ci-group-now").isVisible())), `…done → the glyph is "–" without the message being re-rendered, no live line (${await stW2.evaluate((el) => getComputedStyle(el, "::before").content)})`);
   r.ok(await until(async () => { const x = await sessOf(); return x.ackRev === x.attentionRev && x.attentionRev > s0.attentionRev; }, 6000), "…and done with the latest on screen IS acked from the chat tab");
 
   // ── offline: a banner, no live claim ──

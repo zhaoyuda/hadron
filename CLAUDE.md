@@ -734,7 +734,8 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                            test-conversation.js): "💬 Chat" in the file panel opens a Chat tab beside Primary: the prompt as a
 #                            bubble (Chinese verbatim), the reply's markdown rendered, a code block with a sticky header (language +
 #                            Copy), Thinking one collapsed line, tool cards one line (name + path relative to the cwd, ✓/✗ from the
-#                            result; Edit expands to a −/+ diff of old/new with the error text; "Expand tools" opens all), the
+#                            result; Edit expands to a −/+ diff of old/new with the error text; a Read + Edit run sits behind one summary row
+#                            "Read a file, edited a file · +1 −1 · 1 failed" until clicked — M35; the density switch: Verbose opens all), the
 #                            turn's duration; an appended exchange lands within the 1-s poll by PATCHING the DOM (elements already
 #                            on screen keep their identity — a marker survives — so a selection and the reader's place do) and the
 #                            view follows the tail only while the reader is at the bottom; scrolled up, a "↓ N new" pill counts
@@ -786,7 +787,7 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                            script/iframe/object/style/form dropped, on* handlers and javascript:/data: URLs stripped, data:image/
 #                            on <img> kept) for the chat AND the .md artifact preview — a reply quoting <img onerror> / <script> /
 #                            [x](javascript:) renders inert; an open Thinking survives its message's rev moving (m.open keyed
-#                            `<id>:think:<i>`); an unchanged tick never scrolls; Collapse tools closes the hand-opened card too; chatExpandAll persists
+#                            `<id>:think:<i>`); an unchanged tick never scrolls; Standard after Verbose closes the hand-opened card too; the density persists
 #                            in the ui state; chatModels is an LRU of 6 pictures; a path is offered as a link only under the
 #                            agent's cwd or the workspace)
 #   + test/e2e/m33-composer.js (the composer under the chat view — chat.js chatComposer over /draft + /message +
@@ -844,6 +845,19 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                            server's picture, nothing typed twice; the folder-trust list is a Choose card whose row
 #                            click sends Down, Enter, and a ↓ typed in the terminal moves the card's mark — the next
 #                            row click moves from THERE (Up, Enter); chatAttentionVisible stays false while blocked)
+#   + test/e2e/m35-chat-density.js (chat collapse rules — chat.js CHAT_RULES, one table of kind × density (Compact / Standard /
+#                            Verbose, the header's switch, `chatDensity` in the ui state; a state with the older chatExpandAll: true reads
+#                            Verbose): Standard draws a run of tool calls with nothing said between them (across assistant messages, thinking
+#                            inside the run counts; broken by a text block, any other visible item or an API error) as ONE row "Ran a command,
+#                            read a file, edited a file · +1 −1 · 1 failed" (chatGroup: counts per kind, Edit/Write/MultiEdit line totals,
+#                            ✗ + red count when a call failed — failed cards are not opened for you, claude retries constantly; "· now: Bash
+#                            pwd" while the pane works) with the cards hidden until a click; the open run stays open as it grows (keyed by
+#                            its tool ids); Thinking a collapsed line; a `hadron message` (bin/hadron.js attribution "[hadron message from
+#                            NAME (id)]") is "✉ from NAME" — whole under 3 lines, else one line "✉ from NAME · first line · N lines" — the
+#                            id never drawn; a prompt over 12 lines / 1500 chars clamped with "Show all · N lines, X chars" / "Show less";
+#                            command output of ≤ 2 lines and ≤ 300 chars inline, longer a collapsed line. Compact hides Thinking; Verbose
+#                            opens every card, Thinking, agent message, prompt and output with no run rows; a hand choice (m.open / m.shut)
+#                            holds through every poll and a density switch resets them all)
 ```
 
 `npm run test:e2e` runs `test/e2e/run-all.js`, which executes every `m*.js`

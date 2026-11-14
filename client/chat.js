@@ -41,7 +41,41 @@ const CHAT_PAGES_PER_TICK = 5;
 const CHAT_MODELS_MAX = 6; // pictures kept for agents not on screen (LRU)
 const chatModels = new Map(); // sessionId → model, insertion order = recency
 const chatPolls = new WeakMap(); // container → interval id
-let chatExpandAll = false; // header toggle: every tool card open
+// ── What is shown, collapsed or hidden: ONE table ────────────────────────
+// Each row is a kind of thing in the conversation, each column a density
+// (the header switch, persisted as chatDensity). Values:
+//   open    drawn whole (a card / details starts open; a hand-close sticks)
+//   line    one line, opened by a click (a hand-open sticks — m.open)
+//   clamp   the first CHAT_CLAMP_LINES lines + "Show all"
+//   hidden  not drawn
+//   group   consecutive tool calls (≥ 2, nothing said between them) share one
+//           summary row — "Ran 3 commands, read 2 files · +12 −3" — opened by a click
+//   cards   every tool call its own card
+// A hand choice (open/close one item) is never overridden by a re-render; a
+// density switch is a global choice and resets them.
+const CHAT_DENSITIES = ["compact", "standard", "verbose"];
+const CHAT_DENSITY_LABEL = { compact: "Compact", standard: "Standard", verbose: "Verbose" };
+const CHAT_DENSITY_TITLE = {
+  compact: "Replies, and one summary line per run of tool calls — no thinking",
+  standard: "Replies, tool runs as summary lines, thinking as one collapsed line",
+  verbose: "Everything open: every tool card, thinking, agent messages, long prompts",
+};
+const CHAT_RULES = {
+  thinking:     { compact: "hidden", standard: "line",  verbose: "open" },
+  toolRun:      { compact: "group",  standard: "group", verbose: "cards" },
+  toolCard:     { compact: "line",   standard: "line",  verbose: "open" },
+  agentMessage: { compact: "line",   standard: "line",  verbose: "open" }, // `hadron message` from another agent
+  longPrompt:   { compact: "clamp",  standard: "clamp", verbose: "open" }, // the operator's own long prompt / paste
+  output:       { compact: "line",   standard: "line",  verbose: "open" }, // slash-command output over CHAT_INLINE_OUTPUT
+};
+const CHAT_CLAMP_LINES = 12, CHAT_CLAMP_CHARS = 1500;
+const CHAT_AGENT_MSG_SHORT = 3;      // an agent message this short is drawn whole
+const CHAT_INLINE_OUTPUT = { lines: 2, chars: 300 }; // command output this small is one inline line
+let chatDensity = "standard";
+function chatRule(kind) { return CHAT_RULES[kind][chatDensity]; }
+// Open state of one collapsible: a hand choice wins, else the rule.
+function chatIsOpen(m, key, rule) { return rule === "open" ? !m.shut.has(key) : m.open.has(key); }
+function chatHandSet(m, key, open) { if (open) { m.open.add(key); m.shut.delete(key); } else { m.open.delete(key); m.shut.add(key); } }
 
 function chatModel(sessionId) {
   let m = chatModels.get(sessionId);
@@ -53,7 +87,7 @@ function chatModel(sessionId) {
 function chatFreshModel(sessionId) {
   return { sessionId, conversationId: null, generation: null, rev: null, items: new Map(), title: null, mode: null, permissionMode: null, model: null, effort: null,
     hidden: new Set(), // ids of queue lines a record named in `hides`: never drawn, whatever copy arrives later
-    firstOrd: null, evicted: 0, skipped: 0, orphanResults: 0, readable: true, complete: true, offline: false, reason: null, open: new Set(), paused: false, unseen: 0,
+    firstOrd: null, evicted: 0, skipped: 0, orphanResults: 0, readable: true, complete: true, offline: false, reason: null, open: new Set(), shut: new Set(), paused: false, unseen: 0,
     anchor: null, // {id, offset}: the item at the top of the view and its offset from it, while paused
     rebuild: null, // during a same-conversation cache rebuild: { anchor, lastOrd } to restore once the tail is back
   };
@@ -81,7 +115,7 @@ function renderChatView(el, s) {
   const sessionId = s.id;
   const m = chatModel(sessionId);
   el.innerHTML = `<div class="chat">
-    <div class="chat-hdr"><span class="chat-title"></span><span class="chat-note"></span><span class="chat-tools" title="Open every tool card">${chatExpandAll ? "Collapse tools" : "Expand tools"}</span></div>
+    <div class="chat-hdr"><span class="chat-title"></span><span class="chat-note"></span><span class="chat-density" role="group" aria-label="How much of the work to show">${CHAT_DENSITIES.map((d) => `<span class="chat-dens${d === chatDensity ? " on" : ""}" data-d="${d}" role="button" tabindex="0" title="${esc(CHAT_DENSITY_TITLE[d])}">${CHAT_DENSITY_LABEL[d]}</span>`).join("")}</span></div>
     <div class="chat-banner" hidden></div>
     <div class="chat-scroll"><div class="chat-earlier" hidden></div><div class="chat-list"></div><div class="chat-live" hidden></div></div>
     <div class="chat-jump" hidden>↓</div>
@@ -183,10 +217,23 @@ function renderChatView(el, s) {
   const stick = new ResizeObserver(() => { if (!m.paused && !m.rebuild && !byHand() && scroll.clientHeight && !atBottom()) toBottom(); });
   stick.observe(list); stick.observe(scroll); if (live) stick.observe(live);
   jump.addEventListener("click", follow);
-  el.querySelector(".chat-tools").addEventListener("click", (e) => {
-    chatExpandAll = !chatExpandAll; if (typeof saveUIState === "function") saveUIState();
-    e.target.textContent = chatExpandAll ? "Collapse tools" : "Expand tools";
-    list.querySelectorAll(".ci-tool").forEach((t) => chatSetOpen(m, t, chatExpandAll));
+  const pickDensity = (d) => {
+    if (!CHAT_DENSITIES.includes(d) || d === chatDensity) return;
+    chatDensity = d; if (typeof saveUIState === "function") saveUIState();
+    el.querySelectorAll(".chat-dens").forEach((b) => b.classList.toggle("on", b.dataset.d === d));
+    // A density is a fresh start: what was opened or shut by hand, in any
+    // agent's chat, gives way to the new level's rule.
+    for (const x of chatModels.values()) { x.open.clear(); x.shut.clear(); }
+    m.handAt = Date.now(); // a re-render is not the tail moving
+    if (m.paused) takeAnchor();
+    chatRedrawAll(m, list);
+    // Every height changed at once: a following reader stays on the tail, a
+    // scrolled-up one on the item they were reading.
+    if (!m.paused) toBottom(); else restoreAnchor();
+  };
+  el.querySelectorAll(".chat-dens").forEach((b) => {
+    b.addEventListener("click", () => pickDensity(b.dataset.d));
+    b.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pickDensity(b.dataset.d); } });
   });
   const earlier = el.querySelector(".chat-earlier"), banner = el.querySelector(".chat-banner"), root = el.querySelector(".chat");
   earlier.addEventListener("click", async () => {
@@ -282,7 +329,7 @@ function renderChatView(el, s) {
       // blank by then): the pending rebuild carries over, never a new one.
       const rebuild = same ? { anchor: m.paused ? m.anchor : null, unseen: m.unseen, lastOrd: chatLastItem(m)?.ord ?? null } : (m.conversationId === null ? m.rebuild : null);
       const fresh = chatFreshModel(sessionId);
-      Object.assign(m, fresh, { open: m.open, rebuild, outbox: m.outbox, outboxGone: m.outboxGone });
+      Object.assign(m, fresh, { open: m.open, shut: m.shut, rebuild, outbox: m.outbox, outboxGone: m.outboxGone });
       list.innerHTML = "";
       if (fromCursor) return false;
     }
@@ -348,7 +395,7 @@ function renderChatView(el, s) {
         // transcript yet) drops the old picture first, as applyPage would.
         if (data.reason) {
           if (data.conversationId !== m.conversationId) {
-            Object.assign(m, chatFreshModel(sessionId), { open: m.open, outbox: m.outbox, outboxGone: m.outboxGone, conversationId: data.conversationId });
+            Object.assign(m, chatFreshModel(sessionId), { open: m.open, shut: m.shut, outbox: m.outbox, outboxGone: m.outboxGone, conversationId: data.conversationId });
             list.innerHTML = "";
           }
           m.reason = data.reason; if (m.items.size) m.readable = false; break;
@@ -436,7 +483,7 @@ function chatApplyItems(m, list, items) {
     for (const c of list.children) { if (c.dataset.ord !== undefined && Number(c.dataset.ord) > it.ord) { before = c; break; } }
     list.insertBefore(node, before);
   }
-  if (changed) chatFold(m, list); // an unchanged tick leaves the fold rows alone (a click mid-press lands)
+  if (changed) { chatFold(m, list); chatGroup(m, list); } // an unchanged tick leaves the fold rows alone (a click mid-press lands)
   return { added, grew, first };
 }
 // A turn shorter than this draws no duration line (noise on every reply).
@@ -535,6 +582,143 @@ function chatFold(m, list) {
     node.classList.toggle("ci-folded", folded.has(id));
   }
 }
+// Group pass (CHAT_RULES.toolRun = "group"): a run of tool calls with nothing
+// said between them — across assistant messages, thinking blocks inside the run
+// count as part of it — becomes one summary row before its first card, the
+// cards behind it (.ci-ingroup) until the row is opened. A run is broken by
+// a text block, a visible item of any other kind, or an API-error message.
+// Keyed by the run's tool ids (m.open "grp:<id>"): a run that grows, or gets
+// earlier members from "Load earlier", stays open if the reader opened it.
+const CHAT_TOOL_KIND = {
+  Bash: "cmd", BashOutput: "cmd", KillShell: "cmd", Read: "read", NotebookRead: "read",
+  Grep: "search", Glob: "search", LS: "search", WebSearch: "web", WebFetch: "web",
+  Edit: "edit", MultiEdit: "edit", Write: "edit", NotebookEdit: "edit", Agent: "agent", Task: "agent",
+};
+const CHAT_KIND_WORDS = {
+  cmd: (n) => `ran ${n === 1 ? "a command" : `${n} commands`}`,
+  read: (n) => `read ${n === 1 ? "a file" : `${n} files`}`,
+  search: (n) => `searched ${n === 1 ? "once" : `${n} times`}`,
+  web: (n) => `fetched ${n === 1 ? "a page" : `${n} pages`}`,
+  edit: (n) => `edited ${n === 1 ? "a file" : `${n} files`}`,
+  agent: (n) => `ran ${n === 1 ? "a subagent" : `${n} subagents`}`,
+  other: (n) => `used ${n === 1 ? "a tool" : `${n} tools`}`,
+};
+function chatLineCount(t) { return typeof t === "string" && t ? t.split("\n").length : 0; }
+function chatGroupSummary(tools, sess) {
+  const counts = new Map(), edited = new Set();
+  let add = 0, del = 0, failed = 0;
+  for (const b of tools) {
+    const k = CHAT_TOOL_KIND[b.name] || "other", i = b.input || {};
+    if (k === "edit") {
+      edited.add(i.file_path || i.notebook_path || b.id);
+      if (b.name === "Edit") { add += chatLineCount(i.new_string); del += chatLineCount(i.old_string); }
+      else if (b.name === "Write") add += chatLineCount(i.content);
+      else if (b.name === "MultiEdit" && Array.isArray(i.edits)) for (const e of i.edits) { add += chatLineCount(e && e.new_string); del += chatLineCount(e && e.old_string); }
+    } else counts.set(k, (counts.get(k) || 0) + 1);
+    if (b.result && b.result.isError) failed++;
+  }
+  if (edited.size) counts.set("edit", edited.size);
+  const order = ["cmd", "read", "search", "web", "edit", "agent", "other"];
+  const words = order.filter((k) => counts.has(k)).map((k) => CHAT_KIND_WORDS[k](counts.get(k))).join(", ");
+  // Calls finish out of order (parallel tool use): the run is pending while
+  // ANY member has no result; "now" names the latest such call.
+  const waiting = tools.filter((b) => !b.result), last = waiting[waiting.length - 1];
+  return {
+    text: words.charAt(0).toUpperCase() + words.slice(1),
+    diff: add || del ? `+${add} −${del}` : "",
+    failed,
+    pending: !!last,
+    now: last ? `${last.name} ${chatToolSummary(last, sess)}`.trim() : "",
+  };
+}
+function chatGroup(m, list) {
+  const sess = (typeof sessions !== "undefined" ? sessions : []).find((x) => x.id === m.sessionId);
+  const on = chatRule("toolRun") === "group";
+  // Every row by each tool id it covers: a run that merged with its neighbour
+  // (a queue line between them went hidden) keeps one row, the other goes.
+  const rowsAll = [...list.querySelectorAll(".ci-group")], rows = new Map();
+  for (const r of rowsAll) for (const id of (r.dataset.ids || "").split(" ")) if (id && !rows.has(id)) rows.set(id, r);
+  const used = new Set(), inGroup = new Set(), tails = new Set();
+  const runs = [];
+  if (on) {
+    const nodes = new Map();
+    for (const c of list.children) if (c.dataset.id !== undefined) nodes.set(c.dataset.id, c);
+    const sorted = [...m.items.values()].filter((it) => nodes.has(it.id)).sort((a, b) => a.ord - b.ord);
+    let run = null;
+    const end = () => { if (run && run.tools.length >= 2) runs.push(run); run = null; };
+    for (const it of sorted) {
+      if (chatHidden(it) || nodes.get(it.id).hidden) continue;
+      if (it.kind !== "assistant" || it.error) { end(); continue; }
+      const div = nodes.get(it.id);
+      it.blocks.forEach((b, i) => {
+        const node = div.querySelector(`:scope > [data-blk="${i}"]`);
+        if (b.type === "text") { if ((b.text || "").trim()) end(); return; }
+        if (b.type === "thinking") { if (run && node) run.members.push(node); return; }
+        if (b.type !== "tool_use" || !node) return;
+        if (!run) run = { tools: [], members: [], items: new Set() };
+        run.tools.push(b); run.members.push(node); run.items.add(div);
+      });
+    }
+    end();
+  }
+  for (const run of runs) {
+    const ids = run.tools.map((b) => b.id), key = ids[0];
+    // Open when the reader opened the run. A run that forms around a card the
+    // reader opened (a lone call, then the next call arrived) starts open, and
+    // that is recorded as the run's own state: closing the card later does not
+    // fold the run, and a run the reader closed stays closed (m.shut "grp:").
+    let open = ids.some((id) => m.open.has(`grp:${id}`));
+    if (!open && ids.some((id) => m.open.has(id)) && !ids.some((id) => m.shut.has(`grp:${id}`))) { m.open.add(`grp:${key}`); open = true; }
+    let row = ids.map((id) => rows.get(id)).find((r) => r && !used.has(r));
+    if (row) used.add(row);
+    if (!row) {
+      row = document.createElement("div");
+      row.className = "ci-group"; row.setAttribute("role", "button"); row.tabIndex = 0;
+      const toggle = () => {
+        m.handAt = Date.now();
+        const ks = (row.dataset.ids || "").split(" ").filter(Boolean);
+        // The run's state only: the cards behind it keep theirs (open again, a
+        // card opened before is still open, model and DOM alike).
+        if (row.classList.contains("open")) { for (const id of ks) m.open.delete(`grp:${id}`); m.shut.add(`grp:${ks[0]}`); }
+        else { for (const id of ks) m.shut.delete(`grp:${id}`); m.open.add(`grp:${ks[0]}`); }
+        row.dataset.sig = ""; // repaint the caret/title
+        chatGroup(m, list);
+      };
+      row.addEventListener("click", toggle);
+      row.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
+    }
+    const sum = chatGroupSummary(run.tools, sess);
+    row.dataset.grp = key; row.dataset.ids = ids.join(" ");
+    row.classList.toggle("open", open);
+    row.classList.toggle("err", sum.failed > 0);
+    // Rewritten only when what it says changed (a long history's rows are left alone).
+    const sig = JSON.stringify([sum, open, ids.length]);
+    if (row.dataset.sig !== sig) { row.dataset.sig = sig; row.innerHTML = `<span class="ci-tool-st ci-tool-st-${sum.pending ? "pending" : sum.failed ? "err" : "ok"}">${sum.pending ? "" : sum.failed ? "✗" : "✓"}</span><span class="ci-group-txt">${esc(sum.text)}</span>${sum.diff ? `<span class="ci-group-diff">${esc(sum.diff)}</span>` : ""}${sum.failed ? `<span class="ci-group-fail">· ${sum.failed} failed</span>` : ""}${sum.now ? `<span class="ci-group-now">· ${esc(sum.now)}</span>` : ""}<span class="ci-tool-caret">▸</span>`;
+    row.title = `${ids.length} tool calls — click to ${open ? "collapse" : "show each"}`; }
+    const first = run.members[0];
+    if (row.nextElementSibling !== first) first.parentNode.insertBefore(row, first);
+    if (!open) for (const n of run.members) inGroup.add(n);
+    // A message whose every drawn block sits in a collapsed run shows nothing of
+    // its own (its timestamp folds with it), except the one carrying the row.
+    if (!open) for (const div of run.items) if (div !== first.parentNode && ![...div.querySelectorAll(":scope > [data-blk]")].some((n) => !inGroup.has(n))) tails.add(div);
+  }
+  for (const r of rowsAll) if (!used.has(r)) r.remove();
+  // Classes moved only where they change.
+  for (const n of list.querySelectorAll(".ci-ingroup")) if (!inGroup.has(n)) n.classList.remove("ci-ingroup");
+  for (const n of inGroup) n.classList.add("ci-ingroup");
+  for (const n of list.querySelectorAll(".ci-grouptail")) if (!tails.has(n)) n.classList.remove("ci-grouptail");
+  for (const n of tails) n.classList.add("ci-grouptail");
+}
+// Every item drawn again under the current rules (the density switch).
+function chatRedrawAll(m, list) {
+  for (const c of [...list.children]) {
+    if (c.dataset.id === undefined) continue;
+    const it = m.items.get(c.dataset.id);
+    if (it) c.replaceWith(chatItemEl(m, it));
+  }
+  chatFold(m, list);
+  chatGroup(m, list);
+}
 function chatVisibleBlocks(it) { return it.kind === "assistant" ? it.blocks.filter((b) => b.type === "text" || b.type === "tool_use").length : 0; }
 // Re-render an item whose rev moved. Assistant messages keep every block whose
 // signature is unchanged (its node, selection, open state); other kinds are
@@ -547,8 +731,7 @@ function chatPatchItem(m, old, it) {
 
 function chatSetOpen(m, toolEl, open) {
   toolEl.classList.toggle("open", open);
-  const id = toolEl.dataset.tool;
-  if (open) m.open.add(id); else m.open.delete(id);
+  chatHandSet(m, toolEl.dataset.tool, open);
 }
 
 function chatItemEl(m, it) {
@@ -559,7 +742,7 @@ function chatItemEl(m, it) {
   const sess = (typeof sessions !== "undefined" ? sessions : []).find((x) => x.id === m.sessionId);
   switch (it.kind) {
     case "user":
-      div.innerHTML = `<div class="ci-bubble">${esc(it.text || "")}${it.truncated ? `<span class="ci-trunc">… (clipped)</span>` : ""}${it.images ? `<span class="ci-chip">🖼 ${it.images} image${it.images === 1 ? "" : "s"}</span>` : ""}</div>${when}`;
+      chatRenderUser(m, div, it, when);
       break;
     case "assistant":
       chatRenderAssistant(m, div, it);
@@ -567,9 +750,14 @@ function chatItemEl(m, it) {
     case "command":
       div.innerHTML = `<div class="ci-line"><span class="ci-cmd">/${esc(String(it.name || "").replace(/^\//, ""))}</span> ${esc(it.args || "")}</div>${when}`;
       break;
-    case "output":
-      div.innerHTML = `<details class="ci-out"><summary>command output <span class="ci-dim">${esc(chatCount(it.text))}</span></summary><pre>${esc(it.text || "")}</pre></details>`;
+    case "output": {
+      const t = it.text || "";
+      if (t.split("\n").length <= CHAT_INLINE_OUTPUT.lines && t.length <= CHAT_INLINE_OUTPUT.chars) { div.innerHTML = `<div class="ci-line ci-out-inline">${esc(t)}</div>`; break; }
+      const key = `${it.id}:out`;
+      div.innerHTML = `<details class="ci-out" data-key="${esc(key)}"${chatIsOpen(m, key, chatRule("output")) ? " open" : ""}><summary>command output <span class="ci-dim">${esc(chatCount(t))}</span></summary><pre>${esc(t)}</pre></details>`;
+      div.firstElementChild.addEventListener("toggle", (e) => chatHandSet(m, key, e.target.open));
       break;
+    }
     case "summary":
       div.innerHTML = `<details class="ci-boundary"><summary>— context compacted — summary <span class="ci-dim">${esc(chatCount(it.text))}</span></summary><div class="ci-md md-preview">${chatMarkdown(it.text || "")}</div></details>`;
       break;
@@ -608,6 +796,52 @@ function chatItemEl(m, it) {
   return div;
 }
 
+// A `hadron message` from another agent carries the CLI's attribution line
+// "[hadron message from NAME (id)]" first; the id is never drawn.
+const CHAT_AGENT_MSG_RE = /^\[hadron message from (.+?) \([^()\n]*\)\]\n?/;
+function chatAgentMessage(text) {
+  const mm = CHAT_AGENT_MSG_RE.exec(text || "");
+  return mm ? { from: mm[1], body: text.slice(mm[0].length) } : null;
+}
+function chatLines(n) { return `${n} line${n === 1 ? "" : "s"}`; }
+// The operator's prompt (a bubble, clamped when long — CHAT_RULES.longPrompt)
+// or another agent's message (a line `✉ from X · first line · N lines` —
+// CHAT_RULES.agentMessage). Open states are hand choices keyed by the item id.
+function chatRenderUser(m, div, it, when) {
+  const tail = `${it.truncated ? `<span class="ci-trunc">… (clipped)</span>` : ""}${it.images ? `<span class="ci-chip">🖼 ${it.images} image${it.images === 1 ? "" : "s"}</span>` : ""}`;
+  const agent = chatAgentMessage(it.text);
+  if (agent) {
+    const body = agent.body.replace(/\s+$/, ""), lines = body.split("\n"), key = `${it.id}:msg`;
+    div.classList.add("ci-agentmsg");
+    if (lines.length < CHAT_AGENT_MSG_SHORT) {
+      div.innerHTML = `<div class="ci-amsg"><div class="ci-amsg-from">✉ from ${esc(agent.from)}</div><div class="ci-amsg-body">${esc(body)}${tail}</div></div>${when}`;
+      return;
+    }
+    const first = (lines.find((l) => l.trim()) || "").trim();
+    const head = first.length > 80 ? `${first.slice(0, 80)}…` : first;
+    div.innerHTML = `<details class="ci-amsg" data-key="${esc(key)}"${chatIsOpen(m, key, chatRule("agentMessage")) ? " open" : ""}><summary><span class="ci-amsg-from">✉ from ${esc(agent.from)}</span> · <span class="ci-amsg-head">${esc(head)}</span> <span class="ci-dim">· ${chatLines(lines.length)}</span></summary><div class="ci-amsg-body">${esc(body)}${tail}</div></details>${when}`;
+    div.firstElementChild.addEventListener("toggle", (e) => chatHandSet(m, key, e.target.open));
+    return;
+  }
+  const text = it.text || "", lines = text.split("\n"), key = `${it.id}:full`;
+  const long = lines.length > CHAT_CLAMP_LINES || text.length > CHAT_CLAMP_CHARS;
+  const rule = chatRule("longPrompt");
+  if (!long || chatIsOpen(m, key, rule === "clamp" ? "line" : rule)) {
+    const less = long ? `<span class="ci-clamp-btn" role="button" tabindex="0">Show less</span>` : "";
+    div.innerHTML = `<div class="ci-bubble">${esc(text)}${tail}${less}</div>${when}`;
+  } else {
+    let shown = lines.slice(0, CHAT_CLAMP_LINES).join("\n");
+    if (shown.length > CHAT_CLAMP_CHARS) shown = shown.slice(0, CHAT_CLAMP_CHARS);
+    div.innerHTML = `<div class="ci-bubble ci-clamped"><div class="ci-clamp-txt">${esc(shown)}<span class="ci-clamp-fade"></span></div>${tail}<span class="ci-clamp-btn" role="button" tabindex="0">Show all · ${chatLines(lines.length)}, ${esc(chatCount(text))}</span></div>${when}`;
+  }
+  const btn = div.querySelector(".ci-clamp-btn");
+  if (btn) {
+    const toggle = () => { chatHandSet(m, key, !chatIsOpen(m, key, rule === "clamp" ? "line" : rule)); m.handAt = Date.now(); const node = chatItemEl(m, it); div.replaceWith(node); };
+    btn.addEventListener("click", toggle);
+    btn.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
+  }
+}
+
 // Draw an assistant message into `div`, block by block. Each block node carries
 // data-sig (its content's signature): a node whose sig is unchanged is left
 // alone; a changed one is replaced; new blocks are appended. The timestamp and
@@ -642,9 +876,10 @@ function chatRenderAssistant(m, div, it) {
 }
 function chatBlockDesc(m, b, it, i, sess) {
   if (b.type === "thinking") {
-    if (!b.text) return { sig: "t:0", html: "" };
+    const rule = chatRule("thinking");
+    if (!b.text || rule === "hidden") return { sig: "t:0", html: "" };
     const key = `${it.id}:think:${i}`;
-    return { sig: `t:${chatSig(b.text)}`, html: `<details class="ci-think" data-think="${esc(key)}"${m.open.has(key) ? " open" : ""}><summary>Thinking <span class="ci-dim">${esc(chatCount(b.text))}</span></summary><div class="ci-think-body">${esc(b.text)}</div></details>` };
+    return { sig: `t:${chatSig(b.text)}`, html: `<details class="ci-think" data-think="${esc(key)}"${chatIsOpen(m, key, rule) ? " open" : ""}><summary>Thinking <span class="ci-dim">${esc(chatCount(b.text))}</span></summary><div class="ci-think-body">${esc(b.text)}</div></details>` };
   }
   if (b.type === "text") return { sig: `x:${chatSig(b.text || "")}${b.truncated ? ":T" : ""}`, html: `<div class="ci-md md-preview">${chatMarkdown(b.text || "")}${b.truncated ? `<div class="ci-trunc">… (clipped)</div>` : ""}</div>` };
   if (b.type === "tool_use") return { sig: `u:${b.id}:${b.result ? `${b.result.isError ? "e" : "o"}${chatSig(b.result.text || "")}${b.result.truncated ? "T" : ""}` : "-"}${b.inputTruncated ? ":I" : ""}`, html: chatToolHtml(m, b, it, sess) };
@@ -659,7 +894,7 @@ function chatBlockNode(m, html, i, sig) {
     node.querySelector(".ci-tool-hd").addEventListener("click", (e) => { if (e.target.closest("a,[data-open-path]")) return; chatSetOpen(m, node, !node.classList.contains("open")); });
     node.querySelectorAll("[data-open-path]").forEach((a) => a.addEventListener("click", (e) => { e.stopPropagation(); if (typeof switchTab === "function") switchTab(`file:${a.dataset.openPath}`); }));
   } else if (node.classList.contains("ci-think")) {
-    node.addEventListener("toggle", () => { if (node.open) m.open.add(node.dataset.think); else m.open.delete(node.dataset.think); });
+    node.addEventListener("toggle", () => chatHandSet(m, node.dataset.think, node.open));
   } else chatDecorateCode(node);
   return node;
 }
@@ -697,7 +932,7 @@ function chatToolSummary(b, sess) {
   return "";
 }
 function chatToolHtml(m, b, it, sess) {
-  const open = chatExpandAll || m.open.has(b.id);
+  const open = chatIsOpen(m, b.id, chatRule("toolCard"));
   const path = CHAT_PATH_TOOLS.has(b.name) ? (b.input && (b.input.file_path || b.input.notebook_path)) : null;
   const summary = chatToolSummary(b, sess);
   const linkable = path && typeof path === "string" && path.startsWith("/") && chatPathLinkable(path, sess);

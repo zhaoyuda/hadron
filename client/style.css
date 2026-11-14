@@ -2939,8 +2939,11 @@ mark.ann-mark.ann-mark-flash { background: rgba(210, 153, 34, .8); outline: 1px 
 
 .chat-banner { flex-shrink: 0; padding: 5px 12px; font-size: 12px; color: var(--yellow); background: rgba(210, 153, 34, 0.10); border-bottom: 1px solid var(--border); }
 .chat-banner[hidden] { display: none; }
-.chat-tools { cursor: pointer; color: var(--text3); white-space: nowrap; }
-.chat-tools:hover { color: var(--text); }
+.chat-density { display: inline-flex; border: 1px solid var(--border); border-radius: 5px; overflow: hidden; white-space: nowrap; flex-shrink: 0; }
+.chat-dens { cursor: pointer; color: var(--text3); padding: 0 7px; font-size: 11px; line-height: 18px; user-select: none; }
+.chat-dens + .chat-dens { border-left: 1px solid var(--border); }
+.chat-dens:hover { color: var(--text); }
+.chat-dens.on { background: var(--bg3); color: var(--text); }
 .chat-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 12px 0 24px; overscroll-behavior: contain; }
 .chat-list { max-width: 860px; margin: 0 auto; padding: 0 20px; }
 .chat-earlier { max-width: 860px; margin: 0 auto 10px; padding: 6px 20px; text-align: center; color: var(--blue); cursor: pointer; font-size: 12px; }
@@ -3124,3 +3127,30 @@ mark.ann-mark.ann-mark-flash { background: rgba(210, 153, 34, .8); outline: 1px 
 @media (max-width: 700px) { .chat-list, .chat-composer, .chat-outbox, .chat-notice { padding-left: 10px; padding-right: 10px; } }
 
 .img-err-toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 9999; max-width: min(560px, calc(100vw - 32px)); padding: 8px 14px; border-radius: 6px; background: #3d1d1d; color: #ffb4b4; border: 1px solid #6e2b2b; font-size: 13px; box-shadow: 0 4px 16px rgba(0,0,0,.4); }
+
+/* Chat collapse rules (chat.js CHAT_RULES) */
+.ci-group { display: flex; align-items: center; gap: 8px; margin: 4px 0 8px; padding: 4px 10px; border: 1px dashed var(--border); border-radius: 6px; font-size: 12px; color: var(--text2); cursor: pointer; user-select: none; white-space: nowrap; overflow: hidden; }
+.ci-group:hover { background: var(--bg3); }
+.ci-group.open { border-style: solid; margin-bottom: 2px; }
+.ci-group.open .ci-tool-caret { transform: rotate(90deg); }
+.ci-group-txt { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.ci-group-diff { font-family: 'JetBrains Mono', Menlo, monospace; color: var(--text3); flex-shrink: 0; }
+.ci-group-fail { color: var(--red); flex-shrink: 0; }
+.ci-group-now { display: none; color: var(--blue); font-family: 'JetBrains Mono', Menlo, monospace; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.chat-working .ci-group-now { display: inline; }
+.ci-ingroup { display: none !important; }
+.ci-grouptail { padding-top: 0 !important; padding-bottom: 0 !important; margin-top: 0 !important; margin-bottom: 0 !important; }
+.ci-grouptail .ci-when { display: none; }
+.ci-user.ci-agentmsg { justify-content: flex-start; padding-left: 0; padding-right: 15%; }
+.ci-amsg { flex: 1; min-width: 0; border-left: 3px solid var(--purple, #a371f7); background: var(--bg2); border-radius: 4px; padding: 6px 10px; font-size: 12.5px; }
+.ci-amsg-from { color: var(--purple, #a371f7); font-weight: 600; font-size: 12px; margin-bottom: 2px; }
+details.ci-amsg > summary { cursor: pointer; list-style: none; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; user-select: none; }
+details.ci-amsg > summary::before { content: "▸ "; color: var(--text3); }
+details.ci-amsg[open] > summary::before { content: "▾ "; }
+.ci-amsg-body { white-space: pre-wrap; word-break: break-word; color: var(--text); }
+details.ci-amsg[open] .ci-amsg-body { margin-top: 6px; }
+.ci-clamp-txt { position: relative; }
+.ci-clamp-fade { position: absolute; left: 0; right: 0; bottom: 0; height: 32px; background: linear-gradient(transparent, var(--bg3)); pointer-events: none; }
+.ci-clamp-btn { display: block; margin: 4px 0 0 auto; background: none; border: none; color: var(--blue); cursor: pointer; font-size: 11.5px; padding: 0; }
+.ci-clamp-btn:hover { text-decoration: underline; }
+.ci-out-inline { font-size: 12px; color: var(--text3); font-family: 'JetBrains Mono', Menlo, monospace; white-space: pre-wrap; word-break: break-word; }

@@ -60,7 +60,7 @@ function saveUIState() {
     deckShowStale,
     landingMigrated: true,
     landing: chatFirst ? "chat" : "terminal",
-    chatExpandAll,
+    chatDensity,
     quotaShowFrom,
     currentTheme,
     notifyLevel,
@@ -151,7 +151,9 @@ function restoreUIState() {
     if (Array.isArray(state.deckStaleOpen)) deckStaleOpen = new Set(state.deckStaleOpen.filter((k) => typeof k === "string" && k.length <= 200));
     if (typeof state.deckShowStale === "boolean") deckShowStale = state.deckShowStale;
     // chatFirst is the workspace's `landing` (fetched before restore), not browser state.
-    if (typeof state.chatExpandAll === "boolean") chatExpandAll = state.chatExpandAll;
+    // chatExpandAll (every tool card open) was the one toggle before the density levels.
+    if (CHAT_DENSITIES.includes(state.chatDensity)) chatDensity = state.chatDensity;
+    else if (state.chatExpandAll === true) chatDensity = "verbose";
     if (Array.isArray(QUOTA_SHOW_FROM) && QUOTA_SHOW_FROM.includes(state.quotaShowFrom)) quotaShowFrom = state.quotaShowFrom;
     if (state.currentTheme) currentTheme = state.currentTheme;
     if (state.notifyLevel) notifyLevel = state.notifyLevel;
