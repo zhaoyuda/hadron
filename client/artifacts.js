@@ -968,6 +968,7 @@ function showArtifactTabContextMenu(e, tab) {
 }
 
 function renderArtifactView(container, artifact, onMeta) {
+  typeof perfMark === "function" && perfMark("artifact render");
   if (artifact.type === "url") {
     if (container.dataset.artValue !== artifact.value) {
       container.innerHTML = `<iframe class="artifact-iframe" src="${esc(artifact.value)}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>`;

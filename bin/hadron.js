@@ -1072,6 +1072,25 @@ async function main() {
       table("terminal connect → first byte (ms)", [
         { label: "", get: () => "all terminals" }, { label: "n", get: (r) => r.n }, { label: "p50", get: ms("p50") }, { label: "p95", get: ms("p95") }, { label: "max", get: ms("max") },
       ], sum.ws.n ? [sum.ws] : []);
+      // Browser-side (client/perf.js): the page itself stalling.
+      const ui = sum.ui;
+      if (!ui.freezes.n) console.log("page freezes (main thread blocked ≥ 200 ms): none\n");
+      else {
+        console.log(`page freezes (main thread blocked ≥ 200 ms): ${ui.freezes.n}, ${(ui.freezes.totalMs / 1000).toFixed(1)} s frozen in all — p50 ${fmt(ui.freezes.p50)} ms, p95 ${fmt(ui.freezes.p95)} ms, max ${fmt(ui.freezes.max)} ms\n`);
+        table("what the page was doing when it froze", [
+          { label: "mark", get: (r) => r.label }, { label: "freezes", get: (r) => r.n }, { label: "total ms", get: (r) => Math.round(r.ms) },
+        ], ui.causes);
+        table("worst freezes", [
+          { label: "time (UTC)", get: (r) => fmtT(r.t) }, { label: "ms", get: (r) => r.ms }, { label: "view", get: (r) => r.view || "-" }, { label: "agent", get: (r) => r.agent || "-" },
+          { label: "marks / scripts", get: (r) => [...r.marks, ...r.scripts].join(", ") || "-" },
+        ], ui.worst);
+      }
+      table("agent switch → next frame (ms)", [
+        { label: "view", get: (r) => r.view }, { label: "n", get: (r) => r.n }, { label: "p50", get: ms("p50") }, { label: "p95", get: ms("p95") }, { label: "max", get: ms("max") },
+      ], ui.switches);
+      table("chat opened → first items drawn (ms)", [
+        { label: "", get: () => "all chats" }, { label: "n", get: (r) => r.n }, { label: "p50", get: ms("p50") }, { label: "p95", get: ms("p95") }, { label: "max", get: ms("max") },
+      ], ui.chatload.n ? [ui.chatload] : []);
       break;
     }
     case "quota": {

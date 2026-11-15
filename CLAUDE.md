@@ -464,14 +464,20 @@ npm test
 #                            reads live + rotated files locally (server may be down): API latency per route n/p50/p95/
 #                            max/5xx sorted by count, slow tmux calls per command with the timeout count, terminal
 #                            connect → first byte; garbage --since exits 1 with the grammar; malformed lines are counted
-#                            and skipped)
+#                            and skipped; ui = browser samples from client/perf.js via POST /api/perf/client (token; ≤ 50
+#                            events, validateClientPerf allowlists every field — ev freeze|switch|chatload, ms 0-600000,
+#                            view from a fixed set, agent id shape, marks/scripts as short labels, anything else dropped
+#                            per field, t = server clock − ago) → `hadron perf` "page freezes" (n, total, p50/p95/max),
+#                            "what the page was doing when it froze" (by perfMark label / LoAF script, "(nothing marked)"),
+#                            worst 5, agent switch → next frame per view, chat opened → first items drawn)
 #   + test-conversation.js  (chat view foundation — server/conversation.js: the whole conversation rebuilt
 #                            incrementally from claude's transcript (byte cursor, torn tail waits, replaced/shrunken
 #                            file restarts with the rev/ord counters kept and `generation` bumped so a stale
 #                            after= cursor still gets every new item and the client knows to drop its picture,
 #                            over-long record read whole up to MAX_LINE else skipped WHOLE and counted); items in file
 #                            order with `ord` (position) and `rev` (change counter): user / command (<command-name>
-#                            envelope → name+args) / output (<local-command-stdout>) / meta / assistant (blocks
+#                            envelope → name+args; a `! cmd` run at claude's prompt — <bash-input> — is name "!") / output (<local-command-stdout>,
+#                            or <bash-stdout> + <bash-stderr>) / meta / assistant (blocks
 #                            thinking|text|tool_use grouped by message.id across records, tool_result paired onto its
 #                            block — rev bumped, ord kept) / summary (isCompactSummary) / compact (compact_boundary)
 #                            / turn (turn_duration) / system / queue (queue-operation); sidechain ignored, uuids
@@ -489,7 +495,21 @@ npm test
 #                            revision, conversationId} — revision must match (0 = none) else 409 with the stored
 #                            draft, empty clears, persisted on the record, short form (no text) on the token list;
 #                            `stale:true` (computed) when its conversationId is not the agent's current one; the
-#                            JSON body cap is 1 MB so a DRAFT_TEXT_MAX CJK draft fits)
+#                            JSON body cap is 1 MB so a DRAFT_TEXT_MAX CJK draft fits; tail-first read: a transcript over TAIL_BYTES (4 MB,
+#                            HADRON_CONVERSATION_TAIL_BYTES in tests) is read from its tail — ords from TAIL_ORD_BASE,
+#                            `earlier: true` until the head is read — and backfillConversation reads the head backwards a
+#                            chunk at a time on "Load earlier" (backfillBefore): item for item the picture of a full forward
+#                            read at every (tail, chunk) size tried, a message split over a chunk boundary merged into the
+#                            held item, orphan results stashed until their tool_use is read, maxItems → headCut, a replaced
+#                            file restarts; queue lines still waiting at a chunk's end are paired by replaying the tail's
+#                            waitAdd/waitTake log (replayWaits: a remove takes without dup, FIFO per text, leftovers wait
+#                            for a later bubble, notices too — compared with a forward read); a held message keeps its place
+#                            (a line between its fragments shows above it — documented); items read back into a picture
+#                            that held none carry revs an after=0 poll sees; a record repeated across the cut (same uuid) is
+#                            drawn once (the chunk's seen map starts from the tail's + every earlier chunk's, SEEN_MAX newest), a call repeated after the
+#                            cut keeps the result read before it (results stashed in every chunk); settings only the
+#                            head set (permission mode, model, effort, title) are kept, the tail's win; the conversation cache is dropped after 2 h
+#                            unpolled (was 10 min))
 #   + test-outbox.js        (the composer's outbox — server/outbox.js at the REAL tmux boundary (private socket + a
 #                            process named claude logging what it is typed): POST /api/sessions/:id/message with a
 #                            `requestId` (+ when "now"|"auto", deviceId; enter/force fixed → 400) is an outbox entry on
@@ -781,7 +801,7 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                            the conversation does not honour (adopted/resumed/cleared conversationId, or rev went backwards)
 #                            drops the picture and refetches the tail in the same tick (an adopted second session id paints the
 #                            new conversation, never a blank one); a server-side cache rebuild (HADRON_CONVERSATION_IDLE_MS=1500
-#                            in the test, prod 10 min; a fresh cache's generation is seeded from the clock, index.js
+#                            in the test, prod 2 h; a fresh cache's generation is seeded from the clock, index.js
 #                            conversationFor) is a new generation → fresh last page + "Load earlier", nothing silently extended
 #                            past a hole; markdown goes through markdown.js mdRender = marked + mdSanitize (DOMParser walk:
 #                            script/iframe/object/style/form dropped, on* handlers and javascript:/data: URLs stripped, data:image/
@@ -858,6 +878,24 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                            command output of ≤ 2 lines and ≤ 300 chars inline, longer a collapsed line. Compact hides Thinking; Verbose
 #                            opens every card, Thinking, agent message, prompt and output with no run rows; a hand choice (m.open / m.shut)
 #                            holds through every poll and a density switch resets them all)
+#   + test/e2e/m36-freeze-log.js (freeze log — client/perf.js: a 100-ms heartbeat, a gap ≥ 200 ms between beats is a freeze
+#                            (ms from the long-animation-frame entry when the browser timed one, else the gap — an upper
+#                            bound, so a 200-ms block is never missed), carrying the perfMark labels set inside it (an
+#                            allowlist: UI_MARKS in perf-log.js), the view and agent; a 700-ms busy loop after
+#                            perfMark("render") is ONE freeze of ~700 ms with that mark, a 50-ms stall is nothing, a hidden
+#                            page records nothing, card clicks are switch samples; with long-animation-frame hidden, three
+#                            210-ms blocks run right after a heartbeat are three freezes of ~210 ms; `hadron perf` prints the
+#                            freeze section and the switch table)
+#   + test/e2e/m37-chat-tail.js (tail-first chat: a 150-exchange transcript with HADRON_CONVERSATION_TAIL_BYTES=24000 opens
+#                            on its tail with "Load earlier" (no count); clicking until it goes shows every reply and prompt
+#                            once, in order, each split message (text record + tool_use record) with both parts, an exchange
+#                            appended between clicks at the bottom; a cursor poll never places a backfill-merged item above
+#                            the loaded window (chat.js applyPage firstHeld filter); a transcript whose last record alone is
+#                            over the window answers its first page with the records before it; a queue line hidden on the
+#                            client because a record named it in `hides` shows again once that record's newer copy drops it —
+#                            a backfill re-pairing — whichever update lands first (m.hidden: line id → hiding record, clientDup); an older copy
+#                            of the record (page crossing a poll) changes nothing; a ▷ Run row "!cmd" is seen (chatObserved) once claude
+#                            records the bash input as command "!" with that command, never by another command)
 ```
 
 `npm run test:e2e` runs `test/e2e/run-all.js`, which executes every `m*.js`

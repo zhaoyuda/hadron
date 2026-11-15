@@ -170,6 +170,7 @@ async function saveWorkspaceGroups(groups) {
 // ═══ SESSIONS API ═══
 let sessionsStale = true; // no successful poll yet (or the last one failed) — the badge must not claim "0"
 async function fetchSessions() {
+  typeof perfMark === "function" && perfMark("sessions poll");
   try {
     const res = await fetch("/api/sessions");
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -404,6 +405,7 @@ function syncGroupList() {
 
 // ═══ RENDER ═══
 function render() {
+  typeof perfMark === "function" && perfMark("render");
   renderDeck();
   renderWorkHeader();
   renderLastReply();
@@ -996,6 +998,7 @@ function getAgentIcon(s) {
 }
 
 function renderDeck() {
+  typeof perfMark === "function" && perfMark("deck render");
   const el = document.getElementById("deck-groups");
   const statusMode = deckGroupBy === "status";
   const groups = getDeckSections();
@@ -2551,6 +2554,7 @@ async function closeSession(sessionId) {
 // ═══ SWITCHING ═══
 function switchSession(sessionId) {
   if (sessionId === activeSessionId) return;
+  if (typeof perfMark === "function") { perfMark("switch"); perfSpan("switch"); }
   if (activeTab === "notes") saveNotes();
 
   // Save current session's tab/layout state

@@ -265,6 +265,7 @@ function wsSizeParam(t) {
 }
 
 function connectWs(sessionId) {
+  typeof perfMark === "function" && perfMark("terminal attach");
   if (!sessionId) {
     // Empty workspace: nothing to attach to. (Used to open /ws?session=null,
     // which the server minted as an agent literally named "null".)

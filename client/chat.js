@@ -86,8 +86,8 @@ function chatModel(sessionId) {
 }
 function chatFreshModel(sessionId) {
   return { sessionId, conversationId: null, generation: null, rev: null, items: new Map(), title: null, mode: null, permissionMode: null, model: null, effort: null,
-    hidden: new Set(), // ids of queue lines a record named in `hides`: never drawn, whatever copy arrives later
-    firstOrd: null, evicted: 0, skipped: 0, orphanResults: 0, readable: true, complete: true, offline: false, reason: null, open: new Set(), shut: new Set(), paused: false, unseen: 0,
+    hidden: new Map(), // queue line id → the record that named it in `hides`: not drawn while that record names it
+    firstOrd: null, earlier: false, headCut: false, evicted: 0, skipped: 0, orphanResults: 0, readable: true, complete: true, offline: false, reason: null, open: new Set(), shut: new Set(), paused: false, unseen: 0,
     anchor: null, // {id, offset}: the item at the top of the view and its offset from it, while paused
     rebuild: null, // during a same-conversation cache rebuild: { anchor, lastOrd } to restore once the tail is back
   };
@@ -114,6 +114,9 @@ function renderChatView(el, s) {
   if (!s) return;
   const sessionId = s.id;
   const m = chatModel(sessionId);
+  if (typeof perfMark === "function") perfMark("chat open");
+  // Chat load: opened → first items drawn, when nothing was held for it yet.
+  let loadT0 = m.items.size ? null : performance.now();
   el.innerHTML = `<div class="chat">
     <div class="chat-hdr"><span class="chat-title"></span><span class="chat-note"></span><span class="chat-density" role="group" aria-label="How much of the work to show">${CHAT_DENSITIES.map((d) => `<span class="chat-dens${d === chatDensity ? " on" : ""}" data-d="${d}" role="button" tabindex="0" title="${esc(CHAT_DENSITY_TITLE[d])}">${CHAT_DENSITY_LABEL[d]}</span>`).join("")}</span></div>
     <div class="chat-banner" hidden></div>
@@ -238,14 +241,16 @@ function renderChatView(el, s) {
   const earlier = el.querySelector(".chat-earlier"), banner = el.querySelector(".chat-banner"), root = el.querySelector(".chat");
   earlier.addEventListener("click", async () => {
     if (earlier.dataset.busy) return;
-    earlier.dataset.busy = "1"; earlier.textContent = "Loading…";
     const first = chatFirstOrd(m);
+    if (first === null) return; // nothing drawn yet: the next poll brings the tail page
+    earlier.dataset.busy = "1"; earlier.textContent = "Loading…";
     try {
       const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/conversation?before=${first}&limit=${CHAT_PAGE}`);
       if (r.ok) {
         const data = await r.json();
         if (data.generation === m.generation && data.conversationId === m.conversationId) {
           const h0 = scroll.scrollHeight, t0 = scroll.scrollTop;
+          m.firstOrd = data.firstOrd; m.earlier = data.earlier === true;
           chatApplyItems(m, list, data.items);
           scrollTo(t0 + (scroll.scrollHeight - h0));
         }
@@ -269,14 +274,17 @@ function renderChatView(el, s) {
     const notes = [];
     if (!warn && !m.complete) notes.push("reading…");
     if (m.evicted) notes.push(`${m.evicted} earlier item${m.evicted === 1 ? "" : "s"} not held`);
+    else if (m.headCut) notes.push("earlier history not held");
     if (m.skipped) notes.push(`${m.skipped} oversize record${m.skipped === 1 ? "" : "s"} skipped`);
     if (m.orphanResults) notes.push(`${m.orphanResults} tool result${m.orphanResults === 1 ? "" : "s"} without a call`);
     note.textContent = notes.join(" · ");
     note.title = note.textContent;
     const first = chatFirstOrd(m);
     const older = first !== null && m.firstOrd !== null && first > m.firstOrd;
-    earlier.hidden = !older;
-    if (older && !earlier.dataset.busy) earlier.textContent = `Load earlier (${first - m.firstOrd} more)`;
+    // `earlier`: history the server has not read yet (it reads the transcript
+    // tail-first) — no count to show, the click reads it.
+    earlier.hidden = !older && !m.earlier;
+    if (!earlier.hidden && !earlier.dataset.busy) earlier.textContent = older ? `Load earlier (${first - m.firstOrd} more)` : "Load earlier";
   };
   // What the live line may claim: the pane's state (from /api/sessions) and
   // the age of the last RECORDED item — not the turn's elapsed time (an
@@ -337,9 +345,15 @@ function renderChatView(el, s) {
     // from nextAfter, not from the server's head (items would be lost for good).
     m.conversationId = data.conversationId; m.generation = data.generation; m.rev = data.more ? data.nextAfter : data.rev;
     m.title = data.title; m.mode = data.mode; m.permissionMode = data.permissionMode; m.model = data.model || null; m.effort = data.effort || null;
-    m.firstOrd = data.firstOrd; m.evicted = data.evicted || 0; m.skipped = data.skipped || 0; m.orphanResults = data.orphanResults || 0;
+    m.firstOrd = data.firstOrd; m.earlier = data.earlier === true; m.headCut = data.headCut === true; m.evicted = data.evicted || 0; m.skipped = data.skipped || 0; m.orphanResults = data.orphanResults || 0;
     m.readable = data.readable !== false; m.complete = data.complete !== false; m.reason = data.reason || null;
-    const incoming = data.items || [];
+    // A poll from the cursor carries items the server changed, which may lie
+    // ABOVE the window this view holds (a backfill for an earlier page merged
+    // the rest of a split message into one never loaded here). Placing it would
+    // leave a hole that "Load earlier" (before = the first held ord) skips over:
+    // only items already held, or inside the window, are taken.
+    const firstHeld = fromCursor ? chatFirstOrd(m) : null;
+    const incoming = (data.items || []).filter((it) => firstHeld === null || it.ord >= firstHeld || m.items.has(it.id));
     const { added, grew, first } = chatApplyItems(m, list, incoming);
     if (m.rebuild) return true; // placed, not scrolled: finishRebuild decides
     if (m.paused) { if (added + grew) { m.unseen += added + grew; drawJump(); } if (first) restoreAnchor(); return true; }
@@ -358,11 +372,13 @@ function renderChatView(el, s) {
     m.paused = true; m.anchor = rb.anchor; m.unseen = rb.unseen;
     for (let pages = 0; pages < CHAT_PAGES_PER_TICK && !list.querySelector(`[data-id="${CSS.escape(rb.anchor.id)}"]`); pages++) {
       const first = chatFirstOrd(m);
-      if (first === null || m.firstOrd === null || first <= m.firstOrd) break;
+      if (first === null || m.firstOrd === null || (first <= m.firstOrd && !m.earlier)) break;
       const r = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/conversation?before=${first}&limit=${CHAT_PAGE}`);
       if (!r.ok || !el.isConnected) break;
       const data = await r.json();
       if (data.generation !== m.generation || data.conversationId !== m.conversationId) break;
+      m.firstOrd = data.firstOrd; m.earlier = data.earlier === true;
+      if (!(data.items || []).length) break;
       chatApplyItems(m, list, data.items || []);
     }
     if (restoreAnchor()) drawJump(); else follow();
@@ -411,6 +427,7 @@ function renderChatView(el, s) {
     if (m.rebuild && !m.offline && after === null) { try { await finishRebuild(); } catch {} }
     if (!el.isConnected) return;
     drawHeader(); drawLive(); drawEmpty();
+    if (loadT0 !== null) { const ms = performance.now() - loadT0; loadT0 = null; if (m.items.size && !m.offline && typeof perfRecord === "function") perfRecord("chatload", ms, { items: m.items.size }); } // the first refresh only: an empty conversation filled later is no load time
     try { dialogCard.tick(); } catch {}
     try { await composer.tick(); } catch {}
   };
@@ -441,32 +458,54 @@ function chatLastItem(m) { let l = null; for (const it of m.items.values()) if (
 // record lands — unless the server evicted the line first: then no update for
 // it ever comes. The record names the line it replaces (`hides`, item ids): the
 // id is remembered (m.hidden, so a copy arriving later — a slow Load earlier —
-// lands hidden) and a line the client already holds is hidden here.
+// lands hidden) and a line the client already holds is hidden here. The record
+// owns the hiding: a newer copy of it that no longer names the line (history
+// read back paired the record with an earlier line) lets the line show again —
+// the server sends the line itself with dup false.
 function chatHiddenCopies(m, items) {
   const inPage = new Set(items.map((it) => it.id));
   const out = [];
   for (const it of items) {
+    const prev = m.items.get(it.id);
+    // An older copy than the one held (overlapping page and poll) changes nothing.
+    if (prev && it.rev < prev.rev) continue;
+    if (prev && Array.isArray(prev.hides)) {
+      const now = Array.isArray(it.hides) ? it.hides : [];
+      for (const id of prev.hides) {
+        if (now.includes(id) || m.hidden.get(id) !== it.id) continue;
+        m.hidden.delete(id);
+        // A line hidden here (clientDup: the server's own copy said dup false)
+        // shows again; a line the server marked dup stays as the server has it.
+        const h = m.items.get(id);
+        if (h && h.clientDup && !inPage.has(id)) {
+          inPage.add(id);
+          const { clientDup, ...rest } = h;
+          out.push({ ...rest, dup: false, rev: (h.rev + Math.floor(h.rev) + 1) / 2 });
+        }
+      }
+    }
     if (!Array.isArray(it.hides)) continue;
     for (const id of it.hides) {
-      m.hidden.add(id);
+      m.hidden.set(id, it.id);
       const h = m.items.get(id);
       if (!h || h.dup || inPage.has(id)) continue;
       inPage.add(id);
       // rev + 0.5 is a client-only marker (above the held copy, below the server's
       // own dup update); it never feeds the cursor, which comes from data.rev / nextAfter.
-      out.push({ ...h, dup: true, rev: h.rev + 0.5 });
+      out.push({ ...h, dup: true, clientDup: true, rev: h.rev + 0.5 });
     }
   }
   return out;
 }
 function chatApplyItems(m, list, items) {
+  typeof perfMark === "function" && perfMark("chat items");
   let added = 0, grew = 0, first = null, changed = false;
   const sorted = items.concat(chatHiddenCopies(m, items)).sort((a, b) => a.ord - b.ord);
   for (let it of sorted) {
     const prev = m.items.get(it.id);
     // A copy older than the one held (a page fetched before the item changed) never replaces it.
     if (prev && it.rev < prev.rev) it = prev;
-    if (!it.dup && m.hidden.has(it.id)) it = { ...it, dup: true };
+    if (!it.dup && m.hidden.has(it.id)) it = { ...it, dup: true, clientDup: true };
     const old = list.querySelector(`[data-id="${CSS.escape(it.id)}"]`);
     if (prev && old && prev.rev === it.rev) continue;
     m.items.set(it.id, it);
@@ -748,7 +787,9 @@ function chatItemEl(m, it) {
       chatRenderAssistant(m, div, it);
       break;
     case "command":
-      div.innerHTML = `<div class="ci-line"><span class="ci-cmd">/${esc(String(it.name || "").replace(/^\//, ""))}</span> ${esc(it.args || "")}</div>${when}`;
+      div.innerHTML = it.name === "!"
+        ? `<div class="ci-line"><span class="ci-cmd">!</span> <code>${esc(it.args || "")}</code></div>${when}`
+        : `<div class="ci-line"><span class="ci-cmd">/${esc(String(it.name || "").replace(/^\//, ""))}</span> ${esc(it.args || "")}</div>${when}`;
       break;
     case "output": {
       const t = it.text || "";
@@ -970,7 +1011,20 @@ function chatDecorateCode(root) {
     wrap.className = "ci-code";
     const hd = document.createElement("div");
     hd.className = "ci-code-hd";
-    hd.innerHTML = `<span class="ci-code-lang">${esc(lang || "text")}</span><span class="ci-code-copy" title="Copy code">Copy</span>`;
+    // A block that is one `! command` line is claude telling the person to run
+    // it in this session: ▷ Run sends it through the outbox exactly as typed —
+    // when claude is at its prompt. Claude's bash mode gives the command no
+    // input, so a password prompt cannot be answered there (Primary can).
+    const raw = (code || pre).textContent.trim();
+    const bang = /^![^\n]+$/.test(raw) ? raw : null;
+    hd.innerHTML = `<span class="ci-code-lang">${esc(lang || "text")}</span><span class="ci-code-acts">${bang ? `<span class="ci-code-run" title="${esc(`Run in this session: ${bang}`)}">▷ Run</span>` : ""}<span class="ci-code-copy" title="Copy code">Copy</span></span>`;
+    if (bang) hd.querySelector(".ci-code-run").addEventListener("click", (e) => {
+      const comp = chatComposerOf.get(e.target.closest(".chat"));
+      if (!comp) return;
+      comp.run(bang);
+      e.target.textContent = "Sent ▷";
+      setTimeout(() => { e.target.textContent = "▷ Run"; }, 2000);
+    });
     hd.querySelector(".ci-code-copy").addEventListener("click", async (e) => {
       const text = (code || pre).textContent;
       let ok = false;
@@ -999,6 +1053,7 @@ const CHAT_DRAFT_DEBOUNCE_MS = 500, CHAT_DRAFT_MAX_WAIT_MS = 3000, CHAT_DRAFT_RE
 const CHAT_HANDED_WARN_MS = 20000; // handed, no user turn seen for this long → "Handed to claude, not in the conversation yet"
 const CHAT_OUTBOX_GONE_MS = 10000; // a row removed here is ignored on the (3-s old) sessions list for this long
 let chatActiveComposer = null;
+const chatComposerOf = new WeakMap(); // .chat element → its composer (code blocks' ▷ Run)
 function chatDeviceId() {
   try {
     let d = localStorage.getItem("hadron-device-id");
@@ -1026,13 +1081,18 @@ function chatDraftReplace(sessionId, placeholder, replacement) {
 const chatRequestId = () => `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 // Has claude recorded this handed message as a user turn? Same text (a clipped
 // bubble matches its prefix), recorded no earlier than the send.
-function chatCommandText(it) { return `/${String(it.name || "").replace(/^\//, "")}${it.args ? ` ${it.args}` : ""}`; }
+function chatCommandText(it) {
+  if (it.name === "!") return `!${it.args || ""}`;
+  return `/${String(it.name || "").replace(/^\//, "")}${it.args ? ` ${it.args}` : ""}`;
+}
 function chatObserved(m, row) {
   const t0 = Date.parse(row.at || "") - 5000;
   for (const it of m.items.values()) {
     if (Number.isFinite(t0) && it.at && Date.parse(it.at) < t0) continue;
     // A slash command is recorded as a command item, never a prompt.
     if (it.kind === "command" && row.text.startsWith("/")) { if (chatCommandText(it) === row.text.trim()) return true; continue; }
+    // A `! command` (▷ Run) is recorded as bash input: name "!", the command trimmed.
+    if (it.kind === "command" && row.text.startsWith("!")) { if (it.name === "!" && it.args === row.text.slice(1).trim()) return true; continue; }
     if (it.kind !== "user" || typeof it.text !== "string") continue;
     if (it.text === row.text || (it.truncated && row.text.startsWith(it.text)) || (row.truncated && it.text.startsWith(row.text))) return true;
   }
@@ -1378,7 +1438,7 @@ function chatComposer(el, m, sessionId, { list }) {
   const label = (row) => {
     switch (row.state) {
       case "pending": case "sending": return "Sending…";
-      case "queued": return row.stale ? "Written for an earlier conversation — held" : row.idleOnly ? "Switches once claude is at its prompt" : "Send after this turn";
+      case "queued": return row.stale ? "Written for an earlier conversation — held" : row.idleOnly ? (row.text.startsWith("!") ? "Runs once claude is at its prompt" : "Switches once claude is at its prompt") : "Send after this turn";
       case "handed":
         if (m.readable === false || !m.conversationId) return "Handed to the terminal"; // no transcript to see it recorded in
         // Pasted while claude was working: claude takes it with its next step and
@@ -1676,8 +1736,12 @@ function chatComposer(el, m, sessionId, { list }) {
   const focus = () => { try { if (!matchMedia("(pointer: coarse)").matches) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); } } catch {} };
   drawOutbox();
   const dispose = () => document.removeEventListener("pointerdown", onDocDown, true);
-  const c = { tick, flush, focus, dispose };
+  // ▷ Run: an idle-only entry — the server holds it until claude is at its
+  // prompt with an empty box (a `!` line typed mid-turn would be a message).
+  const run = (text) => choose(text);
+  const c = { tick, flush, focus, dispose, run };
   chatActiveComposer = c;
+  chatComposerOf.set(root, c);
   return c;
 }
 document.addEventListener("visibilitychange", () => { if (document.hidden && chatActiveComposer) chatActiveComposer.flush(); });

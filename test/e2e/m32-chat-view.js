@@ -52,7 +52,7 @@ import { claudeProjectDir } from "../../server/resume.js";
 const r = reporter("M32 chat view");
 const CONFIG = mkdtempSync(join(tmpdir(), "hadron-m32-claude-"));
 process.env.CLAUDE_CONFIG_DIR = CONFIG;
-process.env.HADRON_CONVERSATION_IDLE_MS = "1500"; // the server drops an unpolled conversation cache after 1.5 s (prod: 10 min)
+process.env.HADRON_CONVERSATION_IDLE_MS = "1500"; // the server drops an unpolled conversation cache after 1.5 s (prod: 2 h)
 const SID = randomUUID();
 const now = () => new Date().toISOString();
 const rec = (o) => JSON.stringify({ uuid: randomUUID(), timestamp: now(), ...o }) + "\n";
@@ -524,7 +524,7 @@ try {
   // A queue line the server evicted before its record landed gets no dup update: the record names it (`hides`).
   {
     const res = await page.evaluate(() => {
-      const m = { hidden: new Set(), items: new Map([
+      const m = { hidden: new Map(), items: new Map([
         ["q1", { id: "q1", kind: "notice", via: "queue", ord: 5, rev: 5, text: "x" }],
         ["q2", { id: "q2", kind: "queue", op: "enqueue", ord: 6, rev: 6, text: "继续" }],
         ["q3", { id: "q3", kind: "queue", op: "enqueue", ord: 50, rev: 50, text: "kept" }],

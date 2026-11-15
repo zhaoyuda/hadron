@@ -6,6 +6,13 @@
 //   http  { method, route, status, ms }  — every /api request (route template,
 //                                          never the query string or a token)
 //   ws    { agent, shell, ms }           — terminal connect → first pty byte
+//   ui    { ev, ms, … }                  — measured IN THE BROWSER (client/perf.js,
+//                                          POST /api/perf/client): ev "freeze" = the
+//                                          main thread did not run for ms (marks = what
+//                                          the page was doing, scripts = long-animation-
+//                                          frame attribution where the browser has it);
+//                                          "switch" = agent switch click → next frame;
+//                                          "chatload" = chat opened → first items drawn
 // Lines are buffered and appended once a second; the file rotates by LOCAL day
 // (perf-YYYY-MM-DD.jsonl) and the oldest beyond `keepDays` are deleted.
 // `hadron perf [--since 1h]` reads it back (summarizePerf below).
@@ -92,6 +99,46 @@ export function createPerfLog({ dir, keepDays = KEEP_DAYS, now = Date.now, flush
   return { record, flush, stop, status: () => ({ ...status, path, queued: queue.length }) };
 }
 
+// ── browser samples ─────────────────────────────────────────────────────────
+// POST /api/perf/client { events: [...] }. Everything is allowlisted: a field
+// out of contract drops that field (an event without a valid ev/ms is dropped
+// whole), strings are short and of a fixed alphabet, so the line can carry no
+// token, URL query or free text. `ago` dates the event (the page batches).
+export const UI_EVENTS = new Set(["freeze", "switch", "chatload"]);
+export const UI_VIEWS = new Set(["terminal", "chat", "artifact", "notes", "changes", "split", "other"]);
+export const UI_MAX_EVENTS = 50;
+// Marks are the labels app code sets (perfMark call sites) — a fixed list, so
+// no free text reaches the log. Scripts are LoAF "function@file" names: shaped,
+// and never a token-shaped run (24+ letters/digits in a row).
+export const UI_MARKS = new Set(["sessions poll", "render", "deck render", "switch", "terminal attach", "artifact render", "chat open", "chat items"]);
+const UI_SCRIPT_RE = /^[A-Za-z0-9_$.<>]{1,60}@[A-Za-z0-9_.-]{1,60}$/;
+const TOKENISH_RE = /[A-Za-z0-9]{24}/;
+function uiLabels(v, max, ok) {
+  if (!Array.isArray(v)) return undefined;
+  const out = [...new Set(v.filter((x) => typeof x === "string" && ok(x)))].slice(0, max);
+  return out.length ? out : undefined;
+}
+// isAgent(id): the agent named must exist (an id-shaped string alone is not enough).
+export function validateClientPerf(body, now = Date.now(), isAgent = () => false) {
+  const list = body && Array.isArray(body.events) ? body.events : null;
+  if (!list) return { error: "events must be an array" };
+  if (list.length > UI_MAX_EVENTS) return { error: `at most ${UI_MAX_EVENTS} events per request` };
+  const out = [];
+  for (const e of list) {
+    if (!e || typeof e !== "object" || !UI_EVENTS.has(e.ev)) continue;
+    if (typeof e.ms !== "number" || !Number.isFinite(e.ms) || e.ms < 0 || e.ms > 600_000) continue;
+    const ago = typeof e.ago === "number" && Number.isFinite(e.ago) && e.ago >= 0 && e.ago <= 600_000 ? e.ago : 0;
+    const r = { t: new Date(now - ago).toISOString(), ev: e.ev, ms: Math.round(e.ms) };
+    if (typeof e.view === "string" && UI_VIEWS.has(e.view)) r.view = e.view;
+    if (typeof e.agent === "string" && e.agent.length <= 64 && isAgent(e.agent)) r.agent = e.agent;
+    const marks = uiLabels(e.marks, 10, (x) => UI_MARKS.has(x)); if (marks) r.marks = marks;
+    const scripts = uiLabels(e.scripts, 5, (x) => UI_SCRIPT_RE.test(x) && !TOKENISH_RE.test(x)); if (scripts) r.scripts = scripts;
+    if (Number.isInteger(e.items) && e.items >= 0 && e.items <= 1e6) r.items = e.items;
+    out.push(r);
+  }
+  return { events: out };
+}
+
 // ── reader ──────────────────────────────────────────────────────────────────
 export function parseSince(s, defaultMs = 3600_000) {
   if (s === undefined || s === true || s === "") return defaultMs;
@@ -141,7 +188,14 @@ export function summarizePerf({ dir, sinceMs = 3600_000, now = Date.now() }) {
   const { rows, files, malformed } = readPerf({ dir, sinceMs, now });
   const http = new Map(), tmux = new Map();
   const ws = [];
+  const freezes = [], switches = new Map(), chatload = [];
   for (const r of rows) {
+    if (r.kind === "ui") {
+      if (r.ev === "freeze") freezes.push(r);
+      else if (r.ev === "switch") { const k = r.view || "other"; (switches.get(k) || switches.set(k, []).get(k)).push(r.ms); }
+      else if (r.ev === "chatload") chatload.push(r.ms);
+      continue;
+    }
     if (r.kind === "http") {
       const key = `${r.method} ${r.route}`;
       const e = http.get(key) || { method: r.method, route: r.route, ms: [], errors: 0 };
@@ -160,5 +214,24 @@ export function summarizePerf({ dir, sinceMs = 3600_000, now = Date.now() }) {
     from: rows.length ? new Date(rows[0]._t).toISOString() : null,
     to: rows.length ? new Date(rows[rows.length - 1]._t).toISOString() : null,
     http: httpRows, tmux: tmuxRows, ws: stats(ws),
+    ui: summarizeUi(freezes, switches, chatload),
+  };
+}
+
+function summarizeUi(freezes, switches, chatload) {
+  const marks = new Map();
+  for (const f of freezes) for (const m of [...(f.marks || []), ...(f.scripts || []).map((x) => `script ${x}`)]) {
+    const e = marks.get(m) || { label: m, n: 0, ms: 0 };
+    e.n++; e.ms += f.ms; marks.set(m, e);
+  }
+  const unmarked = freezes.filter((f) => !f.marks && !f.scripts);
+  if (unmarked.length) marks.set("(nothing marked)", { label: "(nothing marked)", n: unmarked.length, ms: unmarked.reduce((a, f) => a + f.ms, 0) });
+  const pick = (f) => ({ t: new Date(f._t).toISOString(), ms: f.ms, view: f.view || null, agent: f.agent || null, marks: f.marks || [], scripts: f.scripts || [] });
+  return {
+    freezes: { ...stats(freezes.map((f) => f.ms)), totalMs: freezes.reduce((a, f) => a + f.ms, 0) },
+    causes: [...marks.values()].sort((a, b) => b.ms - a.ms).slice(0, 10),
+    worst: [...freezes].sort((a, b) => b.ms - a.ms).slice(0, 5).map(pick),
+    switches: [...switches.entries()].map(([view, ms]) => ({ view, ...stats(ms) })).sort((a, b) => b.n - a.n),
+    chatload: stats(chatload),
   };
 }

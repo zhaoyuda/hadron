@@ -35,7 +35,7 @@ import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { randomUUID } from "crypto";
 import { claudeProjectDir } from "../../server/resume.js";
-import { BLOCKS_MAX, createConversation, ingestRecord, readConversation, conversationWire, conversationIdFor, clipInput, validateDraftPatch, safeDraft, TEXT_MAX, INPUT_TEXT_MAX, RESULT_TEXT_MAX, PAGE_DEFAULT } from "../../server/conversation.js";
+import { BLOCKS_MAX, createConversation, ingestRecord, readConversation, backfillConversation, backfillBefore, TAIL_ORD_BASE, conversationWire, conversationIdFor, clipInput, validateDraftPatch, safeDraft, TEXT_MAX, INPUT_TEXT_MAX, RESULT_TEXT_MAX, PAGE_DEFAULT } from "../../server/conversation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = join(__dirname, "..", "..");
@@ -131,6 +131,29 @@ console.log("\n[model + effort — the composer bar]");
   ingestRecord(conv, asst([{ type: "text", text: "ok" }], 8, "mm3", { stop: "end_turn", effort: "medium" }));
   const w = conversationWire(conv, {});
   ok(w.model === "claude-x" && w.effort === "medium", `the next assistant record wins again, and the wire carries both (${w.model} / ${w.effort})`);
+}
+
+console.log("\n[a ! command (bash mode) is a command item + its output]");
+{
+  const conv = createConversation();
+  ingestRecord(conv, user("<bash-input>echo hadron-run-probe</bash-input>", 1));
+  ingestRecord(conv, user("<bash-stdout>hadron-run-probe</bash-stdout><bash-stderr></bash-stderr>", 2));
+  ingestRecord(conv, user("<bash-input>ls nope</bash-input>", 3));
+  ingestRecord(conv, user("<bash-stdout></bash-stdout><bash-stderr>ls: nope: No such file</bash-stderr>", 4));
+  const [c, o, c2, o2] = conv.items;
+  ok(c.kind === "command" && c.name === "!" && c.args === "echo hadron-run-probe", `<bash-input> → command "!" with the command (${c.kind} ${c.name} ${c.args})`);
+  ok(o.kind === "output" && o.text === "hadron-run-probe", `<bash-stdout> → output (${o.kind} ${JSON.stringify(o.text)})`);
+  ok(c2.kind === "command" && o2.kind === "output" && o2.text === "ls: nope: No such file", "stderr alone is the output");
+  ok(!conv.items.some((it) => it.kind === "user"), "no raw <bash-…> bubble");
+  ingestRecord(conv, user("<bash-input> mkdir d </bash-input>", 5));
+  ingestRecord(conv, user("<bash-stdout></bash-stdout><bash-stderr></bash-stderr>", 6));
+  ingestRecord(conv, user("<bash-stdout>a</bash-stdout>\n<bash-stderr>b</bash-stderr>", 7));
+  ingestRecord(conv, user("<bash-stderr>only err</bash-stderr>", 8));
+  ingestRecord(conv, user("<bash-stdout>x</bash-stdout>", 9));
+  ok(conv.items[4].args === "mkdir d" && conv.items.length === 8, `a command that printed nothing draws no output line; args trimmed (${conv.items.length} items)`);
+  ok(conv.items[5].text === "a\nb" && conv.items[6].text === "only err" && conv.items[7].text === "x", "a newline between the tags, stderr alone, stdout alone");
+  ingestRecord(conv, user("see <bash-input>x</bash-input>", 10));
+  ok(conv.items[8].kind === "user", "a prompt that merely quotes the tags stays a prompt");
 }
 
 console.log("\n[clipping + odd shapes]");
@@ -415,6 +438,216 @@ console.log("\n[eviction + paging]");
   ok(revs.every((r, i) => i === 0 || r > revs[i - 1]), "after= pages come in rev order");
   ok(conversationWire(conv, { limit: 99999 }).items.length === 5 && conversationWire(conv, { limit: -1 }).items.length === 5, "limit clamped");
   ok(PAGE_DEFAULT === 200, "default page size");
+}
+
+console.log("\n[tail-first read + backfill]");
+{
+  // 60 exchanges: prompt, an assistant message split over two records (text,
+  // then a tool_use), the tool's result — so any cut lands inside messages and
+  // between a tool_use and its result.
+  const file = join(DIR, "tail.jsonl");
+  let body = "";
+  for (let i = 0; i < 60; i++) {
+    body += line(user(`prompt ${i} ` + "p".repeat(200), i));
+    body += line(asst([{ type: "text", text: `answer ${i} ` + "a".repeat(300) }], i, `msg${i}`));
+    body += line(asst([{ type: "tool_use", id: `tu${i}`, name: "Read", input: { file_path: `/f${i}` } }], i, `msg${i}`));
+    body += line(result(`tu${i}`, `body ${i}`, i));
+  }
+  writeFileSync(file, body);
+  const full = createConversation();
+  readConversation(file, full);
+  const fp = (it) => JSON.stringify({ id: it.id, kind: it.kind, text: it.text, blocks: (it.blocks || []).map((b) => [b.type, b.text, b.id, b.result && b.result.text]) });
+  for (const [tail, chunk] of [[3000, 2500], [9000, 4000], [9000, 700]]) {
+    const conv = createConversation();
+    readConversation(file, conv, { tailBytes: tail });
+    const tailItems = conv.items.length;
+    ok(conv.headEnd > 0 && tailItems > 0 && tailItems < full.items.length && conv.items[0].ord >= TAIL_ORD_BASE, `tail ${tail}: a cold read holds only the tail (${tailItems} of ${full.items.length} items, headEnd ${conv.headEnd})`);
+    const w = conversationWire(conv, {});
+    ok(w.earlier === true && w.headCut === false, "the wire says earlier history exists");
+    const rev0 = conv.rev;
+    let rounds = 0;
+    while (conv.headEnd > 0 && rounds++ < 500) if (backfillConversation(file, conv, { chunkBytes: chunk }) < 0) break;
+    ok(conv.headEnd === 0 && conversationWire(conv, {}).earlier === false, `chunk ${chunk}: backfilled to the start in ${rounds} rounds`);
+    ok(conv.items.length === full.items.length && conv.items.every((it, i) => fp(it) === fp(full.items[i])), "…item for item the same picture as a full forward read (ids, texts, blocks, results)");
+    ok(conv.items.every((it, i) => i === 0 || it.ord > conv.items[i - 1].ord), "ords strictly increase");
+    ok(new Set(conv.items.map((it) => it.id)).size === conv.items.length, "ids unique");
+    ok(conv.orphanResults === full.orphanResults && conv.orphanStash.size === 0, `no orphan result invented, the stash is empty (${conv.orphanResults})`);
+    // Backfilled items carry rev 0: an after= poll resends only the messages a
+    // later chunk completed (the first part of a message split over a chunk
+    // boundary) — the client takes those only when it holds them (chat.js applyPage).
+    const after = conversationWire(conv, { after: rev0 });
+    ok(after.items.every((it) => it.kind === "assistant") && after.items.length <= rounds + 1, `an after= poll resends no backfilled history, only completed split messages (${after.items.length} assistant items)`);
+  }
+  // The route's helper: backfill only until a page lies before `before`.
+  const conv = createConversation();
+  readConversation(file, conv, { tailBytes: 9000 });
+  const first = conv.items[0].ord, held = conv.items.length;
+  ok(backfillBefore(file, conv, first, 10, Date.now() + 5000, { chunkBytes: 2000 }) === true && conv.items.filter((it) => it.ord < first).length >= 10 && conv.headEnd > 0, "backfillBefore stops once the page is there, the rest stays unread");
+  const page = conversationWire(conv, { before: first, limit: 10 });
+  ok(page.items.length === 10 && page.more === true && page.items[9].ord < first, "a before= page of 10 with more:true");
+  ok(conv.items.length > held, "items were prepended");
+  // maxItems reached while backfilling → the head is cut, said on the wire.
+  const small = createConversation({ maxItems: 50 });
+  readConversation(file, small, { tailBytes: 3000 });
+  let r2 = 0;
+  while (small.headEnd > 0 && r2++ < 500) backfillConversation(file, small, { chunkBytes: 2000 });
+  ok(small.items.length <= 50 && small.headCut === true && conversationWire(small, {}).headCut === true && conversationWire(small, {}).earlier === false, `at maxItems the backfill stops and says headCut (${small.items.length} items)`);
+  // The file replaced under a tail read: backfill refuses, the next read restarts.
+  const conv2 = createConversation();
+  readConversation(file, conv2, { tailBytes: 3000 });
+  const other = join(DIR, "tail2.jsonl"); writeFileSync(other, line(user("new file", 1))); renameSync(other, file);
+  ok(backfillConversation(file, conv2, { chunkBytes: 2000 }) < 0, "a replaced file: backfill returns -1 (the next read restarts)");
+  readConversation(file, conv2, { tailBytes: 3000 });
+  ok(conv2.items.length === 1 && conv2.items[0].text === "new file" && conv2.headEnd === 0, "…and the next read starts over from the new file");
+}
+
+console.log("\n[backfill across the cut: split fragments, lookups, queue pairs, an empty tail]");
+{
+  // Cut the file so the tail starts exactly at record `k` (newlineAfter lands on the newline before it).
+  const build = (name, recs) => {
+    const file = join(DIR, name);
+    const lines = recs.map(line);
+    writeFileSync(file, lines.join(""));
+    return { file, at: (k) => lines.slice(0, k).join("").length, size: lines.join("").length };
+  };
+  const tailFrom = (b, k) => { const conv = createConversation(); readConversation(b.file, conv, { tailBytes: b.size - b.at(k) + 1 }); return conv; };
+  const drain = (b, conv) => { let n = 0; while (conv.headEnd > 0 && n++ < 50) backfillConversation(b.file, conv, { chunkBytes: 1 << 20 }); };
+
+  // A queue line between the two records of one message, cut before the second.
+  const a = build("cut-a.jsonl", [user("p0", 0), asst([{ type: "text", text: "split text" }], 1, "mA"),
+    { type: "queue-operation", operation: "enqueue", timestamp: T(2), sessionId: SID, content: "unrelated" },
+    asst([{ type: "tool_use", id: "tuA", name: "Read", input: { file_path: "/a" } }], 3, "mA"), result("tuA", "ra", 4), user("p1", 5)]);
+  const ca = tailFrom(a, 3);
+  ok(ca.items.length > 0 && ca.headEnd > 0, "split message: the tail holds the second fragment only");
+  drain(a, ca);
+  const mA = ca.items.filter((it) => it.msgId === "mA");
+  ok(mA.length === 1 && mA[0].blocks.map((b) => b.type).join() === "text,tool_use" && mA[0].blocks[1].result?.text === "ra", `…a fragment that is not the chunk's last item still joins the held message (${mA.length} item(s), ${mA[0]?.blocks.map((b) => b.type)})`);
+  ok(new Set(ca.items.map((it) => it.id)).size === ca.items.length, "…ids unique");
+
+  // A tool call read by backfill finds its result appended later, and a later fragment joins it.
+  const c = build("cut-c.jsonl", [user("p0", 0), asst([{ type: "tool_use", id: "tuC", name: "Bash", input: { command: "sleep 9" } }], 1, "mC"), user("p1", 2), asst([{ type: "text", text: "meanwhile" }], 3, "mD", { stop: "end_turn" })]);
+  const cc = tailFrom(c, 2);
+  drain(c, cc);
+  appendFileSync(c.file, line(result("tuC", "done C", 4)) + line(asst([{ type: "text", text: "after C" }], 5, "mC")));
+  readConversation(c.file, cc);
+  const mC = cc.items.filter((it) => it.msgId === "mC");
+  ok(mC.length === 1 && mC[0].blocks[0].result?.text === "done C" && mC[0].blocks.some((b) => b.text === "after C") && cc.orphanResults === 0, `a backfilled call takes its later result and fragment (${mC.length} item(s), orphans ${cc.orphanResults})`);
+
+  // A prompt queued before the cut, recorded as a bubble after it: one copy shown.
+  const d = build("cut-d.jsonl", [user("p0", 0), { type: "queue-operation", operation: "enqueue", timestamp: T(1), sessionId: SID, content: "queued one", uuid: uid() },
+    asst([{ type: "text", text: "busy" }], 2, "mE", { stop: "end_turn" }), user("queued one", 3), asst([{ type: "text", text: "ok" }], 4, "mF", { stop: "end_turn" })]);
+  const cd = tailFrom(d, 3);
+  drain(d, cd);
+  const q = cd.items.find((it) => it.kind === "queue"), bubble = cd.items.find((it) => it.kind === "user" && it.text === "queued one");
+  const fd = createConversation(); readConversation(d.file, fd);
+  const fq = fd.items.find((it) => it.kind === "queue");
+  ok(fq?.dup === true && q?.dup === true && JSON.stringify(bubble?.hides) === JSON.stringify([q.id]), `a queue line before the cut pairs with its bubble after it, as a forward read pairs them (dup ${q?.dup}, hides ${JSON.stringify(bubble?.hides)})`);
+
+  // Pairing across the cut is the forward read's, replayed: a remove after the
+  // cut takes the waiting line (the bubble then pairs nothing), the same text
+  // queued twice pairs oldest first, and a line still waiting pairs with a
+  // bubble appended later. Compared item by item with a forward read.
+  const qop = (op, content, t) => ({ type: "queue-operation", operation: op, timestamp: T(t), sessionId: SID, content, uuid: uid() });
+  const sameAsForward = (name, recs, k, appended) => {
+    const b = build(name, recs);
+    const cv = tailFrom(b, k); drain(b, cv);
+    const fw = createConversation(); readConversation(b.file, fw);
+    if (appended) { appendFileSync(b.file, appended.map(line).join("")); readConversation(b.file, cv); readConversation(b.file, fw); }
+    // Compared by position: ords differ (tail base), so hides map to an index.
+    const idx = (conv) => conv.items.filter((it) => it.kind === "queue" || it.kind === "user").map((it) => `${it.kind}:${it.op || ""}:${it.text}:${it.dup ? "dup" : ""}:${(it.hides || []).map((h) => conv.items.filter((x) => x.kind === "queue" || x.kind === "user").findIndex((x) => x.id === h)).join("+")}`).join(" | ");
+    return [idx(cv), idx(fw)];
+  };
+  {
+    const [got, want] = sameAsForward("cut-q1.jsonl", [user("p0", 0), qop("enqueue", "again", 1), asst([{ type: "text", text: "busy" }], 2, "mQ1", { stop: "end_turn" }), qop("remove", "again", 3), user("again", 4)], 2);
+    ok(got === want, `a remove after the cut takes the waiting line; the bubble pairs nothing (${got})`);
+  }
+  {
+    const [got, want] = sameAsForward("cut-q2.jsonl", [user("p0", 0), qop("enqueue", "twice", 1), asst([{ type: "text", text: "x" }], 2, "mQ2"), qop("enqueue", "twice", 3), user("twice", 4), asst([{ type: "text", text: "y" }], 5, "mQ3", { stop: "end_turn" }), user("twice", 6)], 2);
+    ok(got === want, `the same text queued on both sides of the cut pairs oldest first (${got})`);
+  }
+  {
+    const [got, want] = sameAsForward("cut-q3.jsonl", [user("p0", 0), qop("enqueue", "later", 1), asst([{ type: "text", text: "busy" }], 2, "mQ4", { stop: "end_turn" })], 2, [user("later", 3)]);
+    ok(got === want && got.includes("queue:enqueue:later:dup"), `a line still waiting after the backfill pairs with a bubble appended later (${got})`);
+  }
+  {
+    // A notice queued before the cut, its record after it.
+    const note = "<task-notification><task-id>t1</task-id><status>completed</status><summary>done</summary></task-notification>";
+    const b = build("cut-q4.jsonl", [user("p0", 0), qop("enqueue", note, 1), asst([{ type: "text", text: "busy" }], 2, "mQ5", { stop: "end_turn" }), { ...user(note, 3), origin: { kind: "task-notification" } }]);
+    const cv = tailFrom(b, 2); drain(b, cv);
+    const ql = cv.items.find((it) => it.kind === "notice" && it.via === "queue"), rec = cv.items.find((it) => it.kind === "notice" && it.via === "record");
+    ok(ql?.dup === true && JSON.stringify(rec?.hides) === JSON.stringify([ql.id]), `a notice queued before the cut pairs with its record after it (dup ${ql?.dup}, hides ${JSON.stringify(rec?.hides)})`);
+  }
+  {
+    // The documented order: a held message keeps its place, a line that sat
+    // between its fragments shows above it.
+    const cv = createConversation(); const b = build("cut-order.jsonl", [user("p0", 0), asst([{ type: "text", text: "first" }], 1, "mO"), qop("enqueue", "between", 2), asst([{ type: "text", text: "second" }], 3, "mO", { stop: "end_turn" })]);
+    readConversation(b.file, cv, { tailBytes: b.size - b.at(3) + 1 }); drain(b, cv);
+    ok(cv.items.map((it) => it.kind).join() === "user,queue,assistant" && cv.items[2].blocks.map((x) => x.text).join() === "first,second", `a message split around a queue line: one item after the line, both fragments (${cv.items.map((it) => it.kind)})`);
+  }
+
+  {
+    // A record repeated across the cut (same uuid): drawn once, as forward.
+    const dupRec = asst([{ type: "text", text: "said once" }], 1, "mDu", { stop: "end_turn" });
+    const b = build("cut-dup.jsonl", [user("p0", 0), dupRec, { type: "permission-mode", permissionMode: "plan", sessionId: SID }, { ...dupRec, timestamp: T(2) }, user("p1", 3)]);
+    const cv = tailFrom(b, 3); drain(b, cv);
+    const fw = createConversation(); readConversation(b.file, fw);
+    const said = (conv) => conv.items.filter((it) => it.kind === "assistant").flatMap((it) => it.blocks.map((x) => x.text)).join("|");
+    ok(said(cv) === said(fw) && said(cv) === "said once" && new Set(cv.items.map((it) => it.id)).size === cv.items.length, `a record repeated on both sides of the cut is drawn once (${said(cv)})`);
+    ok(cv.permissionMode === "plan" && cv.model === fw.model && cv.model, `settings read only by the backfill are kept (mode ${cv.permissionMode}, model ${cv.model})`);
+  }
+
+  {
+    // The same record in two chunks that are not neighbours: still drawn once.
+    const dupRec = asst([{ type: "text", text: "far dup" }], 1, "mFar", { stop: "end_turn" });
+    const recs = [user("p0", 0), dupRec];
+    for (let i = 0; i < 6; i++) recs.push(user(`filler ${i} ` + "f".repeat(300), 2));
+    recs.push({ ...dupRec, timestamp: T(3) });
+    for (let i = 0; i < 3; i++) recs.push(user(`tail ${i}`, 4));
+    const b = build("cut-far.jsonl", recs);
+    const cv = tailFrom(b, recs.length - 3);
+    let n = 0; while (cv.headEnd > 0 && n++ < 100) backfillConversation(b.file, cv, { chunkBytes: 400 });
+    const said = cv.items.filter((it) => it.kind === "assistant").flatMap((it) => it.blocks.map((x) => x.text)).join("|");
+    ok(said === "far dup" && n > 3, `a record repeated in two chunks with others between them is drawn once (${said}, ${n} chunks)`);
+  }
+  {
+    // call → result → the call's record again, cut before the repeat: the result stays on the call.
+    const call = asst([{ type: "tool_use", id: "tuR", name: "Bash", input: { command: "ls" } }], 1, "mR");
+    const b = build("cut-dupcall.jsonl", [user("p0", 0), call, result("tuR", "listing", 2), { ...call, timestamp: T(3) }, user("p1", 4)]);
+    const cv = tailFrom(b, 3); drain(b, cv);
+    const it = cv.items.find((x) => x.msgId === "mR");
+    ok(it?.blocks[0].result?.text === "listing" && cv.orphanResults === 0, `a call repeated after the cut keeps the result read before it (${it?.blocks[0].result?.text}, orphans ${cv.orphanResults})`);
+  }
+
+  {
+    // A replaced transcript (same contents, new file) after a partial backfill:
+    // the uuids the old head read do not hide the new file's records.
+    const recs = [user("p0", 0)];
+    for (let i = 0; i < 8; i++) recs.push(user(`r${i} ` + "r".repeat(300), 1));
+    const b = build("cut-replace.jsonl", recs);
+    const cv = tailFrom(b, recs.length - 2);
+    backfillConversation(b.file, cv, { chunkBytes: 400 });
+    writeFileSync(b.file + ".new", readFileSync(b.file)); renameSync(b.file + ".new", b.file); // a new inode
+    readConversation(b.file, cv, { tailBytes: 700 });
+    let n = 0; while (cv.headEnd > 0 && n++ < 100) backfillConversation(b.file, cv, { chunkBytes: 400 });
+    ok(cv.items.length === recs.length, `a transcript replaced after a partial backfill reads back whole (${cv.items.length} of ${recs.length})`);
+  }
+
+  // The last record is larger than the tail window: the tail holds nothing.
+  const e = build("cut-e.jsonl", [user("p0", 0), asst([{ type: "text", text: "a0" }], 1, "mG", { stop: "end_turn" }), user("big " + "x".repeat(6000), 2)]);
+  const ce = createConversation(); readConversation(e.file, ce, { tailBytes: 3000 });
+  ok(ce.items.length === 0 && ce.headEnd > 0 && conversationWire(ce, {}).firstOrd === null, "a record over the tail window: the tail read holds no item (no before= cursor for the client)");
+  backfillBefore(e.file, ce, Number.MAX_SAFE_INTEGER, 10, Date.now() + 5000, { chunkBytes: 4000 });
+  ok(ce.items.length === 3 && ce.items[2].text.startsWith("big ") && ce.headEnd === 0, `…the route reads back a page itself (backfillBefore to the end: ${ce.items.length} items)`);
+  {
+    // The request that read back ran out of budget before it found an item:
+    // the client polls after=0 — the items a later read finds must reach it.
+    const ce2 = createConversation(); readConversation(e.file, ce2, { tailBytes: 3000 });
+    backfillBefore(e.file, ce2, Number.MAX_SAFE_INTEGER, 10, 0, { chunkBytes: 4000 }); // one chunk only
+    const w = conversationWire(ce2, { after: 0 });
+    ok(ce2.items.length > 0 && w.items.length === ce2.items.length, `…items read back into an empty picture reach an after=0 poll (${w.items.length} of ${ce2.items.length})`);
+  }
+  readConversation(e.file, ce); appendFileSync(e.file, line(user("next", 3))); readConversation(e.file, ce);
+  ok(ce.items.length === 4 && ce.items[3].text === "next" && ce.items[3].ord > ce.items[2].ord, "…and a record appended after lands after them");
 }
 
 console.log("\n[validateDraftPatch / safeDraft]");

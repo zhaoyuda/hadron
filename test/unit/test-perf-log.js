@@ -17,6 +17,13 @@
  *     a non-negative ms, a tmux line when a call is forced slow; `hadron perf`
  *     prints the tables, --json carries the numbers, --since rejects garbage;
  *     doctor's perfLog status is ok; SIGTERM flushes the buffer
+ *   - browser samples (client/perf.js → POST /api/perf/client, kind "ui"):
+ *     validateClientPerf allowlists ev/view/agent/marks/scripts/items, drops an
+ *     event without a valid ev/ms, clamps nothing silently (out of range → dropped),
+ *     dates by `ago`; summarizePerf.ui = freeze stats + total, causes by mark
+ *     ("(nothing marked)" for the rest), worst 5, switch per view, chat load;
+ *     live: 401 without token, 400 on shape, lines land, `hadron perf` prints
+ *     the freeze section
  *
  * Run: node test/unit/test-perf-log.js
  */
@@ -27,7 +34,7 @@ import { tmpdir } from "os";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import WebSocket from "ws";
-import { createPerfLog, summarizePerf, parseSince, localDay, MAX_QUEUE } from "../../server/perf-log.js";
+import { createPerfLog, summarizePerf, parseSince, localDay, MAX_QUEUE, validateClientPerf, UI_MAX_EVENTS } from "../../server/perf-log.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = join(__dirname, "..", "..");
@@ -157,6 +164,44 @@ async function stopServer(signal = "SIGTERM") {
 let TOKEN = "";
 const H = () => ({ "Content-Type": "application/json", "x-hadron-token": TOKEN, Origin: BASE });
 const perfLines = () => (existsSync(PERF) ? readFileSync(PERF, "utf-8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
+console.log("[validateClientPerf]");
+{
+  const now = Date.parse("2026-11-15T12:00:00Z");
+  ok(validateClientPerf(null).error && validateClientPerf({ events: "x" }).error, "no events array → error");
+  ok(/at most/.test(validateClientPerf({ events: Array(UI_MAX_EVENTS + 1).fill({ ev: "freeze", ms: 1 }) }).error || ""), `more than ${UI_MAX_EVENTS} → error`);
+  const v = validateClientPerf({ events: [
+    { ev: "freeze", ms: 812.6, ago: 3000, view: "chat", agent: "astra-1", marks: ["chat items", "chat items", "<img onerror=x>", "bad\nline", "arbitrary secret words", "a".repeat(64)], scripts: ["chatApplyItems@chat.js", "https://h/?token=abc", "f@" + "0123456789abcdef".repeat(4) + ".js", "x y@app.js"], items: 3, extra: "dropped" },
+    { ev: "nope", ms: 1 }, { ev: "freeze", ms: -1 }, { ev: "freeze", ms: "5" }, { ev: "freeze", ms: 700_000 }, { ev: "switch", ms: NaN },
+    { ev: "switch", ms: 40, view: "bogus", agent: "0123456789abcdef".repeat(4), ago: 9e9 },
+  ] }, now, (id) => id === "astra-1");
+  ok(v.events.length === 2, `invalid ev / ms dropped whole (${v.events.length} kept)`);
+  const [f, sw] = v.events;
+  ok(f.ms === 813 && f.t === new Date(now - 3000).toISOString() && f.view === "chat" && f.agent === "astra-1" && f.items === 3 && !("extra" in f) && !("ago" in f), `freeze: ms rounded, dated by ago, allowlisted keys only (${JSON.stringify(f)})`);
+  ok(JSON.stringify(f.marks) === JSON.stringify(["chat items"]) && JSON.stringify(f.scripts) === JSON.stringify(["chatApplyItems@chat.js"]), `labels de-duplicated, marks outside the app's list and a URL / token-shaped / spaced script dropped (${JSON.stringify([f.marks, f.scripts])})`);
+  ok(sw.view === undefined && sw.agent === undefined && sw.t === new Date(now).toISOString(), "bad view / an agent that does not exist (a token-shaped id) dropped per field, out-of-range ago → now");
+}
+console.log("[summarizePerf: ui]");
+{
+  const dir = mkdtempSync(join(tmpdir(), "hadron-perf-"));
+  const now = Date.parse("2026-11-15T12:00:00Z");
+  const t = (s) => new Date(now - s * 1000).toISOString();
+  const L = [
+    { t: t(50), kind: "ui", ev: "freeze", ms: 300, marks: ["chat items"] },
+    { t: t(40), kind: "ui", ev: "freeze", ms: 2500, marks: ["switch", "chat items"], scripts: ["render@app.js"], view: "chat", agent: "a1" },
+    { t: t(30), kind: "ui", ev: "freeze", ms: 250 },
+    { t: t(20), kind: "ui", ev: "switch", ms: 120, view: "chat" }, { t: t(19), kind: "ui", ev: "switch", ms: 80, view: "chat" }, { t: t(18), kind: "ui", ev: "switch", ms: 30, view: "terminal" },
+    { t: t(10), kind: "ui", ev: "chatload", ms: 400, items: 200 },
+  ];
+  writeFileSync(join(dir, "perf.jsonl"), L.map((o) => JSON.stringify(o)).join("\n") + "\n");
+  const ui = summarizePerf({ dir, sinceMs: 3600_000, now }).ui;
+  ok(ui.freezes.n === 3 && ui.freezes.totalMs === 3050 && ui.freezes.max === 2500, `freeze stats + total (${JSON.stringify(ui.freezes)})`);
+  ok(ui.causes[0].label === "chat items" && ui.causes[0].n === 2 && ui.causes[0].ms === 2800 && ui.causes.some((c) => c.label === "script render@app.js") && ui.causes.some((c) => c.label === "(nothing marked)" && c.n === 1), `causes ranked by frozen ms, scripts prefixed, the unmarked counted (${JSON.stringify(ui.causes)})`);
+  ok(ui.worst[0].ms === 2500 && ui.worst[0].agent === "a1" && ui.worst[0].view === "chat" && ui.worst.length === 3, "worst freezes first, with view + agent");
+  ok(ui.switches[0].view === "chat" && ui.switches[0].n === 2 && ui.switches[1].view === "terminal", "switch latency per view, by count");
+  ok(ui.chatload.n === 1 && ui.chatload.max === 400, "chat load stats");
+  rmSync(dir, { recursive: true, force: true });
+}
+
 const cli = (...args) => spawnSync("node", [CLI, ...args], { cwd: WS, env: { ...process.env, HADRON_PORT: String(PORT), HADRON_TOKEN: TOKEN }, encoding: "utf-8", timeout: 30000 });
 
 try {
@@ -210,6 +255,24 @@ try {
   let dj = null; try { dj = JSON.parse(d.stdout); } catch {}
   ok(dj && dj.doctor && dj.doctor.perfLog && dj.doctor.perfLog.ok === true && dj.doctor.perfLog.lines > 0, `doctor payload perfLog ok with lines (${JSON.stringify(dj && dj.doctor && dj.doctor.perfLog)})`);
   ok(!dj.local.some((f) => /perf log/.test(f.message)), "no perf-log doctor row while it is written");
+
+  console.log("[browser samples → ui lines]");
+  let u = await fetch(`${BASE}/api/perf/client`, { method: "POST", headers: { "Content-Type": "application/json", Origin: BASE }, body: JSON.stringify({ events: [{ ev: "freeze", ms: 900 }] }) });
+  ok(u.status === 401, `POST /api/perf/client without the token → 401 (${u.status})`);
+  u = await fetch(`${BASE}/api/perf/client`, { method: "POST", headers: H(), body: JSON.stringify({ events: {} }) });
+  ok(u.status === 400, `events not an array → 400 (${u.status})`);
+  u = await fetch(`${BASE}/api/perf/client`, { method: "POST", headers: H(), body: JSON.stringify({ events: [
+    { ev: "freeze", ms: 1234, ago: 2000, view: "chat", agent: id, marks: ["chat items"], scripts: ["chatApplyItems@chat.js"] },
+    { ev: "switch", ms: 95, view: "terminal", agent: id }, { ev: "chatload", ms: 310, items: 12 }, { ev: "nope", ms: 1 },
+  ] }) });
+  ok(u.status === 200 && (await u.json()).recorded === 3, "three valid events recorded, the fourth dropped");
+  await sleep(1500);
+  const uiLines = perfLines().filter((l) => l.kind === "ui");
+  ok(uiLines.length === 3 && uiLines.some((l) => l.ev === "freeze" && l.ms === 1234 && l.agent === id && l.marks[0] === "chat items"), `ui lines in perf.jsonl (${JSON.stringify(uiLines[0])})`);
+  p = cli("perf");
+  ok(/page freezes \(main thread blocked ≥ 200 ms\): 1, 1\.2 s frozen in all/.test(p.stdout) && /what the page was doing when it froze\n[^\n]*\n\s+chat items\s+1\s+1234/.test(p.stdout), "hadron perf: freeze count, total, causes table");
+  ok(/worst freezes\n[^\n]*\n\s+\d{4}-\d\d-\d\d [\d:]+\s+1234\s+chat\s+\S+\s+chat items, chatApplyItems@chat\.js/.test(p.stdout), "worst freezes row with view, agent, marks + scripts");
+  ok(/agent switch → next frame \(ms\)\n[^\n]*\n\s+terminal\s+1\s+95/.test(p.stdout) && /chat opened → first items drawn \(ms\)\n[^\n]*\n\s+all chats\s+1\s+310/.test(p.stdout), "switch + chat load tables");
 
   console.log("[slow tmux call → tmux line]");
   // Freeze the private tmux server: the detector's list-panes (2-s timeout) is

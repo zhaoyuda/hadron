@@ -24,12 +24,12 @@ import { transcriptPath, readTranscriptSummary, transcriptWire, CONTEXT_WINDOW, 
 import { warnOnce, initServerLog, serverLogStatus } from "./log.js";
 import { parseDialog } from "./dialog.js";
 import { createTmuxHealth, sendNtfy, readNtfyTopic } from "./tmux-health.js";
-import { createPerfLog } from "./perf-log.js";
+import { createPerfLog, validateClientPerf } from "./perf-log.js";
 import { gitChanges, gitDiffFile } from "./changes.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { readQuota } from "./quota.js";
 import { validateCheckpoint, safeCheckpoint, verifyHookClaim, applyHookClaim } from "./checkpoint.js";
-import { createConversation, readConversation, conversationWire, conversationIdFor, validateDraftPatch, safeDraft, draftEmpty, PAGE_MAX, MAX_LINE } from "./conversation.js";
+import { createConversation, readConversation, backfillBefore, conversationWire, conversationIdFor, validateDraftPatch, safeDraft, draftEmpty, PAGE_MAX, PAGE_DEFAULT, MAX_LINE } from "./conversation.js";
 import { validateEntry as validateOutboxEntry, safeOutbox, pruneOutbox, makeRoom as outboxMakeRoom, withPaneLock, outboxWire, entryStale as outboxEntryStale, entryReady as outboxEntryReady, recentlyHanded as outboxRecentlyHanded, switchable as outboxSwitchable, switchBlock as outboxSwitchBlock, heldBehind as outboxHeldBehind, SWITCH_BLOCKS as OUTBOX_SWITCH_BLOCKS, OUTBOX_MAX } from "./outbox.js";
 import {
   listAnnotations, createAnnotation, updateAnnotation, deleteAnnotation,
@@ -932,10 +932,10 @@ app.get("/api/doctor", async (req, res) => {
     // The chat view's picture of this agent is a floor when records were
     // skipped or tool results found no owner (silent-failure rule).
     const cc = conversationCaches.get(session.id);
-    if (cc && (cc.conv.skipped || (cc.conv.orphanResults && !cc.conv.evicted))) {
+    if (cc && (cc.conv.skipped || (cc.conv.orphanResults && !cc.conv.evicted && !cc.conv.headCut))) {
       const parts = [];
       if (cc.conv.skipped) parts.push(`${cc.conv.skipped} transcript record(s) over ${MAX_LINE >> 20} MB skipped`);
-      if (cc.conv.orphanResults && !cc.conv.evicted) parts.push(`${cc.conv.orphanResults} tool result(s) unpaired`);
+      if (cc.conv.orphanResults && !cc.conv.evicted && !cc.conv.headCut) parts.push(`${cc.conv.orphanResults} tool result(s) unpaired`);
       finding.message += ` · chat view is a floor: ${parts.join(", ")}`;
       if (finding.level !== "red") finding.level = "yellow";
     }
@@ -1111,7 +1111,9 @@ app.get("/api/sessions/:id/files", (req, res) => {
 // never held and re-pages from the tail — with a counter restarting at 0 the
 // rebuild was invisible and the client's cursor outran the new revs (items
 // written while it was away were never delivered).
-const CONVERSATION_IDLE_MS = Number(process.env.HADRON_CONVERSATION_IDLE_MS) > 0 ? Number(process.env.HADRON_CONVERSATION_IDLE_MS) : 10 * 60 * 1000; // env: tests only
+// Tests only: a small tail / backfill chunk so a few-KB transcript exercises the tail-first path.
+const CONVERSATION_TAIL_OPTS = Number(process.env.HADRON_CONVERSATION_TAIL_BYTES) > 0 ? { tailBytes: Number(process.env.HADRON_CONVERSATION_TAIL_BYTES), chunkBytes: Number(process.env.HADRON_CONVERSATION_TAIL_BYTES) } : {};
+const CONVERSATION_IDLE_MS = Number(process.env.HADRON_CONVERSATION_IDLE_MS) > 0 ? Number(process.env.HADRON_CONVERSATION_IDLE_MS) : 2 * 60 * 60 * 1000; // env: tests only. Long: a rebuild is what makes a switch slow
 const CONVERSATION_READ_BUDGET_MS = 250;
 const CONVERSATION_CACHE_MAX = 8; // conversations held at once (each up to MAX_ITEMS items — one per agent clicked through, not per agent)
 const conversationCaches = new Map(); // agent id → { file, conv, usedAt }
@@ -1140,16 +1142,16 @@ function conversationFor(s) {
   const deadline = Date.now() + CONVERSATION_READ_BUDGET_MS;
   do {
     const before = c.conv.offset, gen = c.conv.generation;
-    readable = readConversation(file, c.conv);
+    readable = readConversation(file, c.conv, CONVERSATION_TAIL_OPTS);
     if (c.conv.offset === before && c.conv.generation === gen) break;
   } while (readable && !c.conv.complete && Date.now() < deadline);
   if (c.conv.skipped && c.conv.skipped !== c.warnedSkipped) { c.warnedSkipped = c.conv.skipped; warnOnce(`conversation-skipped:${s.id}:${c.conv.skipped}`, `[${s.id}] ${c.conv.skipped} transcript record(s) longer than ${MAX_LINE >> 20} MB skipped — the chat view is a floor (\`hadron doctor\` has the row)`); }
-  if (c.conv.orphanResults && !c.conv.evicted && c.conv.orphanResults !== c.warnedOrphans) { c.warnedOrphans = c.conv.orphanResults; warnOnce(`conversation-orphan:${s.id}:${c.conv.orphanResults}`, `[${s.id}] ${c.conv.orphanResults} tool result(s) found no tool_use in the transcript — those blocks show no result (\`hadron doctor\` has the row)`); }
+  if (c.conv.orphanResults && !c.conv.evicted && !c.conv.headCut && c.conv.orphanResults !== c.warnedOrphans) { c.warnedOrphans = c.conv.orphanResults; warnOnce(`conversation-orphan:${s.id}:${c.conv.orphanResults}`, `[${s.id}] ${c.conv.orphanResults} tool result(s) found no tool_use in the transcript — those blocks show no result (\`hadron doctor\` has the row)`); }
   // A missing file is claude before its first turn — an empty conversation, not a fault.
   const missing = !readable && c.conv.items.length === 0 && (() => { try { statSync(file); return false; } catch (e) { return e.code === "ENOENT"; } })();
   if (!readable && !missing && !c.warnedUnreadable) { c.warnedUnreadable = true; warnOnce(`conversation-unreadable:${s.id}`, `[${s.id}] transcript unreadable while the chat view is open — the cached picture is served as stale`); }
   else if (readable) c.warnedUnreadable = false;
-  return { conv: c.conv, conversationId: conversationIdFor(sid), readable, missing };
+  return { conv: c.conv, file, conversationId: conversationIdFor(sid), readable, missing };
 }
 const conversationSweep = setInterval(() => {
   const cut = Date.now() - CONVERSATION_IDLE_MS;
@@ -1169,6 +1171,13 @@ app.get("/api/sessions/:id/conversation", (req, res) => {
   // No picture to serve: an empty-state answer (no rev, no generation — the client keeps polling the tail).
   if (r.missing) return res.json({ conversationId: r.conversationId, reason: "no transcript yet", items: [] });
   if (!r.readable && r.conv.items.length === 0) return res.json({ conversationId: r.conversationId, reason: "transcript unreadable", items: [] });
+  // Scrolling up past what a tail-first read holds: read the head backwards
+  // (one budget per request; `more` stays set while history is left on disk).
+  // A tail that held nothing to draw (one record larger than the tail window,
+  // or only record types the chat ignores): read back a page now — the client
+  // has no item to ask "before" of.
+  if (r.readable && r.conv.items.length === 0 && r.conv.headEnd > 0) backfillBefore(r.file, r.conv, Number.MAX_SAFE_INTEGER, limit || PAGE_DEFAULT, Date.now() + CONVERSATION_READ_BUDGET_MS, CONVERSATION_TAIL_OPTS);
+  if (Number.isInteger(before) && r.readable && r.conv.headEnd > 0) backfillBefore(r.file, r.conv, before, limit || PAGE_DEFAULT, Date.now() + CONVERSATION_READ_BUDGET_MS, CONVERSATION_TAIL_OPTS);
   // `readable:false` = the transcript could not be read on this request and
   // the page is the cached picture (stale) — distinct from complete:false
   // ("ask again"), which would otherwise poll forever.
@@ -1454,6 +1463,16 @@ app.post("/api/sessions/:id/adopt", (req, res) => {
 // The agent's own handoff checkpoint (`hadron checkpoint --goal … --next …`).
 // Whole-object replace; the CLI merges over the current one client-side. An
 // all-empty body clears it. `at` is the server clock.
+// Browser-side samples (client/perf.js): main-thread freezes, agent-switch
+// and chat-load times, into the same perf log (`hadron perf`). Token-gated
+// like every POST; validateClientPerf allowlists every field.
+app.post("/api/perf/client", (req, res) => {
+  const v = validateClientPerf(req.body, Date.now(), (id) => { const x = sessions.get(id); return !!x && !x.archived; });
+  if (v.error) return res.status(400).json({ error: v.error });
+  for (const e of v.events) perfLog.record("ui", e);
+  res.json({ ok: true, recorded: v.events.length });
+});
+
 app.post("/api/sessions/:id/checkpoint", async (req, res) => {
   const { id } = req.params;
   const session = sessions.get(id);
