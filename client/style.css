@@ -840,6 +840,12 @@ html, body {
   outline: none;
 }
 .add-pop-input:focus { border-color: var(--blue); }
+.add-pop-backend { display: flex; gap: 4px; margin-top: 6px; }
+.add-pop-backend button {
+  flex: 1; padding: 3px 0; font-size: 11px; cursor: pointer;
+  background: var(--bg); color: var(--text2); border: 1px solid var(--border); border-radius: 4px;
+}
+.add-pop-backend button.on { border-color: var(--blue); color: var(--white); }
 .add-pop-hint {
   font-size: 9px;
   color: var(--text3);

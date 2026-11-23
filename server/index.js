@@ -11,7 +11,7 @@ import { connect as netConnect } from "net";
 import { networkInterfaces, hostname, tmpdir, homedir } from "os";
 import { URL } from "url";
 import { randomBytes, createHash } from "crypto";
-import { StateDetector, detectState, isShellCmd, POLL_INTERVAL_MS, raiseAttention, ackByTurn, setProbeObserver } from "./state-detector.js";
+import { StateDetector, detectState, isShellCmd, POLL_INTERVAL_MS, raiseAttention, ackByTurn, setProbeObserver, CURSOR_UNKNOWN_POLLS } from "./state-detector.js";
 import { probeClaudeCaps, RuntimeTracker, performResume, BOOT, isClaudeCmd, decideResume, verifyAdoption, UUID_RE, PINNED_CONFIDENCE, sessionFileExists, claudeProjectDir } from "./resume.js";
 import { randomUUID } from "crypto";
 import { loadAgents, loadAgent, saveAgent, saveAgentLocked, archiveAgent, deleteAgent, initWorkspace, getWorkspaceDir, appendAgentField, removeAgentArtifact, isSelfWrite } from "./agent-store.js";
@@ -23,6 +23,7 @@ import { collectProvenance } from "./provenance.js";
 import { transcriptPath, readTranscriptSummary, transcriptWire, CONTEXT_WINDOW, readTranscriptFiles, filesWire, FILES_CHUNK_BYTES, FILES_MAX_LINE, FILES_CORE } from "./transcript.js";
 import { warnOnce, initServerLog, serverLogStatus } from "./log.js";
 import { parseDialog } from "./dialog.js";
+import { detectCursorState, resolveCursorAgent, cursorPasteHold } from "./cursor-state.js";
 import { createTmuxHealth, sendNtfy, readNtfyTopic } from "./tmux-health.js";
 import { createPerfLog, validateClientPerf } from "./perf-log.js";
 import { gitChanges, gitDiffFile } from "./changes.js";
@@ -367,8 +368,15 @@ const sessions = new Map();
 // already requires workspace write access; the API only ever accepts a NAME.
 // `kind: "claude"` marks a wrapper that IS Claude Code underneath, opting it
 // into the claude-specific autostart path (--session-id injection / resume).
+// `kind: "cursor"` is cursor-agent (Cursor's CLI): the record gets
+// `backend: "cursor"`, which picks its screen reader and turns off the
+// claude-only machinery (session identity, auto-resume, /model pickers). Its
+// path is resolved once at boot — a launchd-started server on macOS has no
+// ~/.local/bin on PATH, where cursor-agent installs itself.
+const CURSOR_AGENT_PATH = resolveCursorAgent();
 const BUILTIN_LAUNCHERS = {
   claude: { argv: ["claude"], kind: "claude" },
+  cursor: { argv: [CURSOR_AGENT_PATH || "cursor-agent"], kind: "cursor" },
   codex: { argv: ["codex"] },
   shell: null,
 };
@@ -381,7 +389,7 @@ function getLaunchers() {
       if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,31}$/.test(name)) continue;
       if (!def || !Array.isArray(def.argv) || def.argv.length === 0) continue;
       if (!def.argv.every((a) => typeof a === "string" && a.length > 0)) continue;
-      table[name] = { argv: def.argv, kind: def.kind === "claude" ? "claude" : undefined };
+      table[name] = { argv: def.argv, kind: def.kind === "claude" || def.kind === "cursor" ? def.kind : undefined };
     }
   } catch {}
   return table;
@@ -430,7 +438,12 @@ function autostartAgent(id, launchCommand, task) {
       }
       await tmuxAsync(["send-keys", "-t", tmuxName, "--", cmdLine, "Enter"]);
       const clean = task ? sanitizeForKeystrokes(task) : "";
-      if (clean) {
+      if (clean && launcher.kind === "cursor") {
+        // cursor-agent: never typed blind. Wait for its composer to be on screen
+        // and empty (a trust or approval box takes Enter as an answer), then
+        // paste under the pane lock like the composer does.
+        await cursorAutostartTask(id, tmuxName, String(task).trim());
+      } else if (clean) {
         await new Promise((r) => setTimeout(r, 4000)); // let the agent boot
         await tmuxAsync(["send-keys", "-t", tmuxName, "-l", "--", clean]);
         await new Promise((r) => setTimeout(r, 300));
@@ -446,6 +459,32 @@ function autostartAgent(id, launchCommand, task) {
       launchLocks.delete(id);
     }
   })();
+}
+
+// The task goes in once cursor-agent's composer is up and empty — up to two
+// minutes, so a trust box the operator answers in the terminal still gets it.
+// Re-read under the pane lock right before the paste; never ready → said once.
+const CURSOR_AUTOSTART_WAIT_MS = Number(process.env.HADRON_CURSOR_AUTOSTART_WAIT_MS) || 120000;
+async function cursorAutostartTask(id, tmuxName, task) {
+  const shellCheck = paneShellCheck(tmuxName);
+  const until = Date.now() + CURSOR_AUTOSTART_WAIT_MS;
+  let booted = false;
+  while (Date.now() < until && sessions.has(id)) {
+    await new Promise((r) => setTimeout(r, 1000));
+    const sent = await withPaneLock(id, async () => {
+      // Until the pane command leaves the shell, a "→" on screen is not cursor-agent's.
+      if (shellCheck()) return false;
+      let lines;
+      try { lines = (await tmuxAsync(["capture-pane", "-t", tmuxName, "-p"], { timeout: 2000 })).split("\n"); } catch { return false; }
+      booted = true;
+      const snap = detectCursorState(lines);
+      if (snap.state !== null || cursorPasteHold(snap)) return false;
+      await deliverToPane(tmuxName, task, true, shellCheck);
+      return true;
+    });
+    if (sent) { monitors.get(id)?.wake(); return; }
+  }
+  warnOnce(`cursor-autostart:${id}`, `[autostart] ${id}: cursor-agent ${booted ? "never showed an empty input box" : "did not start"} within ${Math.round(CURSOR_AUTOSTART_WAIT_MS / 1000)} s — the task was not typed; send it from the chat or the terminal`);
 }
 
 // Stamp Hadron's own port + token onto a freshly created tmux session so the
@@ -743,11 +782,25 @@ function resolveClaudeInPath(pathStr) {
   return null;
 }
 
+// A cursor agent's row: no resume to promise (n/a), yellow when Hadron cannot
+// see it — the pane runs node with no cursor-agent under it, or cursor-agent
+// shows a screen the reader does not know (state held meanwhile).
+function classifyCursorHealth(session, now) {
+  if (session.cursorProc === false) return { level: "yellow", message: "cursor agent — the pane runs node but no cursor-agent process was found under it; state is not tracked" };
+  const since = session.cursorUnknownSince ? Date.parse(session.cursorUnknownSince) : NaN;
+  if (session.cursorProc && since && now - since >= CURSOR_UNKNOWN_POLLS * POLL_INTERVAL_MS) {
+    return { level: "yellow", message: `cursor agent — cursor-agent shows a screen Hadron cannot read (since ${session.cursorUnknownSince}); state is held and nothing is typed into it` };
+  }
+  if (!CURSOR_AGENT_PATH && session.launchCommand === "cursor") return { level: "yellow", message: "cursor agent — cursor-agent was not found on PATH or in ~/.local/bin when the server started" };
+  return { level: "na", message: session.cursorProc ? "cursor agent — no auto-resume yet" : "cursor agent — cursor-agent not running" };
+}
+
 // The classifier — the row-classification table from the reliability plan. Order
 // matters: earlier rows win. decideResume() is only a cross-check on green rows.
 function classifyAgentHealth(session, { paneExists, paneCmd, cwdShared, now, registry = null, oldClaude = null, tmuxless = null }) {
   const rt = session.runtime || {};
   if (!paneExists) return { level: "red", message: "no pane — tmux session missing" };
+  if (session.backend === "cursor") return classifyCursorHealth(session, now);
   const looksClaude = /^claude/i.test((paneCmd || "").trim());
   if (looksClaude) {
     if (rt.observedRuntime !== "claude") {
@@ -1728,6 +1781,10 @@ app.post("/api/sessions", async (req, res) => {
   // A fresh create may seed cwd / initial arrays; a respawn keeps existing ones unless overridden.
   if (cwdResult.cwd !== undefined) session.cwd = cwdResult.cwd;
   if (launchCommand) session.launchCommand = launchCommand;
+  if (launchers[launchCommand]?.kind === "cursor") session.backend = "cursor"; else delete session.backend;
+  // Respawned on the other backend: the old conversation's identity, draft and
+  // queued messages belong to that conversation, not this one.
+  if (existing && (existing.backend || "claude") !== (session.backend || "claude")) { delete session.runtime; delete session.draft; delete session.outbox; }
   if (!existing) {
     if (seedArtifacts) session.artifacts = seedArtifacts;
     if (Array.isArray(relatedAgents)) session.relatedAgents = relatedAgents;
@@ -1889,6 +1946,7 @@ app.post("/api/sessions/:id/interrupt", async (req, res) => {
   if (!isValidId(id)) return res.status(400).json({ error: "invalid id" });
   const s = sessions.get(id);
   if (!s) return res.status(404).json({ error: "session not found" });
+  if (s.backend === "cursor") return res.status(409).json({ error: "stop is not supported for cursor agents yet — press Ctrl+C once in the terminal" });
   if (s.state !== "working") return res.status(409).json({ error: `nothing to stop — the agent is ${s.state || "unknown"}`, state: s.state || null });
   const tmuxName = tmuxSessionName(id);
   const shell = paneShellCheck(tmuxName)();
@@ -2044,6 +2102,7 @@ app.post("/api/sessions/:id/message", async (req, res) => {
     const v = validateOutboxEntry({ text, requestId, deviceId, idleOnly: when === "idle" });
     if (v.error) return res.status(400).json({ error: v.error });
     const s = sessions.get(id);
+    if (when === "idle" && s.backend === "cursor") return res.status(400).json({ error: "model and effort switches are claude-only — cursor agents take /model in their terminal" });
     // The live list is mutated in place (entries are shared with in-flight
     // deliveries) — it was validated at boot; only new entries are added here.
     if (!Array.isArray(s.outbox)) s.outbox = [];
@@ -2098,10 +2157,22 @@ app.post("/api/sessions/:id/message", async (req, res) => {
   }
   try {
     // Serialised with the outbox: two deliveries never interleave paste + Enter.
-    await withPaneLock(id, () => deliverToPane(tmuxName, text, enter, force ? null : shellCheck));
+    await withPaneLock(id, async () => {
+      // cursor-agent takes Enter on its approval box as "Run (once)": never
+      // paste into anything but its empty composer. force means "paste into a
+      // bare shell" only — it never answers a cursor dialog.
+      const cursor = sessions.get(id)?.backend === "cursor";
+      if (cursor && !(force && shellCheck())) {
+        const hold = cursorPasteHold(detectCursorState((await tmuxAsync(["capture-pane", "-t", tmuxName, "-p"], { timeout: 2000 })).split("\n")));
+        if (hold) throw Object.assign(new Error(`${hold} — not sent`), { cursorHold: true });
+      }
+      await deliverToPane(tmuxName, text, enter, force ? null : shellCheck, cursor && !(force && shellCheck()) ? () => cursorEnterHold(tmuxName) : null);
+    });
     monitors.get(id)?.wake();   // input landed: capture at full rate again
   } catch (e) {
     if (e.shell) return res.status(409).json({ error: `agent exited while the message was in flight — pane is now a ${e.shell} prompt; nothing pasted`, shell: e.shell });
+    if (e.cursorHold) return res.status(409).json({ error: e.message });
+    if (e.enterHeld) return res.status(409).json({ error: e.message, pasted: true });
     return res.status(500).json({ error: e.message });
   }
   res.json({ ok: true, bytes: Buffer.byteLength(text) });
@@ -2220,7 +2291,10 @@ async function deliverOutboxEntry(s, entry, { auto = false } = {}) {
     const idx = s.outbox.indexOf(entry);
     const cur = currentConversationId(s);
     const behind = auto && idx > 0 && outboxHeldBehind(s, entry, s.outbox.slice(0, idx), (e) => outboxEntryStale(e, cur));
-    if (auto || entry.idleOnly) {
+    const cursor = s.backend === "cursor";
+    // cursor-agent is re-read on EVERY path, "Send now" included: Enter on its
+    // approval box answers it (runs the command) and the text is lost.
+    if (auto || entry.idleOnly || cursor) {
       // The detector's verdict is a tick behind and a quiet pane is captured only
       // every 5th tick: read the screen now. A dialog holds the entry — and so
       // does a tmux that does not answer: an unknown screen is never pasted into
@@ -2235,15 +2309,19 @@ async function deliverOutboxEntry(s, entry, { auto = false } = {}) {
         warnOnce(`outbox-capture:${s.id}`, `[outbox] ${s.id}: the pane could not be captured (${e.message}) — queued messages are held until it can; \`hadron doctor\` has the note`);
       }
       if (lines) { delete s.outboxCaptureFails; delete s.outboxCaptureRetryAt; }
-      if (!lines || idleHold || behind || parseDialog(lines) || (entry.idleOnly && (!(await atClaudePrompt(tmuxName)) || await turnOnScreen(tmuxName, lines)))) {
+      const cursorHold = cursor && lines ? cursorPasteHold(detectCursorState(lines)) : null;
+      if (!lines || idleHold || behind || (cursor ? cursorHold : parseDialog(lines)) || (!cursor && entry.idleOnly && (!(await atClaudePrompt(tmuxName)) || await turnOnScreen(tmuxName, lines)))) {
         entry.state = "queued";
+        // A cursor screen can hold for long (a draft, an unknown screen) while the
+        // detector reads idle: the dispatcher asks again in 2 s, not every second.
+        if (cursorHold) s.outboxHoldRetryAt = Date.now() + 2000;
         // Not persisted = not queued (same rule as the non-dispatchable branch):
         // the caller decides what a failed save means on its path.
         try { await saveAgentLocked(s); } catch (e) { entry.saveError = e; }
         return entry;
       }
     }
-    await deliverToPane(tmuxName, entry.text, true, shellCheck);
+    await deliverToPane(tmuxName, entry.text, true, shellCheck, cursor ? () => cursorEnterHold(tmuxName) : null);
     monitors.get(s.id)?.wake();
     entry.state = "handed"; entry.handedAt = new Date().toISOString();
     // Pasted into a working pane: claude takes it with its next step and
@@ -2251,7 +2329,7 @@ async function deliverOutboxEntry(s, entry, { auto = false } = {}) {
     // the wait by this.
     entry.handedWhile = s.state === "working" ? "working" : "prompt";
   } catch (e) {
-    if (e.pasted) { entry.state = "uncertain"; entry.error = "the text was pasted but Enter may not have landed — the terminal (Primary) shows whether it went"; }
+    if (e.pasted) { entry.state = "uncertain"; entry.error = e.enterHeld ? e.message : "the text was pasted but Enter may not have landed — the terminal (Primary) shows whether it went"; }
     else { entry.state = "failed"; entry.error = e.shell ? `agent is not running — its pane is at a ${e.shell} prompt` : e.message; }
   }
   try { await saveAgentLocked(s); } catch (e) { console.error(`[outbox] ${s.id}: could not save: ${e.message}`); }
@@ -2279,6 +2357,7 @@ function startOutboxDispatcher() {
       if (!next || !outboxEntryReady(s, monitors.get(s.id)?.verdictSeen, next)) continue;
       if (next.idleOnly && outboxRecentlyHanded(s.outbox)) continue;
       if (s.outboxCaptureRetryAt && Date.now() < s.outboxCaptureRetryAt) continue; // capture failing: backed off
+      if (s.outboxHoldRetryAt && Date.now() < s.outboxHoldRetryAt) continue;       // cursor screen held it: backed off
       next.state = "sending";
       withPaneLock(s.id, () => deliverOutboxEntry(s, next, { auto: true }))
         .then((e) => { if (e?.saveError) { console.error(`[outbox] ${s.id}: held entry not saved: ${e.saveError.message}`); delete e.saveError; } }) // still queued in memory and on disk from before — retried next tick
@@ -2309,7 +2388,7 @@ app.post("/api/sessions/:id/outbox/:entryId/send", async (req, res) => {
   if (outboxEntryStale(entry, currentConversationId(s))) return res.status(409).json({ error: "this message was written for an earlier conversation — take it back into the composer first", entry: { ...entry, stale: true } });
   entry.state = "sending";
   const done = await withPaneLock(id, () => deliverOutboxEntry(s, entry));
-  if (done.state === "queued") { delete done.saveError; return res.status(202).json({ ok: true, queued: true, entry: done, error: "a model/effort switch goes only at claude's prompt — it is still queued" }); }
+  if (done.state === "queued") { delete done.saveError; return res.status(202).json({ ok: true, queued: true, entry: done, error: s.backend === "cursor" ? "cursor-agent's screen is not its empty input box (an approval, a draft, or a screen Hadron cannot read) — it is still queued" : "a model/effort switch goes only at claude's prompt — it is still queued" }); }
   if (done.state !== "handed") return res.status(409).json({ error: done.error, entry: done });
   res.json({ ok: true, entry: done });
 });
@@ -2335,7 +2414,16 @@ app.delete("/api/sessions/:id/outbox/:entryId", async (req, res) => {
 // guard: optional () => shellName|null, consulted after the buffer is loaded
 // and immediately before the paste — the last possible moment to notice the
 // target became a shell. Throws { shell } and reclaims the buffer.
-async function deliverToPane(tmuxName, text, enter = true, guard = null) {
+// cursor-agent: the screen right before Enter. An approval box that came up
+// between the paste and the Enter would take the Enter as "Run (once)".
+async function cursorEnterHold(tmuxName) {
+  let snap;
+  try { snap = detectCursorState((await tmuxAsync(["capture-pane", "-t", tmuxName, "-p"], { timeout: 2000 })).split("\n")); }
+  catch { return "the pane could not be read"; }
+  return snap.state === "blocked" || snap.state === "unknown" ? cursorPasteHold(snap) : null;
+}
+
+async function deliverToPane(tmuxName, text, enter = true, guard = null, beforeEnter = null) {
   const dir = mkdtempSync(join(tmpdir(), "hadron-msg-"));
   const file = join(dir, "text");
   const buf = `hadron-msg-${Date.now()}-${randomBytes(4).toString("hex")}`;
@@ -2355,6 +2443,8 @@ async function deliverToPane(tmuxName, text, enter = true, guard = null) {
     await new Promise((r) => setTimeout(r, 250));
     // The text is in claude's input box from here on: a failure now is NOT
     // "not delivered" — a retry would paste it a second time, concatenated.
+    const held = beforeEnter ? await beforeEnter() : null;
+    if (held) throw Object.assign(new Error(`the text was pasted but Enter was not sent: ${held} — Primary shows where the text is`), { pasted: true, enterHeld: true });
     try { await tmuxAsync(["send-keys", "-t", tmuxName, "Enter"]); } catch (e) { throw Object.assign(e, { pasted: true }); }
   }
 }
@@ -2399,6 +2489,9 @@ function annotationAgent(req, res) {
 // The dispatch is ONE literal trigger line — comment content never crosses tmux
 // send-keys (it lives in the sidecars; the agent pulls it via `hadron annotations ls`).
 async function dispatchReviewTrigger(id) {
+  // /hadron-review is a claude skill, and an Enter typed blind into cursor-agent
+  // could answer its approval box: the comments stay saved, nothing is typed.
+  if (sessions.get(id)?.backend === "cursor") throw new Error("cursor agents have no /hadron-review — the comments are saved; tell the agent to read them");
   const tmuxName = tmuxSessionName(id);
   await tmuxAsync(["send-keys", "-t", tmuxName, "-l", "--", "/hadron-review"]);
   await tmuxAsync(["send-keys", "-t", tmuxName, "Enter"]);
@@ -3387,6 +3480,8 @@ function startMonitor(sessionId, { ensured = null } = {}) {
   detector.onAttention = (s) => saveAgentLocked(s).catch((e) => console.error(`[attention] ${sessionId}: ${e.message}`));
   monitors.set(sessionId, detector);
 
+  // cursor agents: no claude session identity, no auto-resume (yet) — no tracker.
+  if (session.backend === "cursor") { console.log(`Monitor started for session: ${sessionId} (cursor)`); return; }
   const tracker = new RuntimeTracker(session, {
     save: saveRuntimeCheckpoint,
     // Shared-cwd agents can't be told apart by transcript scraping (the jsonl

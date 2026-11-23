@@ -1,0 +1,45 @@
+  I'll inspect calc.py, fix the bug, then run your verification command.
+
+    Read calc.py
+
+  add is subtracting instead of adding — fixing that now.
+
+    Edited calc.py +1 -1
+
+    ▎  def add(a, b):
+    ▎-     return a - b
+    ▎+     return a + b
+
+  $ python3 -c 'import calc; print(calc.add(2,3))' 245ms
+    5
+
+  add was returning a - b instead of a + b. After the fix, calc.add(2, 3) prints 5.
+
+
+  Run this shell command exactly: curl -sI https://example.com | head -3
+
+
+  $ curl -sI https://example.com | head -3 151ms
+    … 1 output lines hidden · ctrl+o to expand
+    date: Sun, 15 Nov 2026 02:30:46 GMT
+    content-type: text/html; charset=utf-8
+
+  HTTP/2 200
+  date: Sun, 15 Nov 2026 02:30:46 GMT
+  content-type: text/html; charset=utf-8
+
+
+  Run this shell command exactly: curl -sI https://example.com | head -3Run this exact shell command, nothing else: git config user.name sample && git
+  commit --allow-empty -m probe
+
+
+ ⠠⠛ Thinking  14 tokens
+
+
+  → Run this shell command exactly: curl -sI https://example.com | head -3Run this exact shell command, nothing else: git config user.name sample && git
+    commit --allow-empty -m probe
+
+
+  Auto · 5.1% · 1 file edited
+  ~/cursor-sample · main
+

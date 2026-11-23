@@ -10,6 +10,7 @@
 import { parseDialog } from "./dialog.js";
 import { tmuxAsync, isTmuxTimeout } from "./tmux.js";
 import { warnOnce } from "./log.js";
+import { detectCursorState, CURSOR_CMD_RE, cursorCmdCandidate, cursorUnderPid, psTable } from "./cursor-state.js";
 
 // An answered dialog still on the same screen this long after the keystroke
 // is a dialog claude never took the answer for — answerable again.
@@ -186,6 +187,8 @@ export const livePollerCount = () => liveDetectors.size;
 // needs settleThreshold consecutive quiet polls), and a working agent redraws
 // its spinner every second anyway, so there is nothing to save there.
 export const QUIET_AFTER_POLLS = 3;
+// Captures of an unknown cursor screen before it is reported (startup frames are brief).
+export const CURSOR_UNKNOWN_POLLS = 15;
 export const CAPTURE_BACKOFF_POLLS = 5;
 
 // Chrome / status bar lines to strip before analysis
@@ -775,10 +778,12 @@ function _findToolName(lines, fromIdx) {
  *             settleThreshold (default 8), inconclusiveThreshold (2).
  * inputs: cmd, snap (from detectState), contentChanged, canTransition.
  */
-export function nextState(m, { cmd, snap, contentChanged, canTransition }) {
+export function nextState(m, { cmd, snap, contentChanged, canTransition, agent }) {
   const settleThreshold = m.settleThreshold ?? 8;
   const inconclusiveThreshold = m.inconclusiveThreshold ?? 2;
-  const isAgent = AGENT_PROCESS_RE.test(cmd);
+  // `agent` (cursor backend): the caller has already decided whether the agent
+  // process holds the pane — its pane command (`node` on macOS) proves nothing.
+  const isAgent = typeof agent === "boolean" ? agent : AGENT_PROCESS_RE.test(cmd);
   const isShell = SHELL_RE.test(cmd);
   const current = m.current;
   // A reason refresh counts only consecutive agent, main-screen blocked reads —
@@ -828,6 +833,9 @@ export function nextState(m, { cmd, snap, contentChanged, canTransition }) {
     if (current !== "idle" && canTransition) return { state: "idle" };
     return null;
   }
+  // A screen the backend's reader does not know (cursor): hold whatever we
+  // had — never guess working from it the way an inconclusive claude pane does.
+  if (snap.state === "unknown") { m.notWorking = 0; m.inconclusive = 0; m.blockedHits = 0; return null; }
   if (snap.state === "working") {
     // Stale-indicator guard: a thinking/streaming/compacting spinner can linger
     // above the prompt after a turn ends. Only those (snap.stale) need content-
@@ -921,6 +929,15 @@ export function ackByTurn(session, persist) {
   session.ackAt = new Date().toISOString();
   if (typeof persist === "function") persist(session);
   return true;
+}
+
+// Is a cursor-agent process under the pane? true / false, or null when it
+// could not be asked (tmux or ps failed) — the caller keeps its last answer.
+async function cursorLookup(paneTarget) {
+  const pid = (await tmuxAsync(["display-message", "-p", "-t", paneTarget, "#{pane_pid}"], { timeout: 2000 })).trim();
+  if (!/^\d+$/.test(pid)) return null;
+  const table = await psTable();
+  return table === null ? null : cursorUnderPid(table, pid);
 }
 
 export class StateDetector {
@@ -1065,8 +1082,9 @@ export class StateDetector {
       return;
     }
     if (this.disposed) return;
-    // All awaits are behind us: from here to the end of the poll is synchronous,
-    // so a detector disposed mid-poll never writes to its session.
+    // After the cursor process check (its own disposed check follows it) the
+    // rest of the poll is synchronous, so a detector disposed mid-poll never
+    // writes to its session.
 
     // Context meter (runtime-only, never persisted — saveAgent allowlists what
     // goes to disk): claude's own percentage while the pane shows it, else null
@@ -1075,13 +1093,18 @@ export class StateDetector {
     // While a tool child (bash, python3) is the foreground command of a working
     // agent the last reading stands — the meter is still on screen behind it
     // and the badge must not flip between sources every capture.
-    if (AGENT_PROCESS_RE.test(cmd)) this.session.contextPct = contextFromPane(rawLines)?.pct ?? null;
+    const isCursor = this.session.backend === "cursor";
+    const agentUp = isCursor ? await this._cursorProcess(cmd) : AGENT_PROCESS_RE.test(cmd);
+    if (this.disposed) return;
+    const snapNow = isCursor ? detectCursorState(rawLines, { altScreen }) : detectState(rawLines, { altScreen });
+    if (agentUp) this.session.contextPct = isCursor ? snapNow.footer?.contextPct ?? null : contextFromPane(rawLines)?.pct ?? null;
     else if (this.session.state !== "working") this.session.contextPct = null;
+    if (isCursor) this._cursorScreen(agentUp, snapNow);
 
     if (this.skipCount > 0) {
       this.skipCount--;
       if (this.skipCount === 0) {
-        this._applySnap(cmd, detectState(rawLines, { altScreen }), false);
+        this._applySnap(cmd, snapNow, false, isCursor ? agentUp : undefined);
       }
       return;
     }
@@ -1094,10 +1117,47 @@ export class StateDetector {
     this.lastContentHash = contentHash;
     this.quietPolls = contentChanged ? 0 : this.quietPolls + 1;
 
-    this._applySnap(cmd, detectState(rawLines, { altScreen }), contentChanged);
+    this._applySnap(cmd, snapNow, contentChanged, isCursor ? agentUp : undefined);
   }
 
-  _applySnap(cmd, snap, contentChanged) {
+  // Is cursor-agent the pane's process? Linux names it in the pane command;
+  // macOS shows `node` (and a tool cursor-agent runs may hold the foreground),
+  // so for any non-shell command the pane's process tree is read — once per
+  // command change (the answer is cached until the pane command moves).
+  async _cursorProcess(cmd) {
+    const c = String(cmd || "").trim();
+    if (CURSOR_CMD_RE.test(c)) { this.session.cursorProc = true; return true; }
+    // Not a candidate (a shell, after cursor-agent exited): forget the cached
+    // answer, so a later unrelated `node` in this pane is asked about afresh.
+    if (!c || isShellCmd(c)) { this._cursorProc = null; this.session.cursorProc = null; return false; }
+    if (this._cursorProc && this._cursorProc.cmd === c) { this.session.cursorProc = this._cursorProc.shown; return this._cursorProc.up; }
+    let up;
+    try { up = await (this.cursorLookup || cursorLookup)(this.paneTarget); } catch { up = null; }
+    // A failed lookup (null) keeps the last answer and asks again next tick:
+    // one slow ps must not read as "cursor-agent exited" and resolve a block.
+    if (up === null) return this._cursorProc?.up ?? false;
+    // runtime-only: doctor's row. false only where cursor-agent was expected
+    // (its process names); any other program without it under it is just not it.
+    const shown = up || cursorCmdCandidate(c) ? up : null;
+    this._cursorProc = { cmd: c, up, shown };
+    this.session.cursorProc = shown;
+    if (!up && cursorCmdCandidate(c)) warnOnce(`cursor-proc:${this.session.id}`, `[state] cursor agent ${this.session.id}: the pane runs \`${c}\` but no cursor-agent process is under it — its state is not tracked (\`hadron doctor\` has the row)`);
+    return up;
+  }
+
+  // A cursor screen the reader does not know while cursor-agent runs: the
+  // state is held (nextState returns null for "unknown") — say so once per
+  // agent after it lasts, and give doctor the row (silent-failure rule).
+  _cursorScreen(agentUp, snap) {
+    if (!agentUp || snap.state !== "unknown") { this.session.cursorUnknownSince = null; this._cursorUnknownPolls = 0; return; }
+    this._cursorUnknownPolls = (this._cursorUnknownPolls || 0) + 1;
+    if (this._cursorUnknownPolls === 1) this.session.cursorUnknownSince = new Date().toISOString();
+    if (this._cursorUnknownPolls >= CURSOR_UNKNOWN_POLLS) {
+      warnOnce(`cursor-screen:${this.session.id}`, `[state] cursor agent ${this.session.id}: cursor-agent shows a screen Hadron cannot read — its state is held as it was (\`hadron doctor\` has the row; a newer cursor-agent?)`);
+    }
+  }
+
+  _applySnap(cmd, snap, contentChanged, agent) {
     this.verdictSeen = true; // the detector has looked at this pane since boot (the outbox dispatcher waits for it)
     // Build a machine view over this detector's counters, run the pure reducer,
     // then write counters back and apply the decision through _setState (the
@@ -1115,7 +1175,7 @@ export class StateDetector {
       settleThreshold: this.settleThreshold,
       inconclusiveThreshold: this.inconclusiveThreshold,
     };
-    const decision = nextState(m, { cmd, snap, contentChanged, canTransition: this._canTransition() });
+    const decision = nextState(m, { cmd, snap, contentChanged, canTransition: this._canTransition(), agent });
 
     this.notWorkingCount = m.notWorking;
     this.inconclusiveCount = m.inconclusive;

@@ -1,0 +1,45 @@
+
+
+  Cursor Agent
+  v2026.11.22-e9042b2
+  Tip: Use /plan to iterate on an implementation plan before code changes.
+
+
+  Reply with exactly the word: one
+
+
+  one
+
+
+  Reply with exactly the word: two
+
+
+  two
+
+
+  Run this shell command and nothing else: sleep 12 && echo slept
+
+
+  I'll run that command now.
+
+  $ sleep 12 && echo slept 1.9s
+
+ ⠠⠛ Running  72 tokens
+    Tip: Use /plan to iterate on an implementation plan before code changes.
+
+
+  → Add a follow-up                                                                                                                             ctrl+c to stop
+
+
+  1 task
+  Auto · 4.9%
+  ~/cursor-v0/a.b_c · main
+
+
+
+
+
+
+
+
+

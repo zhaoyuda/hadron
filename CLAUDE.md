@@ -589,6 +589,35 @@ npm test
 #                            dialog text deliberately goes in with send-keys -l, NOT the buffer-paste path of
 #                            /message: a paste into claude's dialog field is not proven and the field is one line;
 #                            -l is reliable only for short text, hence the cap); no token → 401)
+#   + test-cursor-state.js  (cursor backend — server/cursor-state.js over real cursor-agent 2026.11.x captures
+#                            (fixtures/cursor): trust box / approval box (a right-aligned hint under it ignored) → blocked
+#                            "Needs input" with cursorDialog {kind, question, options[{label, key, selected}]}; "ctrl+c to
+#                            stop" on the bottom-most "→" composer row → working, a spinner above it without the hint →
+#                            working stale; the composer → at the prompt with composer {text, empty} (the two placeholders
+#                            are empty, a draft or the prompt Ctrl+C put back is not) and footer {model, contextPct}; a bad
+#                            --model's model list, a blank pane, a composer above the bottom 14 rows → "unknown";
+#                            cursorPasteHold: paste only into an empty composer (working included — cursor-agent queues
+#                            follow-ups), never into approval/trust/unknown/alt screen/a draft; process identity: pane
+#                            command cursor-agent|agent (Linux), else for ANY non-shell command a process within 3 levels
+#                            under the pane pid whose argv[0] is cursor-agent or that runs `…/cursor-agent/versions/<v>/
+#                            index.js` (macOS shows node; a tool cursor-agent runs may hold the foreground) — cached per
+#                            command, a lookup that fails (tmux/ps) keeps the last answer (a slow ps never resolves a block),
+#                            an unrelated program without it is cursorProc null (no doctor complaint), node without it false
+#                            + warnOnce cursor-proc:<id>; resolveCursorAgent: override (never falls back), absolute PATH
+#                            entries, ~/.local/bin, executables only; nextState takes `agent` from the caller and
+#                            holds the state on "unknown" (counters reset, no decision); the detector warns once after
+#                            CURSOR_UNKNOWN_POLLS unknown polls (cursorUnknownSince → doctor row) and forgets a cached
+#                            node answer when a shell is back. Live in test-outbox 12b: launcher kind cursor → backend on
+#                            the record; a process named cursor-agent painting those screens takes a mid-turn paste, an
+#                            entry is queued while the approval box or a draft is up and delivered once the box is empty,
+#                            legacy /message → 409 there, with force too (force = paste into a bare shell, never answer a
+#                            dialog), "Send now" → 202 still queued with a cursor reason; the screen is read AGAIN between
+#                            the paste and the Enter (cursorEnterHold) — an approval box that came up in between (fixture
+#                            C_ARM paints it at the bracketed paste's end) gets no Enter, the entry is `uncertain` "Enter
+#                            was not sent"; a held cursor entry backs the dispatcher off 2 s (outboxHoldRetryAt);
+#                            when:idle → 400, /interrupt → 409; outside the suites: the annotation review trigger refuses a
+#                            cursor agent (dispatchError, nothing typed), a respawn on the other backend drops runtime/draft/
+#                            outbox, doctor's "not found on PATH" row only for the builtin `cursor` launcher)
 ```
 
 ### Reliability gate

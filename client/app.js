@@ -2211,6 +2211,10 @@ function showAddPopover(e, group) {
     pop.innerHTML = `
       <div class="add-pop-label">Add to ${esc(group)}</div>
       <input class="add-pop-input" id="add-agent-name" type="text" value="${esc(defaultName)}" spellcheck="false" />
+      <div class="add-pop-backend" role="radiogroup" aria-label="Agent CLI">
+        <button type="button" data-backend="claude" role="radio">Claude</button>
+        <button type="button" data-backend="cursor" role="radio">Cursor</button>
+      </div>
       <div class="add-pop-hint">Enter to create · Esc to cancel</div>
     `;
 
@@ -2221,6 +2225,22 @@ function showAddPopover(e, group) {
     const input = pop.querySelector("#add-agent-name");
     input.focus();
     input.select();
+    // Claude (a shell the operator launches claude in, as before) or Cursor
+    // (cursor-agent launched for them; the record is a cursor agent — its own
+    // screen reader). The choice is remembered per browser.
+    let backend = "claude";
+    try { if (localStorage.getItem("hadron-new-agent-backend") === "cursor") backend = "cursor"; } catch {}
+    const paintBackend = () => pop.querySelectorAll("[data-backend]").forEach((b) => {
+      b.classList.toggle("on", b.dataset.backend === backend);
+      b.setAttribute("aria-checked", String(b.dataset.backend === backend));
+    });
+    paintBackend();
+    pop.querySelectorAll("[data-backend]").forEach((b) => b.addEventListener("click", () => {
+      backend = b.dataset.backend;
+      try { localStorage.setItem("hadron-new-agent-backend", backend); } catch {}
+      paintBackend();
+      input.focus();
+    }));
 
     const handleKey = async (ev) => {
       if (ev.key === "Escape") { hideAddPopover(); return; }
@@ -2228,7 +2248,7 @@ function showAddPopover(e, group) {
         const agentName = input.value.trim();
         if (!agentName) return;
         hideAddPopover();
-        await createAgent(agentName, group);
+        await createAgent(agentName, group, backend);
       }
     };
     input.addEventListener("keydown", handleKey);
@@ -2358,12 +2378,12 @@ function hideAddPopover() {
   popoverTrigger = null;
 }
 
-async function createAgent(name, group) {
+async function createAgent(name, group, backend = "claude") {
   try {
     const res = await fetch("/api/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, group }),
+      body: JSON.stringify(backend === "cursor" ? { name, group, launchCommand: "cursor", autostart: true } : { name, group }),
     });
     if (!res.ok) {
       const err = await res.json();

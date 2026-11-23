@@ -194,6 +194,9 @@ export function saveAgent(agent) {
   if (deletable === false) data.deletable = false;
   if (cwd) data.cwd = cwd;
   if (launchCommand) data.launchCommand = launchCommand;
+  // Which CLI the agent runs (absent = claude): picks the screen reader and the
+  // claude-only machinery (resume, chat, dialog cards) — never the pane command.
+  if (agent.backend === "cursor") data.backend = "cursor";
   if (autostartedAt) data.autostartedAt = autostartedAt;
   // v0.9 resume: the runtime checkpoint and the opt-in post-resume command
   // (both absent unless the resume machinery / the user set them).

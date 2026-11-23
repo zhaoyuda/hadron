@@ -1,0 +1,45 @@
+Tip: You can start the Cursor CLI with `agent` (same as `cursor-agent`).
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │                                                                                                                                                          │
+  │  ⚠ Workspace Trust Required                                                                                                                              │
+  │                                                                                                                                                          │
+  │  Cursor Agent can execute code and access files in this directory.                                                                                       │
+  │                                                                                                                                                          │
+  │  Do you trust the contents of this directory?                                                                                                            │
+  │                                                                                                                                                          │
+  │    /home/ubuntu/cursor-sample                                                                                                                            │
+  │                                                                                                                                                          │
+  │                                                                                                                                                          │
+  │    [a] Trust this workspace                                                                                                                              │
+  │    [q] Quit                                                                                                                                              │
+  │                                                                                                                                                          │
+  │  ⏳ Trusting workspace...                                                                                                                                │
+  │                                                                                                                                                          │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+  Cursor Agent
+  v2026.11.13-eacade1
+  Tip: Type ? in the prompt bar to show in-app hints.
+
+
+
+
+  → Fix the bug in calc.py, then verify by running: python3 -c 'import calc; print(calc.add(2,3))'
+
+
+  Auto
+  ~/cursor-sample · main
+
+
+
+
+
+
+
+
+
+
+
+

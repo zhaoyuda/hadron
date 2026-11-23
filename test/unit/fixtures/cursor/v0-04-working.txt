@@ -1,0 +1,45 @@
+
+
+  Cursor Agent
+  v2026.11.22-e9042b2
+  Tip: Use /plan to iterate on an implementation plan before code changes.
+
+
+  Reply with exactly the word: one
+
+
+  one
+
+
+  Reply with exactly the word: two
+
+
+  two
+
+
+  Run this shell command and nothing else: sleep 12 && echo slept
+
+
+  I'll run that command now.
+
+  $ sleep 12 && echo slept Waiting for approval...
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ $  sleep 12 && echo slept in .
+
+ Run this command?
+ Not in allowlist: sleep
+  → Run (once) (y)
+    Add Shell(sleep) to allowlist? (tab)
+    Run Everything (shift+tab)
+    Skip & tell the agent what to do instead (esc or n)
+
+
+
+
+
+
+
+
+
+

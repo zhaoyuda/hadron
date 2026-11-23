@@ -1,0 +1,45 @@
+
+  $ curl -sI https://example.com | head -3 151ms
+    … 1 output lines hidden · ctrl+o to expand
+    date: Sun, 15 Nov 2026 02:30:46 GMT
+    content-type: text/html; charset=utf-8
+
+  HTTP/2 200
+  date: Sun, 15 Nov 2026 02:30:46 GMT
+  content-type: text/html; charset=utf-8
+
+
+  Run this shell command exactly: curl -sI https://example.com | head -3Run this exact shell command, nothing else: git config user.name sample && git
+  commit --allow-empty -m probe
+
+
+  I can’t run that command as written — it updates git config, which I’m not allowed to change.
+
+  I can run only the empty commit (git commit --allow-empty -m probe) if you want that without touching git config.
+
+
+
+  Reply with exactly the word: pong
+  (second line of the same message)
+
+
+  pong
+
+
+  Run this exact shell command and nothing else: mkdir -p build && touch build/out.txt && rm -rf build
+
+
+  $ mkdir -p build && touch build/out.txt && rm -rf build Waiting for approval...
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ $  mkdir -p build && touch build/out.txt && rm -rf build in .
+
+ Run this command?
+ Not in allowlist: rm
+  → Run (once) (y)
+    Add Shell(rm) to allowlist? (tab)
+    Run Everything (shift+tab)
+    Skip & tell the agent what to do instead (esc or n)
+
+                                                                                                                                ctrl+r to review changed files
+

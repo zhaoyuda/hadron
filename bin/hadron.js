@@ -475,7 +475,7 @@ async function main() {
     }
     case "spawn": {
       const name = positional[0];
-      if (!name) die("usage: hadron spawn <name> [--group G] [--task \"...\"] [--cwd path] [--launch claude|codex|shell] [--start] [--related a,b] [--artifact p]");
+      if (!name) die("usage: hadron spawn <name> [--group G] [--task \"...\"] [--cwd path] [--launch claude|cursor|codex|shell] [--start] [--related a,b] [--artifact p]");
       const body = { name };
       if (flags.group) body.group = flags.group;
       if (flags.task) body.task = flags.task;
@@ -1210,7 +1210,7 @@ Commands:
   hadron whoami [--json]                   show the current agent (resolved by the server)
   hadron spawn <name> [flags]              create an agent
        --group G  --task "..."  --cwd path
-       --launch claude|codex|shell|<custom>  --start  --related a,b  --artifact p
+       --launch claude|cursor|codex|shell|<custom>  --start  --related a,b  --artifact p
        (custom launchers are defined in .hadron/config.json "launchers" — see docs/CONFIGURATION.md)
   hadron pin [name|id]                     pin an agent to the deck's 📌 Pinned section (no arg = self)
   hadron unpin [name|id]                   unpin (no arg = self)

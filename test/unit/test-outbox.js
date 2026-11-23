@@ -99,9 +99,38 @@ while IFS= read -r line; do
 done
 `);
 chmodSync(FIXTURE, 0o755);
+// A process named cursor-agent painting real cursor-agent screens
+// (fixtures/cursor): the composer, the approval box, a draft in the box, a
+// running turn. Every line it reads is logged and the empty composer comes back.
+const CLOG = join(T, "cursor-input.log");
+const CUR = join(T, "cursor-screens");
+mkdirSync(CUR);
+for (const [to, from] of [["idle", "02-idle"], ["approval", "12-perm-1"], ["typed", "04-typed"], ["work", "05-run-1"]]) {
+  writeFileSync(join(CUR, `${to}.txt`), readFileSync(new URL(`./fixtures/cursor/${from}.txt`, import.meta.url), "utf-8").replace(/\n+$/, "\n"));
+}
+const CFIXTURE = join(FIX, "cursor-fix");
+writeFileSync(CFIXTURE, `#!/usr/bin/env bash
+if [ -z "$HADRON_FIX_REEXEC" ]; then HADRON_FIX_REEXEC=1 exec -a cursor-agent bash "$0" "$@"; fi
+LOG="$1"; D="$2"
+paint() { printf '\\e[2J\\e[H'; cat "$D/$1.txt"; }
+paint idle
+while IFS= read -r line; do
+  case "$line" in
+    C_IDLE) paint idle ;; C_APPROVAL) paint approval ;; C_TYPED) paint typed ;; C_WORK) paint work ;;
+    # C_ARM: the next paste is read raw up to its bracketed end, then the
+    # approval box comes up — between the paste and the Enter that follows it.
+    C_ARM) paint idle; stty -icanon -echo min 1; printf '\\e[?2004h'; buf=""
+      while IFS= read -r -d '~' chunk; do buf+="$chunk~"; case "$buf" in *$'\\e[201~') break ;; esac; done
+      printf 'ARMED:%s\\n' "$buf" >> "$LOG"; paint approval; printf '\\e[?2004l'; stty icanon echo ;;
+    "") printf '<ENTER>\\n' >> "$LOG"; paint idle ;;
+    *) printf '%s\\n' "$line" >> "$LOG"; paint idle ;;
+  esac
+done
+`);
+chmodSync(CFIXTURE, 0o755);
 writeFileSync(join(WS, ".hadron", "config.json"), JSON.stringify({
   name: "outbox", groups: ["Workers"],
-  launchers: { "cc-fix": { argv: [FIXTURE, LOG, DLG], kind: "claude" } },
+  launchers: { "cc-fix": { argv: [FIXTURE, LOG, DLG], kind: "claude" }, "cur-fix": { argv: [CFIXTURE, CLOG, CUR], kind: "cursor" } },
 }, null, 2));
 
 const tenv = { ...process.env, PATH: `${FIX}:${process.env.PATH}`, HOME };
@@ -584,6 +613,71 @@ async function main() {
   await setState(id, "idle");
   await sleep(2500);
   ok(!typed().includes("SAVE-FAIL"), "…and it is never delivered");
+
+  console.log("\n12b. cursor agent: a paste waits while the approval box is up or the box holds text");
+  const cr = await api("POST", "/api/sessions", { name: "ob-cur", cwd: join(WS, "a1"), launchCommand: "cur-fix", group: "Workers", autostart: true });
+  ok(cr.status === 201, `cursor agent created (${cr.status})`);
+  const cid = cr.json.id;
+  ok(onDisk(cid).backend === "cursor", "launcher kind cursor → backend: \"cursor\" on the record");
+  tmuxSafe(["resize-window", "-t", paneOf(cid), "-x", "200", "-y", "50"]);
+  ok(await until(() => paneCmd(cid) === "cursor-agent", 15000), `fixture runs in the pane as "cursor-agent" (${paneCmd(cid)})`);
+  const ctyped = () => (existsSync(CLOG) ? readFileSync(CLOG, "utf-8") : "").replace(/\x1b\[20[01]~/g, "").split("\n").filter(Boolean);
+  const paint = (scr) => tmuxS(["send-keys", "-t", paneOf(cid), `C_${scr}`, "Enter"]);
+  // A new agent reads "idle" before the detector's first verdict (its startup
+  // ticks are skipped): a running turn painted and read as working proves the
+  // cursor reader is driving the state.
+  ok(await until(async () => (await listed(cid))?.cursorProc === true, 15000), "the detector found cursor-agent in the pane");
+  paint("WORK");
+  ok(await until(async () => (await listed(cid))?.state === "working", 15000), "\"ctrl+c to stop\" on the composer row → working");
+  const c1 = rid();
+  a = await msg(cid, { text: "mid-turn follow-up", requestId: c1, when: "auto" });
+  ok(a.status === 200 && a.json.entry?.state === "handed", `a running turn with an empty box → pasted at once (${a.status}) — cursor-agent queues follow-ups`);
+  ok(await until(() => ctyped().includes("mid-turn follow-up"), 4000), "…and cursor-agent received it");
+
+  paint("APPROVAL");
+  const c2 = rid();
+  a = await msg(cid, { text: "NOT-INTO-APPROVAL", requestId: c2, when: "auto" });
+  ok(a.status === 202 && a.json.entry?.state === "queued", `approval box on screen → 202 queued (${a.status}, ${a.json.entry?.state}) — Enter would answer it`);
+  ok(await until(async () => (await listed(cid))?.state === "blocked", 15000), "the detector reads the approval box as blocked");
+  const lg = await msg(cid, { text: "LEGACY-INTO-APPROVAL" });
+  ok(lg.status === 409, `legacy /message (no requestId) with the approval box up → 409 (${lg.status})`);
+  const lf = await msg(cid, { text: "FORCE-INTO-APPROVAL", force: true });
+  ok(lf.status === 409 && !/force/.test(lf.json?.error || ""), `…with force too → 409, and the error does not suggest force (${lf.status}: ${lf.json?.error})`);
+  const csn = await api("POST", `/api/sessions/${cid}/outbox/${c2}/send`);
+  ok(csn.status === 202 && csn.json?.entry?.state === "queued" && /cursor-agent/.test(csn.json?.error || ""), `"Send now" with the approval box up → 202 still queued, a cursor reason (${csn.status}: ${csn.json?.error})`);
+  await sleep(1500);
+  ok(!ctyped().some((l) => /INTO-APPROVAL/.test(l)), "…nothing typed into the approval box");
+  paint("IDLE");
+  ok(await until(() => ctyped().includes("NOT-INTO-APPROVAL"), 15000), "box gone → the queued entry is delivered");
+
+  paint("TYPED");
+  await until(async () => /Fix the bug/.test(tmuxSafe(["capture-pane", "-p", "-t", paneOf(cid)]) || ""), 3000);
+  const c3 = rid();
+  a = await msg(cid, { text: "NOT-INTO-DRAFT", requestId: c3, when: "auto" });
+  ok(a.status === 202 && a.json.entry?.state === "queued", `a draft in the box → 202 queued (${a.status}) — the paste would join it`);
+  await sleep(2500);
+  ok(!ctyped().includes("NOT-INTO-DRAFT") && (await outbox(cid)).find((e) => e.id === c3)?.state === "queued", "…held while the draft is there (the dispatcher re-reads the box)");
+  paint("IDLE");
+  ok(await until(() => ctyped().includes("NOT-INTO-DRAFT"), 15000), "box empty again → delivered");
+
+  // The approval box comes up between the paste and the Enter: the screen is
+  // read again before Enter, which would otherwise answer it ("Run (once)").
+  paint("ARM");
+  await sleep(500);
+  const c4 = rid();
+  a = await msg(cid, { text: "PASTED-THEN-BOX", requestId: c4, when: "auto" });
+  ok(await until(() => ctyped().includes("ARMED:PASTED-THEN-BOX"), 5000), "the paste went in while the box was still the composer");
+  await sleep(1500);
+  ok(!ctyped().includes("<ENTER>"), "…the box came up before the Enter → no Enter sent");
+  const e4 = (await outbox(cid)).find((e) => e.id === c4);
+  ok(e4?.state === "uncertain" && /Enter was not sent/.test(e4?.error || ""), `…the entry is uncertain, saying Enter was held (${e4?.state}: ${e4?.error})`);
+  await api("DELETE", `/api/sessions/${cid}/outbox/${c4}`);
+  paint("IDLE");
+
+  const sw = await msg(cid, { text: "/model gpt-5", requestId: rid(), when: "idle" });
+  ok(sw.status === 400, `when:idle (model/effort switch) → 400 for a cursor agent (${sw.status})`);
+  const st = await api("POST", `/api/sessions/${cid}/interrupt`);
+  ok(st.status === 409 && /cursor/.test(st.json?.error || ""), `interrupt → 409 for a cursor agent (${st.status})`);
 
   console.log("\n13. no leaks");
   ok(listBuffers() === "", `no tmux buffers left (${JSON.stringify(listBuffers())})`);
