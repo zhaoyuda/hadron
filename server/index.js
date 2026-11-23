@@ -4,7 +4,7 @@ const { createServer } = http;
 import { WebSocketServer } from "ws";
 import { spawn } from "node-pty";
 import { fileURLToPath } from "url";
-import { dirname, join, basename } from "path";
+import { dirname, join, basename, relative } from "path";
 import { execSync, execFileSync, spawn as cpSpawn } from "child_process";
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, watch as fsWatch, chmodSync, unlinkSync, mkdtempSync, mkdirSync, rmSync, renameSync, realpathSync } from "fs";
 import { connect as netConnect } from "net";
@@ -29,6 +29,7 @@ import { createPerfLog, validateClientPerf } from "./perf-log.js";
 import { gitChanges, gitDiffFile } from "./changes.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { readQuota } from "./quota.js";
+import { handoffText, exchangesFromItems, exchangesFromCursorTranscript, newestCursorTranscript, peerIdFor } from "./handoff.js";
 import { validateCheckpoint, safeCheckpoint, verifyHookClaim, applyHookClaim } from "./checkpoint.js";
 import { createConversation, readConversation, backfillBefore, conversationWire, conversationIdFor, validateDraftPatch, safeDraft, draftEmpty, PAGE_MAX, PAGE_DEFAULT, MAX_LINE } from "./conversation.js";
 import { validateEntry as validateOutboxEntry, safeOutbox, pruneOutbox, makeRoom as outboxMakeRoom, withPaneLock, outboxWire, entryStale as outboxEntryStale, entryReady as outboxEntryReady, recentlyHanded as outboxRecentlyHanded, switchable as outboxSwitchable, switchBlock as outboxSwitchBlock, heldBehind as outboxHeldBehind, SWITCH_BLOCKS as OUTBOX_SWITCH_BLOCKS, OUTBOX_MAX } from "./outbox.js";
@@ -414,6 +415,20 @@ function sanitizeForKeystrokes(s) {
   return String(s).replace(/[\x00-\x1f\x7f]/g, " ").trim();
 }
 
+// The command line typed into the pane to start a launcher. Claude-kind
+// launches get a Hadron-chosen session id — the authoritative source for later
+// auto-resume (see resume.js). Server-generated UUID, never user input, so
+// gluing it into the command line is inert.
+async function launchLine(id, launcher) {
+  let cmdLine = shellQuoteArgv(launcher.argv); // preserves argv boundaries through the pane's shell
+  if (launcher.kind === "claude" && (await probeClaudeCaps()).sessionId) {
+    const sid = randomUUID();
+    cmdLine += ` --session-id ${sid}`;
+    runtimeTrackers.get(id)?.recordSpawnedSession(sid);
+  }
+  return cmdLine;
+}
+
 // Autostart: type ONLY the enum's launch command into the (detached) pane, then — as a
 // SEPARATE literal step — type the task into the prompt. The task is never glued into a
 // command string (no `claude "<task>"`), so quotes/newlines/$() in it stay inert data.
@@ -427,15 +442,7 @@ function autostartAgent(id, launchCommand, task) {
   const tmuxName = tmuxSessionName(id);
   (async () => {
     try {
-      let cmdLine = shellQuoteArgv(launcher.argv); // preserves argv boundaries through the pane's shell
-      // Claude-kind launches get a Hadron-chosen session id — the authoritative
-      // source for later auto-resume (see resume.js). Server-generated UUID,
-      // never user input, so gluing it into the command line is inert.
-      if (launcher.kind === "claude" && (await probeClaudeCaps()).sessionId) {
-        const sid = randomUUID();
-        cmdLine += ` --session-id ${sid}`;
-        runtimeTrackers.get(id)?.recordSpawnedSession(sid);
-      }
+      const cmdLine = await launchLine(id, launcher);
       await tmuxAsync(["send-keys", "-t", tmuxName, "--", cmdLine, "Enter"]);
       const clean = task ? sanitizeForKeystrokes(task) : "";
       if (clean && launcher.kind === "cursor") {
@@ -994,6 +1001,10 @@ app.get("/api/doctor", async (req, res) => {
     }
     // A "Needs input" screen the chat view could not read (dialog parser miss):
     // the card said "answer it in the terminal" — yellow, so the miss is seen.
+    if (session.handoff?.error) {
+      finding.message += ` · handoff not delivered: ${session.handoff.error}`;
+      if (finding.level !== "red") finding.level = "yellow";
+    }
     if (session.outboxCaptureFails) {
       finding.message += ` · the pane could not be captured ${session.outboxCaptureFails}× in a row — queued chat messages are held until it can (tmux busy? see the tmux row)`;
       if (finding.level !== "red") finding.level = "yellow";
@@ -1719,6 +1730,60 @@ app.post("/api/orphans/kill-all", (req, res) => {
   res.json({ ok: true, killed });
 });
 
+// Create (or revive a closed record of) an agent and its tmux session — the
+// body of POST /api/sessions after validation, shared with the handoff route.
+async function createAgentSession({ id, name, group, task, cwd, launchCommand, launchers = getLaunchers(), relatedAgents, seedArtifacts, freshConversation = false }) {
+  const existing = loadAgent(id);
+  const session = existing
+    ? { ...existing, state: "idle", blockReason: undefined }
+    : {
+        id,
+        name,
+        group: group || "Workers",
+        task: task || null,
+        tmuxSession: tmuxSessionName(id),
+        artifacts: [],
+        relatedAgents: [],
+        notes: "",
+        state: "idle",
+      };
+  // Same-name respawn must come back cleanly live (clear the soft-delete flags).
+  delete session.archived;
+  delete session.archivedAt;
+  // A fresh create may seed cwd / initial arrays; a respawn keeps existing ones unless overridden.
+  if (cwd !== undefined) session.cwd = cwd;
+  if (launchCommand) session.launchCommand = launchCommand;
+  if (launchers[launchCommand]?.kind === "cursor") session.backend = "cursor"; else delete session.backend;
+  // Respawned on the other backend: the old conversation's identity, draft and
+  // queued messages belong to that conversation, not this one.
+  // A handoff's revive (freshConversation) starts a new conversation too — no
+  // auto-resume racing its launch, no old queued messages ahead of the handoff.
+  if (existing && (freshConversation || (existing.backend || "claude") !== (session.backend || "claude"))) { delete session.runtime; delete session.draft; delete session.outbox; }
+  if (!existing) {
+    if (seedArtifacts) session.artifacts = seedArtifacts;
+    if (Array.isArray(relatedAgents)) session.relatedAgents = relatedAgents;
+    if (task !== undefined) session.task = task || null;
+  }
+  // A new creation re-arms autostart.
+  if (!existing) delete session.autostartedAt;
+
+  sessions.set(id, session);
+  saveAgent(session);
+  // The record is saved either way: a tmux that does not answer right now
+  // (busy/paging) must not lose the creation — the monitor and the first
+  // terminal connect create the session later (startMonitor retries while the
+  // monitor is absent; ensureTmuxSessionByName on connect). The ensure is
+  // async so a stalled tmux costs this request, not every other one.
+  let tmuxOk = false;
+  try {
+    const ensured = await ensureTmuxSessionByName(tmuxSessionName(id), resolveAgentCwd(session));
+    tmuxOk = sessions.get(id) === session && startMonitorSafe(id, { ensured });
+  } catch (e) {
+    console.error(`[monitor] ${id}: tmux did not answer (${e.message}) — monitor not started, will retry on the next connect`);
+  }
+  return { session, tmuxOk };
+}
+
 app.post("/api/sessions", async (req, res) => {
   const { name, group, task, cwd, relatedAgents, artifacts, autostart } = req.body;
   if (!name) {
@@ -1761,52 +1826,7 @@ app.post("/api/sessions", async (req, res) => {
     }
   }
 
-  const existing = loadAgent(id);
-  const session = existing
-    ? { ...existing, state: "idle", blockReason: undefined }
-    : {
-        id,
-        name,
-        group: group || "Workers",
-        task: task || null,
-        tmuxSession: tmuxSessionName(id),
-        artifacts: [],
-        relatedAgents: [],
-        notes: "",
-        state: "idle",
-      };
-  // Same-name respawn must come back cleanly live (clear the soft-delete flags).
-  delete session.archived;
-  delete session.archivedAt;
-  // A fresh create may seed cwd / initial arrays; a respawn keeps existing ones unless overridden.
-  if (cwdResult.cwd !== undefined) session.cwd = cwdResult.cwd;
-  if (launchCommand) session.launchCommand = launchCommand;
-  if (launchers[launchCommand]?.kind === "cursor") session.backend = "cursor"; else delete session.backend;
-  // Respawned on the other backend: the old conversation's identity, draft and
-  // queued messages belong to that conversation, not this one.
-  if (existing && (existing.backend || "claude") !== (session.backend || "claude")) { delete session.runtime; delete session.draft; delete session.outbox; }
-  if (!existing) {
-    if (seedArtifacts) session.artifacts = seedArtifacts;
-    if (Array.isArray(relatedAgents)) session.relatedAgents = relatedAgents;
-    if (task !== undefined) session.task = task || null;
-  }
-  // A new creation re-arms autostart.
-  if (!existing) delete session.autostartedAt;
-
-  sessions.set(id, session);
-  saveAgent(session);
-  // The record is saved either way: a tmux that does not answer right now
-  // (busy/paging) must not lose the creation — the monitor and the first
-  // terminal connect create the session later (startMonitor retries while the
-  // monitor is absent; ensureTmuxSessionByName on connect). The ensure is
-  // async so a stalled tmux costs this request, not every other one.
-  let tmuxOk = false;
-  try {
-    const ensured = await ensureTmuxSessionByName(tmuxSessionName(id), resolveAgentCwd(session));
-    tmuxOk = sessions.get(id) === session && startMonitorSafe(id, { ensured });
-  } catch (e) {
-    console.error(`[monitor] ${id}: tmux did not answer (${e.message}) — monitor not started, will retry on the next connect`);
-  }
+  const { session, tmuxOk } = await createAgentSession({ id, name, group, task, cwd: cwdResult.cwd, launchCommand, launchers, relatedAgents, seedArtifacts });
   if (autostart && tmuxOk) autostartAgent(id, launchCommand, session.task);
   else if (autostart) console.warn(`[autostart] ${id}: skipped — tmux did not answer at creation; launch it from the terminal`);
   res.status(201).json(resolvedSession(session));
@@ -2781,7 +2801,199 @@ app.delete("/api/sessions/:id/artifacts", async (req, res) => {
   res.json({ ok: true, artifacts: resolvedSession(sessions.get(id)).artifacts });
 });
 
-// Append one related-agent id without clobbering the array.
+// ── Handoff between backends (C3) ──────────────────────────────────────────
+// POST /api/sessions/:id/handoff {to: "cursor"|"claude", launchCommand?}:
+// "Continue in Cursor" when claude hits its usage limit, "Continue in Claude"
+// on the way back. The handoff is written mechanically (server/handoff.js) —
+// the source agent spends nothing on it — saved under .hadron/handoff/, and
+// delivered as the first message of the linked peer agent (same cwd), created
+// or revived and launched as needed. The source is parked and its queued
+// messages move into the handoff (nothing is pasted into it any more).
+const HANDOFF_WAIT_MS = Number(process.env.HADRON_HANDOFF_WAIT_MS) || 120000;
+const handoffLocks = new Set();      // ids inside the route
+const handoffPending = new Set();    // peers whose waiter is still running
+function backendOf(s) {
+  if (s.backend === "cursor") return "cursor";
+  return getLaunchers()[s.launchCommand || "claude"]?.kind === "claude" ? "claude" : null;
+}
+function handoffLauncher(to, asked) {
+  const launchers = getLaunchers();
+  if (asked !== undefined) {
+    if (typeof asked !== "string" || launchers[asked]?.kind !== to) return { error: `launchCommand must name a ${to} launcher` };
+    return { name: asked };
+  }
+  if (to === "cursor") {
+    if (CURSOR_AGENT_PATH) return { name: "cursor" };
+    const own = Object.keys(launchers).find((n) => n !== "cursor" && launchers[n]?.kind === "cursor");
+    return own ? { name: own } : { error: "cursor-agent is not installed on this machine (`hadron doctor` has the row)", status: 409 };
+  }
+  const def = getDefaultLaunchCommand();
+  return { name: launchers[def]?.kind === "claude" ? def : "claude" };
+}
+// A handoff that did not arrive: on the record (doctor row) and once in the log.
+function handoffFailed(p, msg) {
+  p.handoff = { ...p.handoff, error: msg.slice(0, 300) };
+  delete p.handoff.pending;
+  saveAgentLocked(p).catch(() => {});
+  warnOnce(`handoff:${p.id}:${msg.slice(0, 40)}`, `[handoff] ${p.id}: ${msg}`);
+}
+app.post("/api/sessions/:id/handoff", async (req, res) => {
+  if (!tokenPresent(req)) return res.status(401).json({ error: "invalid or missing token" });
+  const { id } = req.params;
+  const s = sessions.get(id);
+  if (!isValidId(id) || !s || s.archived) return res.status(404).json({ error: "agent not found" });
+  const { to, launchCommand } = req.body || {};
+  if (to !== "cursor" && to !== "claude") return res.status(400).json({ error: "to must be \"cursor\" or \"claude\"" });
+  const from = backendOf(s);
+  if (!from) return res.status(409).json({ error: "only a claude or cursor agent can hand off" });
+  if (from === to) return res.status(400).json({ error: `this agent already runs ${to}` });
+  if (s.state === "working") return res.status(409).json({ error: "the agent is in the middle of a turn — let it finish or stop it first" });
+  const launcher = handoffLauncher(to, launchCommand);
+  if (launcher.error) return res.status(launcher.status || 400).json({ error: launcher.error });
+  if (Array.isArray(s.outbox) && s.outbox.some((e) => e.state === "sending")) return res.status(409).json({ error: "a message is being delivered to this agent right now — try again in a moment" });
+  const cwdOk = validateCwd(s.cwd);
+  if (cwdOk.error) return res.status(409).json({ error: `this agent's folder cannot be used: ${cwdOk.error}` });
+  // The peer: the agent the last handoff linked, else <id>-cursor / its base id.
+  // An agent already holding that id (live or closed) is taken only when its
+  // record links back to this one — never an unrelated agent of the same name.
+  const peerId = s.handoff?.peer && isValidId(s.handoff.peer) ? s.handoff.peer : peerIdFor(id, to);
+  if (!isValidId(peerId) || peerId === id) return res.status(409).json({ error: "this agent's id is too long to name a linked agent" });
+  const holder = sessions.get(peerId) || loadAgent(peerId);
+  if (holder && holder.handoff?.peer !== id) return res.status(409).json({ error: `an agent named ${peerId} already exists and is not linked to this one — close or rename it first` });
+  if (holder && !holder.archived && sessions.has(peerId) && holder.state === "working") return res.status(409).json({ error: `${peerId} is in the middle of a turn — let it finish first` });
+  if (handoffLocks.has(id) || handoffLocks.has(peerId) || handoffPending.has(peerId)) return res.status(409).json({ error: "a handoff for this agent is already in progress" });
+  handoffLocks.add(id); handoffLocks.add(peerId);
+  // The queued messages leave the source now, before anything awaits — the
+  // dispatcher must not paste one into the source while the handoff is built.
+  const queuedEntries = (Array.isArray(s.outbox) ? s.outbox : []).filter((e) => e.state === "queued");
+  const outboxBefore = s.outbox;
+  if (queuedEntries.length) { s.outbox = s.outbox.filter((e) => !queuedEntries.includes(e)); if (!s.outbox.length) delete s.outbox; }
+  let committed = false;
+  try {
+    // What the source was doing: its last exchanges, git's picture, its queue.
+    let exchanges = [];
+    if (from === "claude") {
+      try { exchanges = exchangesFromItems(conversationFor(s)?.conv.items || []); } catch {}
+    } else {
+      const since = Date.parse(s.handoff?.dir === "in" && s.handoff.at ? s.handoff.at : s.autostartedAt || "") || 0;
+      const file = newestCursorTranscript(cwdOk.cwd, since ? since - 60_000 : 0);
+      if (file) exchanges = exchangesFromCursorTranscript(file);
+    }
+    let changes = null;
+    try { changes = await changesFor(s); } catch {}
+    const at = new Date().toISOString();
+    const dir = join(WORKSPACE, ".hadron", "handoff");
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const file = join(dir, `${id}-${at.replace(/[:.]/g, "-")}.md`);
+    const reason = s.state === "blocked" && s.blockReason ? s.blockReason : null;
+    const text = handoffText({ source: s, from, to, reason, exchanges, changes, queued: queuedEntries.map((e) => e.text), file, at });
+    writeFileSync(file, text + "\n", { mode: 0o600 });
+
+    // The peer: a live one is unparked (and relaunched if its pane is a shell);
+    // otherwise it is created — or its closed record revived, with a fresh
+    // conversation (no auto-resume racing the launch) — in the same cwd.
+    let peer = sessions.get(peerId);
+    let fresh = false;
+    if (!peer || peer.archived) {
+      const made = await createAgentSession({ id: peerId, name: holder?.name || peerId, group: s.group, task: s.task || null, cwd: cwdOk.cwd, launchCommand: launcher.name, relatedAgents: [id], seedArtifacts: s.artifacts || [], freshConversation: true });
+      peer = made.session;
+      fresh = true;
+      if (!made.tmuxOk) throw Object.assign(new Error("tmux did not answer — the linked agent was saved but not started; try again"), { status: 503 });
+    }
+    // Link both ways, park the source.
+    const link = (a, b, dir) => {
+      a.handoff = { peer: b.id, dir, at, file };
+      if (!Array.isArray(a.relatedAgents)) a.relatedAgents = [];
+      if (!a.relatedAgents.includes(b.id)) a.relatedAgents.push(b.id);
+    };
+    link(s, peer, "out");
+    link(peer, s, "in");
+    peer.handoff.pending = true;
+    delete peer.parked;
+    s.parked = true;
+    committed = true;
+    await saveAgentLocked(s);
+    await saveAgentLocked(peer);
+    handoffDeliver(peer.id, launcher.name, text);
+    console.log(`[handoff] ${id} → ${peer.id} (${from} → ${to})${queuedEntries.length ? `, ${queuedEntries.length} queued message(s) moved` : ""}`);
+    res.json({ ok: true, peer: resolvedSession(peer), file: relative(WORKSPACE, file), moved: queuedEntries.length, created: fresh });
+  } catch (e) {
+    if (!committed && queuedEntries.length) {
+      // Put the queued messages back where they were (nothing moved).
+      const now = Array.isArray(s.outbox) ? s.outbox : [];
+      s.outbox = [...(outboxBefore || []).filter((e) => queuedEntries.includes(e) || now.includes(e)), ...now.filter((e) => !(outboxBefore || []).includes(e))];
+      saveAgentLocked(s).catch(() => {});
+    }
+    console.error(`[handoff] ${id}: ${e.message}`);
+    res.status(e.status || 500).json({ error: e.message });
+  } finally {
+    handoffLocks.delete(id); handoffLocks.delete(peerId);
+  }
+});
+
+// Launch the peer if its pane is a shell, wait until its agent process is up
+// and the detector has read it, then queue the handoff at the head of its
+// outbox. For claude it is an idle-only entry: pasted only at claude's empty
+// prompt, never mid-turn, and let through a "Usage limit" / "Model
+// unavailable" block like a model switch (typing there is how the block is
+// left). For cursor an ordinary entry — cursor-agent queues follow-ups and the
+// dispatcher never pastes into its approval box. Never arrives → said on the
+// record (doctor row) + once in the log. `handoff.pending` on the record lets a
+// restart pick the delivery up again (resumeHandoffDeliveries).
+function handoffDeliver(peerId, launchName, text) {
+  if (handoffPending.has(peerId)) return;
+  handoffPending.add(peerId);
+  const tmuxName = tmuxSessionName(peerId);
+  (async () => {
+    const shellCheck = paneShellCheck(tmuxName);
+    const launcher = getLaunchers()[launchName];
+    const until = Date.now() + HANDOFF_WAIT_MS;
+    let launched = false;
+    while (Date.now() < until) {
+      const p = sessions.get(peerId);
+      if (!p || p.archived) return;
+      if (shellCheck()) {
+        if (!launched && launcher && !launchLocks.has(peerId)) {
+          launched = true;
+          launchLocks.add(peerId);
+          try {
+            await tmuxAsync(["send-keys", "-t", tmuxName, "--", await launchLine(peerId, launcher), "Enter"]);
+            p.autostartedAt = new Date().toISOString();
+            await saveAgentLocked(p);
+          } catch (e) { console.error(`[handoff] ${peerId}: launch failed: ${e.message}`); }
+          finally { launchLocks.delete(peerId); }
+        }
+      } else if (monitors.get(peerId)?.verdictSeen && (p.backend !== "cursor" || p.cursorProc === true)) {
+        const v = validateOutboxEntry({ text, requestId: `handoff-${Date.now().toString(36)}`, idleOnly: p.backend !== "cursor" });
+        if (v.error) return handoffFailed(p, `handoff not queued: ${v.error}`);
+        if (!Array.isArray(p.outbox)) p.outbox = [];
+        if (!outboxMakeRoom(p.outbox)) return handoffFailed(p, "handoff not queued: the outbox is full");
+        const cur = currentConversationId(p);
+        if (cur) v.entry.conversationId = cur;
+        p.outbox.unshift(v.entry);
+        if (p.handoff) { delete p.handoff.error; delete p.handoff.pending; }
+        try { await saveAgentLocked(p); } catch (e) { console.error(`[handoff] ${peerId}: could not save: ${e.message}`); }
+        monitors.get(peerId)?.wake();
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    const p = sessions.get(peerId);
+    if (p && !p.archived) handoffFailed(p, `the ${p.backend === "cursor" ? "cursor-agent" : "claude"} process did not come up within ${Math.round(HANDOFF_WAIT_MS / 1000)} s — the handoff was not sent; it is saved in ${p.handoff?.file || ".hadron/handoff/"}`);
+  })().catch((e) => console.error(`[handoff] ${peerId}: ${e.message}`)).finally(() => handoffPending.delete(peerId));
+}
+// After a restart: deliveries whose waiter was still running go on, the text
+// read back from the saved handoff file.
+function resumeHandoffDeliveries() {
+  for (const p of sessions.values()) {
+    if (p.archived || !p.handoff?.pending || p.handoff.dir !== "in") continue;
+    let text = null;
+    try { if (typeof p.handoff.file === "string" && p.handoff.file.startsWith(join(WORKSPACE, ".hadron", "handoff") + "/")) text = readFileSync(p.handoff.file, "utf-8").replace(/\n$/, ""); } catch {}
+    if (!text) { handoffFailed(p, `the handoff file is gone — the handoff was not sent`); continue; }
+    handoffDeliver(p.id, p.launchCommand || (p.backend === "cursor" ? "cursor" : "claude"), text);
+  }
+}
+
 app.post("/api/sessions/:id/related", async (req, res) => {
   const { id } = req.params;
   if (!isValidId(id)) return res.status(400).json({ error: "invalid id" });
@@ -4125,7 +4337,7 @@ server.listen(PORT, HADRON_HOST, () => {
   migrateFolderPins();
   ensureDefaults();
   detectOrphanedTmuxSessions();
-  bootMonitors().then(() => bootStage2(), (e) => { console.error(`[boot] ${e.message}`); bootStage2(); });
+  bootMonitors().then(() => bootStage2(), (e) => { console.error(`[boot] ${e.message}`); bootStage2(); }).finally(() => resumeHandoffDeliveries());
 });
 
 // Records written before folders pinned as `type: "file"` were coerced on the

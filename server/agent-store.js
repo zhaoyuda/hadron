@@ -197,6 +197,12 @@ export function saveAgent(agent) {
   // Which CLI the agent runs (absent = claude): picks the screen reader and the
   // claude-only machinery (resume, chat, dialog cards) — never the pane command.
   if (agent.backend === "cursor") data.backend = "cursor";
+  // The claude ⇄ cursor handoff link (server/handoff.js): the peer agent, which
+  // way the work went, when, and the handoff file — absent unless handed off.
+  const h = agent.handoff;
+  if (h && typeof h === "object" && isValidId(h.peer) && (h.dir === "in" || h.dir === "out")) {
+    data.handoff = { peer: h.peer, dir: h.dir, ...(typeof h.at === "string" ? { at: h.at } : {}), ...(typeof h.file === "string" ? { file: h.file } : {}), ...(typeof h.error === "string" ? { error: h.error.slice(0, 300) } : {}), ...(h.pending === true ? { pending: true } : {}) };
+  }
   if (autostartedAt) data.autostartedAt = autostartedAt;
   // v0.9 resume: the runtime checkpoint and the opt-in post-resume command
   // (both absent unless the resume machinery / the user set them).

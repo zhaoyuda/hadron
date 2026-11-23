@@ -1438,7 +1438,7 @@ function chatComposer(el, m, sessionId, { list }) {
   const label = (row) => {
     switch (row.state) {
       case "pending": case "sending": return "Sending…";
-      case "queued": return row.stale ? "Written for an earlier conversation — held" : row.idleOnly ? (row.text.startsWith("!") ? "Runs once claude is at its prompt" : "Switches once claude is at its prompt") : "Send after this turn";
+      case "queued": return row.stale ? "Written for an earlier conversation — held" : row.idleOnly ? (row.text.startsWith("!") ? "Runs once claude is at its prompt" : row.text.startsWith("/") ? "Switches once claude is at its prompt" : "Sends once claude is at its prompt") : "Send after this turn";
       case "handed":
         if (m.readable === false || !m.conversationId) return "Handed to the terminal"; // no transcript to see it recorded in
         // Pasted while claude was working: claude takes it with its next step and

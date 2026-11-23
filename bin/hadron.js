@@ -223,6 +223,7 @@ const COMMAND_FLAGS = {
   send: [],
   message: ["no-enter", "raw", "force"],
   pin: [], unpin: [], park: [], unpark: [], close: [], restore: [],
+  handoff: ["to", "launch"],
   adopt: ["session-id", "force"],
   orphans: ["json", "all"],
   artifacts: ["auto", "agent"],
@@ -554,6 +555,16 @@ async function main() {
       const parked = cmd === "park";
       await api("PATCH", `/api/sessions/${agent.id}`, { parked });
       console.log(`${parked ? "parked" : "unparked"} ${agent.name} (${agent.id})${parked ? (agent.pinned ? " — pinned, so it stays under 📌 Pinned and folds once unpinned; tmux and claude keep running" : " — folded into its group's stale row on the deck; tmux and claude keep running") : ""}`);
+      break;
+    }
+    case "handoff": {
+      // hadron handoff [name|id] --to cursor|claude [--launch <launcher>]
+      const to = flags.to;
+      if (to !== "cursor" && to !== "claude") die("usage: hadron handoff [name|id] --to cursor|claude [--launch <launcher>]");
+      const agent = await resolveTargetOrSelf(positional[0]);
+      const out = await api("POST", `/api/sessions/${agent.id}/handoff`, { to, ...(typeof flags.launch === "string" ? { launchCommand: flags.launch } : {}) });
+      console.log(`handed ${agent.name} off to ${out.peer.name} (${out.peer.id}, ${to})${out.created ? " — new agent" : ""}; ${agent.name} is parked`);
+      console.log(`handoff: ${out.file}${out.moved ? ` (${out.moved} queued message${out.moved > 1 ? "s" : ""} moved into it)` : ""} — it goes in as ${out.peer.name}'s first message once ${to === "cursor" ? "cursor-agent" : "claude"} is at its prompt`);
       break;
     }
     case "close": {
@@ -1217,6 +1228,11 @@ Commands:
   hadron park [name|id]                    fold an agent into its group's stale row (nothing is killed
                                            or archived; it comes back when it next needs you) (no arg = self)
   hadron unpark [name|id]                  unfold (no arg = self)
+  hadron handoff [name|id] --to cursor|claude [--launch L]
+                                           continue this agent's work on the other CLI (claude out of budget →
+                                           cursor-agent, and back): a handoff written from its checkpoint, last
+                                           exchanges and git changes goes to a linked agent in the same cwd as
+                                           its first message; the source is parked (no arg = self)
   hadron close [name|id ...]               archive agent(s): tmux dies, JSON kept (no arg = self;
                                            several targets allowed — self is archived last)
   hadron restore <name|id ...>             bring archived agent(s) back (searches the archive)

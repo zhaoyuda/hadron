@@ -618,6 +618,26 @@ npm test
 #                            when:idle → 400, /interrupt → 409; outside the suites: the annotation review trigger refuses a
 #                            cursor agent (dispatchError, nothing typed), a respawn on the other backend drops runtime/draft/
 #                            outbox, doctor's "not found on PATH" row only for the builtin `cursor` launcher)
+#   + test-handoff.js       (handoff between backends, C3 — server/handoff.js + POST /api/sessions/:id/handoff {to,
+#                            launchCommand?} (token): the handoff text is written mechanically (title naming the source
+#                            backend + agent, why it stopped, cwd, task, checkpoint, git changes with +/−, the last 6
+#                            exchanges — user prompt + the text blocks after it, tools/thinking left out — the queued
+#                            messages, "What to do"), control chars stripped, clipped to 24000 with a pointer to the
+#                            file; cursor exchanges from ~/.cursor/projects/<slug>/agent-transcripts/<chat>/<chat>.jsonl
+#                            (newest written since the cursor agent's handoff-in / autostart, <user_query> unwrapped).
+#                            Live on a private tmux: claude fixture → cursor fixture: 401 / 400 (bad to, same backend,
+#                            launcher of the wrong kind) / 404 / 409 while working (no peer made) or while a message is
+#                            `sending`; no launcher named → the builtin cursor if installed, else the workspace's own
+#                            cursor launcher, else 409; .hadron/handoff/<id>-<stamp>.md 0600 in a 0700 dir; peer
+#                            <id>-cursor created in the same cwd with task/group/artifacts, linked both ways
+#                            (`handoff {peer, dir in|out, at, file, error?}` on the record + relatedAgents), source
+#                            parked with its queued outbox entries moved into the handoff; the peer's handoff is an
+#                            ordinary outbox entry queued only once its agent process is up (shell check, first verdict,
+#                            cursorProc; a just-launched claude at its ❯ prompt) — never arrives within
+#                            HADRON_HANDOFF_WAIT_MS → handoff.error + warnOnce; a second handoff reuses the linked peer;
+#                            the way back unparks the source, carries the cursor transcript's exchanges and reaches the
+#                            running claude; an archived peer is revived. UI: context menu "Continue in Cursor" /
+#                            "Continue in Claude" (disabled mid-turn); CLI `hadron handoff [agent] --to cursor|claude`)
 ```
 
 ### Reliability gate

@@ -639,6 +639,8 @@ html, body {
 #ctx-menu { display: none; position: fixed; z-index: 300; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 4px 0; min-width: 150px; box-shadow: 0 8px 24px rgba(0,0,0,.5); }
 .cm-item { padding: 5px 12px; font-size: 11px; cursor: pointer; display: flex; align-items: center; gap: 6px; color: var(--text); transition: background .1s; }
 .cm-item:hover { background: var(--bg3); }
+.cm-item.disabled { color: var(--text2, #8b949e); cursor: default; }
+.cm-item.disabled:hover { background: none; }
 .cm-item.danger { color: var(--red); }
 .cm-item.danger:hover { background: #2a1318; }
 .cm-sep { height: 1px; background: var(--border); margin: 3px 0; }

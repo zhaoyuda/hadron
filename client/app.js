@@ -2496,6 +2496,7 @@ function showCtxMenu(e, sessionId) {
     <div class="cm-item" data-action="focus" data-sid="${sessionId}">Focus ${esc(s.name.toUpperCase())}</div>
     <div class="cm-item" data-action="pin" data-sid="${sessionId}">${s.pinned ? "Unpin" : "Pin"} ${esc(s.name.toUpperCase())}</div>
     <div class="cm-item" data-action="park" data-sid="${sessionId}" title="${s.parked ? "Bring it back out of the stale row" : "Fold it into its group's stale row — keeps running, never archived"}">${s.parked ? "Unpark" : "Park"} ${esc(s.name.toUpperCase())}</div>
+    ${handoffMenuItem(s)}
     ${canClose ? `<div class="cm-sep"></div><div class="cm-item danger" data-action="close" data-sid="${sessionId}">Close ${esc(s.name.toUpperCase())}</div>` : ""}
   `;
   menu.style.display = "block";
@@ -2510,6 +2511,7 @@ function showCtxMenu(e, sessionId) {
       if (action === "focus") switchSession(sid);
       else if (action === "pin") togglePin(sid);
       else if (action === "park") togglePark(sid);
+      else if (action === "handoff") handOff(sid, item.dataset.to);
       else if (action === "close") closeSession(sid);
     });
   });
@@ -2536,6 +2538,36 @@ async function toggleFlag(sessionId, key) {
   }
 }
 const togglePark = (sessionId) => toggleFlag(sessionId, "parked");
+
+// "Continue in Cursor" / "Continue in Claude" (server: POST …/handoff): the
+// server writes the handoff, starts (or revives) the linked agent on the other
+// CLI and parks this one. Offered for claude and cursor agents only; refused
+// mid-turn (the reason is on the item).
+function handoffMenuItem(s) {
+  const to = s.backend === "cursor" ? "claude" : ["shell", "codex"].includes(s.launchCommand) ? null : "cursor";
+  if (!to) return "";
+  const label = to === "cursor" ? "Continue in Cursor" : "Continue in Claude";
+  const busy = s.state === "working";
+  const title = busy ? "It is in the middle of a turn — let it finish or stop it first"
+    : `Hand the work to ${to === "cursor" ? "cursor-agent" : "claude"} in the same folder: a handoff from the checkpoint, last exchanges and git changes goes in as the linked agent's first message, and this one is parked`;
+  return `<div class="cm-item${busy ? " disabled" : ""}" data-action="${busy ? "" : "handoff"}" data-to="${to}" data-sid="${s.id}" title="${esc(title)}">${label}</div>`;
+}
+async function handOff(sessionId, to) {
+  const s = sessions.find((x) => x.id === sessionId);
+  if (!s) return;
+  try {
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/handoff`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ to }),
+    });
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok) { showCenterMessage(`Handoff not done — ${out.error || `HTTP ${res.status}`}`, "error"); return; }
+    showCenterMessage(`${s.name} handed off to ${out.peer.name} — the handoff goes in once ${to === "cursor" ? "cursor-agent" : "claude"} is at its prompt`, "info");
+    await fetchSessions();
+    switchSession(out.peer.id);
+  } catch (e) {
+    showCenterMessage(`Handoff not done — ${e.message}`, "error");
+  }
+}
 const togglePin = (sessionId) => toggleFlag(sessionId, "pinned");
 
 function hideCtxMenu() {
