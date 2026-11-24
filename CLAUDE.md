@@ -364,7 +364,8 @@ npm test
 #                            doctor local row info (not installed / no receipt yet) or green (receipt age + numbers);
 #                            generic sources <CLAUDE_CONFIG_DIR>/hadron-quota.d/<name>.json {at, label, windows:[{label,
 #                            usedPct, resetsAt}]} (readQuotaSources / parseQuotaSource — strict, a bad file skipped WHOLE,
-#                            stale after 24 h, 16 files / 64 KB caps, names = file stems of letters/digits/_.-) → `sources`
+#                            stale after 24 h (still a problem, but carrying {stale, label, at, windows} — the last picture,
+#                            windows read as of the receipt's own `at` so a reset since never empties it), 16 files / 64 KB caps, names = file stems of letters/digits/_.-) → `sources`
 #                            + `sourceProblems` on /api/quota, `hadron quota` lines, doctor green row per source / yellow
 #                            per skipped file; the widget draws each under its label behind a neutral gauge (M24); optional
 #                            per-window `detail` (1-80 printable chars → tooltip + `hadron quota`, never the bar) and `level`
@@ -748,7 +749,8 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                            windows under the threshold → logos only, tooltip intact, never hidden like "nothing
 #                            known"; "Always" shows all four, persists across a reload, an unknown value falls back to 30; amber from 50 / red from 80, tooltip with
 #                            source + age + reset countdowns; a new receipt moves the number on the next poll, a
-#                            vendor with nothing known drops out, both gone → hidden; anonymous GET /api/quota is 401)
+#                            vendor with nothing known drops out, both gone → hidden; anonymous GET /api/quota is 401; a skipped source stays in the bar — a stale receipt as "<label> ⚠ stale 21d" red when
+#                            its last receipt had a bad/≥80 window else amber, last picture in the tooltip; an unreadable file "<name> ⚠" + reason)
 #   + test/e2e/m25-switch-latency.js (agent-switch latency: a shell agent seeded with 35k CJK lines (history-limit
 #                                 raised on the session + window re-created, tmux's default 2000 would trim it; ≥ 20000
 #                                 rows asserted), viewed in a vsplit beside its artifact while the other agent is

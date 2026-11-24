@@ -302,6 +302,7 @@ try {
     symlinkSync(join(dir, "gone-elsewhere.json"), join(dir, "dangling.json")); // a writer mid-rename, or a stale link
     mkdirSync(join(dir, "adir.json"));
     writeFileSync(join(dir, "esc\x1b[31mred.json"), JSON.stringify(good));
+    writeFileSync(join(dir, "\u202eevil.json"), JSON.stringify(good));
     const r2 = readQuotaSources({ configDir: CFG, now: nowMs });
     const lite = r2.sources.find((v) => v.name === "litellm"), budget = r2.sources.find((v) => v.name === "budget");
     const typo = r2.sources.find((v) => v.name === "reset-typo");
@@ -310,9 +311,18 @@ try {
     ok(budget && budget.windows.length === 3 && budget.windows[1].level === "bad" && budget.windows[1].detail === "daily cap hit" && budget.windows[2].level === null && budget.notes.length === 1 && /^windows\[2\] \("wk"\)\.level ignored/.test(budget.notes[0]) && !("budget" in budget), `a file with an ignored level is still a source, the note rides on it, its own budget block is not forwarded (${JSON.stringify(budget && budget.notes)})`);
     const probs = Object.fromEntries(r2.problems.map((x) => [x.name, x.error]));
     ok(/JSON/.test(probs.broken) && /usedPct/.test(probs.half) && /stale/.test(probs.old) && /file name/.test(probs["bad name"]) && /bytes/.test(probs.big) && !("reset" in probs) && !("notes" in probs), `each skipped file is a named problem — invalid JSON, one bad window fails the whole file, stale, bad name, too big; a fully reset receipt is not a problem (${JSON.stringify(probs)})`);
+    const old = r2.problems.find((x) => x.name === "old"), other = r2.problems.find((x) => x.name === "broken");
+    ok(old && old.stale === true && old.label === "Old" && Date.parse(old.at) === nowMs - SOURCE_STALE_MS - 1000 && Array.isArray(old.windows) && old.windows.length === good.windows.length && old.windows.every((w, i) => w.label === good.windows[i].label && typeof w.usedPct === "number" && !("resetsAt" in w)), `a stale receipt is a problem that keeps its label, at and last windows (as written, no reset times) so the bar can keep it (${JSON.stringify(old)})`);
+    ok(other && !("stale" in other) && !("label" in other) && !("windows" in other), "any other skipped file carries only name/file/error");
+    writeFileSync(join(dir, "dead.json"), JSON.stringify({ at: new Date(nowMs - 21 * 86400000).toISOString(), label: "LiteLLM", windows: [{ label: "1mo", usedPct: 12, level: "bad", detail: "$50 of $50", resetsAt: nowS2 - 86400 }, { label: "day", usedPct: 3, resetsAt: Math.floor((nowMs - 21 * 86400000) / 1000) + 3600 }] }));
+    const dead = readQuotaSources({ configDir: CFG, now: nowMs }).problems.find((x) => x.name === "dead");
+    ok(dead && dead.stale && dead.label === "LiteLLM" && dead.windows.length === 2 && dead.windows[0].level === "bad" && dead.windows[0].detail === "$50 of $50" && /stale: written 504 h ago/.test(dead.error), `a writer dead 21 days at "bad" keeps its bad window — windows read as of the receipt's own time, so a reset since then does not empty it (${JSON.stringify(dead)})`);
+    rmSync(join(dir, "dead.json"));
     ok(/^unreadable \(ENOENT\)$/.test(probs.dangling) && probs.adir === "not a regular file", `a dangling symlink and a directory are problems with a code, not a path (${probs.dangling} / ${probs.adir})`);
     const files = Object.fromEntries(r2.problems.map((x) => [x.name, x.file]));
     ok(files["bad name"] === "hadron-quota.d/bad name.json" && files.broken === "hadron-quota.d/broken.json" && files["esc?[31mred"] === "hadron-quota.d/esc?[31mred.json", `problems carry the display path, control characters stripped from the file name (${files["esc?[31mred"]})`);
+    ok(files["?evil"] === "hadron-quota.d/?evil.json" && !/\u202e/.test(JSON.stringify(r2)), `a bidi override in a file name is replaced too — the name is drawn in the top bar (${JSON.stringify(Object.keys(files))})`);
+    rmSync(join(dir, "\u202eevil.json"));
     ok(!JSON.stringify(r2).includes(CFG) && !/\x1b/.test(JSON.stringify(r2)), "no file path and no control character in the result");
     for (let i = 0; i < 20; i++) writeFileSync(join(dir, `f${String(i).padStart(2, "0")}.json`), "{ nope");
     const r3 = readQuotaSources({ configDir: CFG, now: nowMs });

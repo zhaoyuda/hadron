@@ -183,7 +183,8 @@ export const SOURCE_MAX_BYTES = 64 * 1024;
 const SOURCE_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 const CLEAN = /^[^\x00-\x1f\x7f-\x9f\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]+$/; // one line, no C0/C1 control characters, no Unicode line separators / zero-widths / bidi overrides — it goes on a <span>, a tooltip and a terminal line
 // A file name is attacker-shaped text that reaches `hadron doctor` stdout: no control characters, 80 chars.
-const safeFile = (f) => String(f).replace(/[\x00-\x1f\x7f-\x9f]/g, "?").slice(0, 80);
+// The same characters CLEAN refuses: a file name is drawn in the top bar too.
+const safeFile = (f) => String(f).replace(/[\x00-\x1f\x7f-\x9f\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, "?").slice(0, 80);
 const text = (v, max) => typeof v === "string" && v.length >= 1 && v.length <= max && CLEAN.test(v) && v.trim() === v;
 
 // Pure. Returns { label, at, windows: [{ key, label, usedPct, resetsAt, detail,
@@ -235,7 +236,8 @@ export function parseQuotaSource(rec, { now = Date.now() } = {}) {
   return { label: rec.label, at: new Date(atMs).toISOString(), windows: liveWindows(windows, nowS), notes };
 }
 
-// { sources: [{ name, label, at, windows, notes, source: "file" }], problems: [{ name, file, error }] }
+// { sources: [{ name, label, at, windows, notes, source: "file" }], problems: [{ name, file, error }
+//   + for a stale receipt { stale: true, label, at, windows: [{ label, usedPct, detail, level }] } (as written)] }
 // — sources is what the widget shows (files with no live window are left out,
 // not a problem), problems is what doctor shows: `file` is the display path
 // ("hadron-quota.d/<file>", control characters stripped), `name` the stem. A
@@ -261,7 +263,16 @@ export function readQuotaSources({ configDir = CLAUDE_CONFIG_DIR, now = Date.now
       let rec;
       try { rec = JSON.parse(raw); } catch { throw new Error("not valid JSON"); }
       const parsed = parseQuotaSource(rec, { now });
-      if (now - Date.parse(parsed.at) > SOURCE_STALE_MS) throw new Error(`stale: written ${Math.floor((now - Date.parse(parsed.at)) / 3600000)} h ago (the writer stopped?)`);
+      if (now - Date.parse(parsed.at) > SOURCE_STALE_MS) {
+        // The writer stopped: still a problem (no number is current), but the
+        // bar keeps it under its label with the picture as it was written —
+        // its windows as of `at`, warn/bad levels included — so a gauge whose
+        // writer died at "bad" never just disappears.
+        const atMs = Date.parse(parsed.at);
+        const last = parseQuotaSource(rec, { now: atMs }).windows.map(({ label, usedPct, detail, level }) => ({ label, usedPct, detail, level }));
+        problems.push({ name, file: shown, error: `stale: written ${Math.floor((now - atMs) / 3600000)} h ago (the writer stopped?)`, stale: true, label: parsed.label, at: parsed.at, windows: last });
+        continue;
+      }
       if (!parsed.windows.length && !parsed.notes.length) continue; // every window reset: nothing current to show, nothing wrong (with a note the source stays, so the typo is named before the window comes back)
       sources.push({ name, ...parsed, source: "file" });
     } catch (e) { problems.push({ name, file: shown, error: e.message }); }

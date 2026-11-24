@@ -130,17 +130,34 @@ try {
   await page.evaluate(() => pollQuota());
   await page.evaluate(() => handleMenuAction("set-quota-from", { dataset: { quotaFrom: "30" } }));
   await widget.waitFor({ state: "visible", timeout: 5000 });
-  r.ok((await widget.locator(".q-vendor").count()) === 3 && (await vendorText("src:litellm")) === "LiteLLM 1mo 45%" && (await logo("src:litellm")) === "LiteLLM" && (await widget.locator('.q-vendor[data-vendor="src:litellm"] .q-label').innerText()) === "LiteLLM", `a source file is a vendor under its label, drawn as text (every source shares the gauge mark); 45 shown, 12 hidden at 30% (${await text()})`);
+  r.ok((await widget.locator(".q-vendor:not(.q-skipped)").count()) === 3 && (await vendorText("src:litellm")) === "LiteLLM 1mo 45%" && (await logo("src:litellm")) === "LiteLLM" && (await widget.locator('.q-vendor[data-vendor="src:litellm"] .q-label').innerText()) === "LiteLLM", `a source file is a vendor under its label, drawn as text (every source shares the gauge mark); 45 shown, 12 hidden at 30% (${await text()})`);
   r.ok((await widget.locator('.q-vendor[data-vendor="src:litellm"] svg.q-logo-source').count()) === 1, "behind the neutral gauge mark, not a vendor logo");
   const ts = await widget.getAttribute("title");
   r.ok(/LiteLLM \(hadron-quota\.d\/litellm\.json, just now\)/.test(ts) && /1mo window: 45% used, resets in \d+d/.test(ts) && /day window: 12% used/.test(ts) && !/day window: 12% used,/.test(ts), `tooltip: file name as the source, age, every window, countdown only with resetsAt (${ts.replace(/\n/g, " | ")})`);
   r.ok((await vendorText("src:spicy")) === "<b>Spicy</b> 1mo 90%" && (await logo("src:spicy")) === "<b>Spicy</b>" && (await widget.locator('.q-vendor[data-vendor="src:spicy"] b').count()) === 0 && /q-hot/.test(await cls("src:spicy", "1mo")), "a label with markup is drawn as text (escaped), red from 80%");
-  r.ok((await widget.locator('.q-vendor[data-vendor="src:broken"]').count()) === 0, "the invalid file is not a vendor (doctor names it)");
+  r.ok((await vendorText("bad:broken")) === "broken ⚠" && /q-warn/.test(await cls("bad:broken", "skipped")) && /hadron-quota\.d\/broken\.json skipped — not valid JSON/.test(await widget.getAttribute("title")), `a file that cannot be read stays in the bar under its file name with ⚠, the reason in the tooltip (${await vendorText("bad:broken")})`);
   r.ok((await vendorText("src:budget")) === "Budget day 12% · 1mo 60% · wk 85% · yr 95%", `level: a "bad" window at 12% is drawn under the 30% threshold, an ignored level (qtr, "red") still hides at 2% — the file was not skipped (${await vendorText("src:budget")})`);
   r.ok(/q-hot/.test(await cls("src:budget", "day")) && !/q-warn|q-hot/.test(await cls("src:budget", "1mo")) && /q-warn/.test(await cls("src:budget", "wk")) && !/q-hot/.test(await cls("src:budget", "wk")) && !/q-warn|q-hot/.test(await cls("src:budget", "yr")), `level replaces the 50/80 thresholds: bad → red at 12%, ok → plain at 60% AND at 95% (the writer's verdict, never a floor; the number still draws), warn → amber at 85% (${await cls("src:budget", "day")} / ${await cls("src:budget", "1mo")} / ${await cls("src:budget", "wk")})`);
   const tb = await widget.getAttribute("title");
   r.ok(/day window: 12% used \(bad\), resets in \d+h?\s?\d*m — daily cap hit/.test(tb) && /1mo window: 60% used — \$6\.10 of \$50/.test(tb) && /wk window: 85% used \(warn\)$/m.test(tb) && /qtr window: 2% used$/m.test(tb) && !/xxxx/.test(tb), `tooltip: level in words after the number, detail after the countdown, nothing for an ignored field (${tb.split("\n").filter((l) => /Budget|day|1mo window: 60|wk|qtr/.test(l)).join(" | ")})`);
-  rmSync(join(srcDir, "litellm.json")); rmSync(join(srcDir, "spicy.json")); rmSync(join(srcDir, "broken.json")); rmSync(join(srcDir, "budget.json"));
+  // A writer that stopped (Mac 2026-11-23: LiteLLM died at "bad", aged out after
+  // 24 h, the budget ran out unseen): the source stays under its label as
+  // "⚠ stale 21d" in its last receipt's worst colour, the last picture in the tooltip.
+  const ago = (d) => new Date(Date.now() - d * 86400000).toISOString();
+  source("dead.json", { at: ago(21), label: "Dead", windows: [{ label: "1mo", usedPct: 12, level: "bad", detail: "$50 of $50" }] });
+  source("quiet.json", { at: ago(2), label: "Quiet", windows: [{ label: "1mo", usedPct: 5 }] });
+  await wait(11000);
+  await page.evaluate(() => pollQuota());
+  r.ok((await vendorText("src:dead")) === "Dead ⚠ stale 21d" && /q-hot/.test(await cls("src:dead", "stale")), `stale source at "bad": label + "⚠ stale 21d" in red (${await vendorText("src:dead")} / ${await cls("src:dead", "stale")})`);
+  r.ok((await vendorText("src:quiet")) === "Quiet ⚠ stale 2d" && /q-warn/.test(await cls("src:quiet", "stale")) && !/q-hot/.test(await cls("src:quiet", "stale")), `stale source with no level: amber — a dead writer is never plain (${await cls("src:quiet", "stale")})`);
+  const tdead = await widget.getAttribute("title");
+  r.ok(/Dead \(hadron-quota\.d\/dead\.json\) — stale: written 504 h ago \(the writer stopped\?\); its last receipt, 21d ago:\n  1mo window: 12% used \(bad\) — \$50 of \$50/.test(tdead), `tooltip: the reason and the last receipt as written (${tdead.split("\n").filter((l) => /Dead|\$50/.test(l)).join(" | ")})`);
+  // The incident's own shape: no Claude/Codex, no live source — the dead one alone keeps the bar up.
+  rmSync(join(srcDir, "litellm.json")); rmSync(join(srcDir, "spicy.json")); rmSync(join(srcDir, "broken.json")); rmSync(join(srcDir, "budget.json")); rmSync(join(srcDir, "quiet.json"));
+  await wait(11000);
+  await page.evaluate(() => pollQuota());
+  r.ok(await widget.isVisible() && (await text()).replace(/\s+/g, " ").trim() === "Dead ⚠ stale 21d" && (await widget.locator(".q-vendor").count()) === 1, `a stale source alone keeps the widget visible (${await text()})`);
+  rmSync(join(srcDir, "dead.json"));
   await wait(11000);
   await page.evaluate(() => pollQuota());
   r.ok(await widget.isHidden(), "files removed → the sources drop out, widget hidden again");

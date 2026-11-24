@@ -3496,14 +3496,30 @@ function renderQuota() {
   const known = [["Claude", "claude", quota && quota.claude], ["Codex", "codex", quota && quota.codex], ...extra.map((v) => [v.label, `src:${v.name}`, v])]
     .filter(([, , v]) => v && Array.isArray(v.windows) && v.windows.length)
     .map(([name, key, v]) => [name, key, v, v.windows.filter(quotaShown)]);
-  el.hidden = known.length === 0;
+  // A source that was skipped stays in the bar (Mac 2026-11-23: a LiteLLM writer
+  // died at "bad", the gauge aged out after 24 h, the budget ran out three
+  // weeks later with nothing on screen): a stale receipt under its label as
+  // "⚠ stale 21d" in its last receipt's worst colour (amber when it had none),
+  // any other skipped file as "<name> ⚠"; the reason is in the tooltip.
+  const skipped = quota && Array.isArray(quota.sourceProblems) ? quota.sourceProblems.filter((p) => p && typeof p.name === "string" && typeof p.error === "string") : [];
+  el.hidden = known.length === 0 && skipped.length === 0;
   if (el.hidden) { el.innerHTML = ""; el.title = ""; return; }
+  const staleAge = (iso) => { const h = Math.floor((Date.now() - Date.parse(iso || "")) / 3600000); return !(h >= 0) ? "" : h < 48 ? ` ${h}h` : ` ${Math.floor(h / 24)}d`; };
+  const worst = (ws) => { const c = (ws || []).map(quotaClass); return c.includes("q-hot") ? "q-hot" : "q-warn"; };
+  const skippedHtml = skipped.map((p) => p.stale && typeof p.label === "string"
+    ? `<span class="q-vendor q-skipped" data-vendor="src:${esc(p.name)}"><span class="q-name" role="img" aria-label="${esc(p.label)}">${QUOTA_LOGO.source}</span><span class="q-label">${esc(p.label)}</span><span class="q-win ${worst(p.windows)}" data-win="stale">⚠ stale${staleAge(p.at)}</span></span>`
+    : p.file === p.name   // the directory itself (over the file cap), not one source
+      ? `<span class="q-vendor q-skipped" data-vendor="dir"><span class="q-name" role="img" aria-label="quota sources">${QUOTA_LOGO.source}</span><span class="q-win q-warn" data-win="skipped">⚠ sources</span></span>`
+      : `<span class="q-vendor q-skipped" data-vendor="bad:${esc(p.name)}"><span class="q-name" role="img" aria-label="${esc(p.name)}">${QUOTA_LOGO.source}</span><span class="q-label">${esc(p.name)}</span><span class="q-win q-warn" data-win="skipped">⚠</span></span>`).join("");
+  const skippedTitle = skipped.map((p) => p.stale && typeof p.label === "string"
+    ? `${p.label} (${p.file}) — ${p.error}; its last receipt, ${quotaAge(p.at)}:\n` + (Array.isArray(p.windows) ? p.windows : []).map((w) => `  ${w.label} window: ${w.usedPct}% used${w.level === "warn" || w.level === "bad" ? ` (${w.level})` : ""}${w.detail ? ` — ${w.detail}` : ""}`).join("\n")
+    : p.file === p.name ? `${p.file}: ${p.error}` : `${p.file || p.name} skipped — ${p.error}`);
   el.innerHTML = known.map(([name, key, , shown]) =>
     `<span class="q-vendor${shown.length ? "" : " q-quiet"}" data-vendor="${esc(key)}"><span class="q-name" role="img" aria-label="${esc(name)}">${QUOTA_LOGO[key] || QUOTA_LOGO.source}</span>${key.startsWith("src:") ? `<span class="q-label">${esc(name)}</span>` : ""}${shown.map((w) =>
-      `<span class="q-win ${quotaClass(w)}" data-win="${esc(w.label)}">${esc(w.label)} ${w.usedPct}%</span>`).join('<span class="q-sep">·</span>')}</span>`).join("");
-  el.title = known.map(([name, , v]) =>
+      `<span class="q-win ${quotaClass(w)}" data-win="${esc(w.label)}">${esc(w.label)} ${w.usedPct}%</span>`).join('<span class="q-sep">·</span>')}</span>`).join("") + skippedHtml;
+  el.title = [...known.map(([name, , v]) =>
     `${name} (${v.source === "statusline" ? "claude's statusline" : v.source === "file" ? `hadron-quota.d/${v.name}.json` : "codex rollout"}, ${quotaAge(v.at)}${v.plan ? `, ${v.plan}` : ""}):\n` +
-    v.windows.map((w) => `  ${w.label} window: ${w.usedPct}% used${w.level === "warn" || w.level === "bad" ? ` (${w.level})` : ""}${w.resetsAt ? `, resets ${quotaResetsIn(w.resetsAt)}` : ""}${w.detail ? ` — ${w.detail}` : ""}`).join("\n")).join("\n");
+    v.windows.map((w) => `  ${w.label} window: ${w.usedPct}% used${w.level === "warn" || w.level === "bad" ? ` (${w.level})` : ""}${w.resetsAt ? `, resets ${quotaResetsIn(w.resetsAt)}` : ""}${w.detail ? ` — ${w.detail}` : ""}`).join("\n")), ...skippedTitle].join("\n");
 }
 async function pollQuota() {
   try {

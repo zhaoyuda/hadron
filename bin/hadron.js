@@ -1131,7 +1131,11 @@ async function main() {
       line("claude", q.claude);
       line("codex", q.codex);
       for (const v of q.sources || []) { line(v.label.slice(0, 12), v); for (const n of v.notes || []) console.log(`${"".padEnd(width)}note: ${n} (the file is still read)`); }
-      for (const pr of q.sourceProblems || []) console.log(`${pr.name.slice(0, 12).padEnd(width)}skipped: ${pr.error} (${pr.file})`);
+      for (const pr of q.sourceProblems || []) {
+        // a stale receipt: its last picture, as written (levels included)
+        const last = pr.stale && Array.isArray(pr.windows) && pr.windows.length ? ` — last: ${pr.windows.map((w) => `${w.label} ${w.usedPct}%${quotaLevelMark(w)}${w.detail ? ` (${w.detail})` : ""}`).join(", ")}` : "";
+        console.log(`${pr.name.slice(0, 12).padEnd(width)}skipped: ${pr.error} (${pr.file})${last}`);
+      }
       console.log(st.installed ? (st.current ? `${"sink".padEnd(width)}installed in claude's statusLine` : `${"sink".padEnd(width)}installed from ANOTHER checkout — \`hadron quota --install\` from here repoints it (${st.command})`) : st.error ? `sink    ${st.error}` : "sink    not installed — `hadron quota --install` (claude usage stays unknown without it)");
       break;
     }
