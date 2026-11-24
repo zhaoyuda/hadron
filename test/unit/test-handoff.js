@@ -13,6 +13,12 @@
  * message; the way back unparks the source and carries the cursor transcript's
  * exchanges. Refusals: 401 / 400 / 404 / 409 while working.
  *
+ * Cursor identity (cursor-resume.js): the peer's cursor-agent is launched with
+ * --resume <uuid Hadron picked> (authoritative, doctor green), the way back
+ * reads that chat's transcript (not the newest in the folder), a revive opens
+ * a fresh chat, a reboot recreates the pane and relaunches --resume <same
+ * chat>, an operator exit leaves a clean-exit tombstone.
+ *
  * Run: node test/unit/test-handoff.js      Requires: tmux, git on PATH.
  */
 import "./hadron-home.js";
@@ -136,9 +142,18 @@ const CFIXTURE = join(FIX, "cursor-fix");
 writeFileSync(CFIXTURE, `#!/usr/bin/env bash
 if [ -z "$HADRON_FIX_REEXEC" ]; then HADRON_FIX_REEXEC=1 exec -a cursor-agent bash "$0" "$@"; fi
 LOG="$1"; D="$2"
+# --resume <id>: cursor-agent opens (or creates) that chat under ~/.cursor/chats/<md5(cwd)>/<id>/
+C=""
+meta() { printf '{"schemaVersion":1,"createdAtMs":%s000,"hasConversation":%s,"updatedAtMs":%s000,"cwd":"%s"}' "$T0" "$1" "$(date +%s)" "$PWD" > "$C/meta.json"; }
+if [ "$3" = "--resume" ]; then
+  T0=$(date +%s); C="$HOME/.cursor/chats/$(printf %s "$PWD" | md5sum | cut -c1-32)/$4"; mkdir -p "$C"
+  [ -f "$C/meta.json" ] || meta false
+  printf 'RESUME %s\\n' "$4" >> "$LOG"
+fi
 paint() { printf '\\e[2J\\e[H'; cat "$D/$1.txt"; }
 paint idle
 while IFS= read -r line; do
+  [ -n "$C" ] && meta true
   if [ -z "$line" ]; then printf '<ENTER>\\n' >> "$LOG"; else printf '%s\\n' "$line" >> "$LOG"; fi
   paint idle
 done
@@ -173,10 +188,11 @@ const listed = async (id) => (await api("GET", "/api/sessions")).json.find((s) =
 const onDisk = (id) => JSON.parse(readFileSync(join(WS, ".hadron", "agents", `${id}.json`), "utf-8"));
 const handoff = (id, body) => api("POST", `/api/sessions/${id}/handoff`, body);
 
-async function live() {
+async function startServer(bootId) {
   const env = {
     ...process.env, PORT: String(PORT), HOME, SHELL: "/bin/bash", PATH: `${FIX}:${process.env.PATH}`,
-    HADRON_TMUX_SOCKET: SOCK, HADRON_BOOT_ID: "handoff-boot", HADRON_CURSOR_AGENT: "/nonexistent/cursor-agent", HADRON_HANDOFF_WAIT_MS: "20000",
+    HADRON_TMUX_SOCKET: SOCK, HADRON_BOOT_ID: bootId, HADRON_CURSOR_AGENT: "/nonexistent/cursor-agent", HADRON_HANDOFF_WAIT_MS: "20000",
+    HADRON_RESUME_READY_POLLS: "8",
     INVOCATION_ID: "", XPC_SERVICE_NAME: "",
   };
   delete env.TMUX; delete env.TMUX_PANE;
@@ -185,6 +201,12 @@ async function live() {
   server.stderr.on("data", (d) => { serverLog += d; });
   if (!await until(async () => { try { return (await fetch(`${BASE}/api/health`)).ok; } catch { return false; } }, 10000)) throw new Error("server did not start");
   TOKEN = readFileSync(join(WS, ".hadron", "token"), "utf-8").trim();
+}
+const doctorRow = async (id) => (await (await fetch(`${BASE}/api/doctor`, { headers: { "x-hadron-token": TOKEN } })).json()).agents.find((a) => a.id === id)?.finding || {};
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+async function live() {
+  await startServer("handoff-boot");
 
   const r = await api("POST", "/api/sessions", { name: "alpha", cwd: PROJ, launchCommand: "cc-fix", group: "Workers", task: "port the lexer", autostart: true });
   if (r.status !== 201) throw new Error(`agent create failed: ${r.status}`);
@@ -245,11 +267,27 @@ async function live() {
   const again = await handoff(id, { to: "cursor", launchCommand: "cur-fix" });
   ok(again.status === 200 && again.json.peer.id === pid && again.json.created === false, "a second handoff the same way reuses the linked peer");
 
+  console.log("\n4b. the cursor chat is Hadron's choice");
+  const chat = onDisk(pid).runtime?.sessionId;
+  ok(UUID.test(String(chat)) && onDisk(pid).runtime.confidence === "authoritative", `the peer's checkpoint names a chat id Hadron picked, authoritative (${onDisk(pid).runtime?.confidence})`);
+  ok(read(CLOG).includes(`RESUME ${chat}`), "…cursor-agent was launched with --resume <that id>");
+  ok(await until(async () => /resumes as authoritative/.test((await doctorRow(pid)).message || ""), 15000), `doctor: green "resumes as authoritative" (${JSON.stringify(await doctorRow(pid))})`);
+  ok(await until(() => { const r = onDisk(pid).runtime; return r.desiredRuntime === "cursor" && r.observedRuntime === "cursor" && r.transcriptSeen === true; }, 12000), `…checkpoint: running cursor, the chat has a turn (${JSON.stringify({ ...onDisk(pid).runtime, sessionId: "…" })})`);
+  ok(!serverLog.includes(chat), "the chat id is in no log line");
+  const adopt = await api("POST", `/api/sessions/${pid}/adopt`, { sessionId: "11111111-2222-4333-8444-555555555555", force: true });
+  ok(adopt.status === 409 && onDisk(pid).runtime.sessionId === chat && onDisk(pid).runtime.desiredRuntime === "cursor", `hadron adopt on a cursor agent → 409, checkpoint untouched (${adopt.status})`);
+
   console.log("\n5. cursor → claude (the way back)");
   // cursor-agent's own transcript for the cwd — what the way back carries.
-  const cdir = join(HOME, ".cursor", "projects", cursorProjectSlug(PROJ), "agent-transcripts", "c1");
+  // Under the chat the checkpoint names — a newer chat in the same folder (another
+  // cursor-agent run there) is not this agent's and is not carried.
+  const pchat = onDisk(pid).runtime.sessionId;
+  const tdir = join(HOME, ".cursor", "projects", cursorProjectSlug(PROJ), "agent-transcripts");
+  const cdir = join(tdir, pchat);
+  mkdirSync(join(tdir, "c1"), { recursive: true });
+  writeFileSync(join(tdir, "c1", "c1.jsonl"), JSON.stringify({ role: "user", message: { content: [{ type: "text", text: "<user_query>someone else's chat</user_query>" }] } }) + "\n");
   mkdirSync(cdir, { recursive: true });
-  writeFileSync(join(cdir, "c1.jsonl"), [
+  writeFileSync(join(cdir, `${pchat}.jsonl`), [
     { role: "user", message: { content: [{ type: "text", text: "<timestamp>x</timestamp>\n<user_query>\nwrite b()\n</user_query>" }] } },
     { role: "assistant", message: { content: [{ type: "text", text: "b() written, test passes" }] } },
   ].map((l) => JSON.stringify(l)).join("\n") + "\n");
@@ -263,6 +301,7 @@ async function live() {
   ok(b.status === 200 && b.json.peer.id === id && b.json.created === false, `back to the source (${b.status} ${b.json?.error || ""})`);
   const back = read(join(WS, b.json.file));
   ok(back.includes("# Handoff from Cursor (cursor-agent)") && back.includes("**User:**\nwrite b()") && back.includes("**Cursor:**\nb() written, test passes"), "the cursor transcript's exchange is in it");
+  ok(!back.includes("someone else's chat"), "…from the chat the checkpoint names, not the newest in the folder");
   const s2 = onDisk(id), p2 = onDisk(pid);
   ok(!s2.parked && s2.handoff.dir === "in" && p2.parked === true && p2.handoff.dir === "out", "source unparked + linked in, cursor peer parked");
   ok(await until(() => read(LOG).slice(LOGLEN).includes("# Handoff from Cursor"), 15000), "the handoff reached the running claude");
@@ -278,6 +317,23 @@ async function live() {
   const twice = await handoff(id, { to: "cursor", launchCommand: "cur-fix" });
   ok(twice.status === 409 && /already in progress/.test(twice.json?.error || ""), `a second handoff while the first is still being delivered → 409 (${twice.status})`);
   ok(await until(() => read(CLOG).slice(CLEN).includes("# Handoff from Claude Code"), 20000), "…and gets the handoff");
+  const chat2 = onDisk(pid).runtime?.sessionId;
+  ok(UUID.test(String(chat2)) && chat2 !== chat && read(CLOG).slice(CLEN).includes(`RESUME ${chat2}`), "…in a fresh chat of its own");
+
+  console.log("\n6b. reboot → the cursor agent comes back in its chat");
+  ok(await until(async () => /resumes as authoritative/.test((await doctorRow(pid)).message || ""), 15000), "doctor green before the reboot");
+  { const g = new Promise((r) => server.once("exit", r)); server.kill("SIGTERM"); await g; }
+  tmuxSafe(["kill-session", "-t", `=${paneOf(pid)}`]);
+  const RLEN = read(CLOG).length;
+  await startServer("handoff-boot-2");
+  ok(await until(() => read(CLOG).slice(RLEN).includes(`RESUME ${chat2}`), 20000), "the pane was recreated and cursor-agent relaunched with --resume <the same chat>");
+  ok(await until(() => onDisk(pid).runtime?.restoreAttempt?.state === "ready", 25000), `…restoreAttempt ready (${JSON.stringify(onDisk(pid).runtime?.restoreAttempt)})`);
+  ok(onDisk(pid).runtime.sessionId === chat2 && onDisk(pid).runtime.confidence === "authoritative", "…the checkpoint still names it, authoritative");
+  ok(paneCmd(id) === "claude" && !read(LOG).includes("--resume"), "the claude source's pane survived the restart untouched");
+  // cursor-agent exited by the operator: a clean exit, never resumed.
+  tmuxSafe(["send-keys", "-t", paneOf(pid), "C-c"]);
+  ok(await until(() => onDisk(pid).runtime?.cleanExitAt && onDisk(pid).runtime.desiredRuntime === "shell", 15000), "cursor-agent → shell: clean-exit tombstone on the record");
+  ok(await until(async () => /exited cleanly/.test((await doctorRow(pid)).message || ""), 8000), "…doctor says it exited cleanly");
 
   console.log("\n7. no leaks");
   ok(!serverLog.includes(TOKEN), "server log carries no token");

@@ -29,7 +29,8 @@ import { createPerfLog, validateClientPerf } from "./perf-log.js";
 import { gitChanges, gitDiffFile } from "./changes.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { readQuota } from "./quota.js";
-import { handoffText, exchangesFromItems, exchangesFromCursorTranscript, newestCursorTranscript, peerIdFor } from "./handoff.js";
+import { CursorRuntimeTracker, cursorIsUp, cursorChatExists, cursorChatMeta, cursorChatsDir, cursorTranscriptFor } from "./cursor-resume.js";
+import { handoffText, exchangesFromItems, exchangesFromCursorTranscript, newestCursorTranscript, cursorProjectSlug, peerIdFor } from "./handoff.js";
 import { validateCheckpoint, safeCheckpoint, verifyHookClaim, applyHookClaim } from "./checkpoint.js";
 import { createConversation, readConversation, backfillBefore, conversationWire, conversationIdFor, validateDraftPatch, safeDraft, draftEmpty, PAGE_MAX, PAGE_DEFAULT, MAX_LINE } from "./conversation.js";
 import { validateEntry as validateOutboxEntry, safeOutbox, pruneOutbox, makeRoom as outboxMakeRoom, withPaneLock, outboxWire, entryStale as outboxEntryStale, entryReady as outboxEntryReady, recentlyHanded as outboxRecentlyHanded, switchable as outboxSwitchable, switchBlock as outboxSwitchBlock, heldBehind as outboxHeldBehind, SWITCH_BLOCKS as OUTBOX_SWITCH_BLOCKS, OUTBOX_MAX } from "./outbox.js";
@@ -425,6 +426,12 @@ async function launchLine(id, launcher) {
     const sid = randomUUID();
     cmdLine += ` --session-id ${sid}`;
     runtimeTrackers.get(id)?.recordSpawnedSession(sid);
+  } else if (launcher.kind === "cursor") {
+    // cursor-agent opens (and for a new id creates) the chat named by --resume:
+    // Hadron picks the id, so the chat is known from the first keystroke.
+    const chat = randomUUID();
+    cmdLine += ` --resume ${chat}`;
+    runtimeTrackers.get(id)?.recordSpawnedSession(chat);
   }
   return cmdLine;
 }
@@ -739,7 +746,7 @@ const DOCTOR_SIM_GENERATION = `doctor-sim-reboot-${randomUUID()}`;
 // anything else collapses to the literal "invalid" (which also keeps such a
 // checkpoint out of the "green" verdict — "invalid" is below every resume policy).
 const CONFIDENCE_VALUES = new Set(["authoritative", "correlated", "ambiguous", "manual", "registry", "hook"]);
-const RUNTIME_VALUES = new Set(["claude", "shell"]);
+const RUNTIME_VALUES = new Set(["claude", "cursor", "shell"]);
 const RESTORE_STATES = new Set(["started", "ready", "failed"]);
 const allowlist = (set) => (v) => (v == null || v === "" ? null : set.has(v) ? v : "invalid");
 const safeConfidence = allowlist(CONFIDENCE_VALUES);
@@ -793,13 +800,36 @@ function resolveClaudeInPath(pathStr) {
 // see it — the pane runs node with no cursor-agent under it, or cursor-agent
 // shows a screen the reader does not know (state held meanwhile).
 function classifyCursorHealth(session, now) {
+  const rt = session.runtime || {};
   if (session.cursorProc === false) return { level: "yellow", message: "cursor agent — the pane runs node but no cursor-agent process was found under it; state is not tracked" };
   const since = session.cursorUnknownSince ? Date.parse(session.cursorUnknownSince) : NaN;
   if (session.cursorProc && since && now - since >= CURSOR_UNKNOWN_POLLS * POLL_INTERVAL_MS) {
     return { level: "yellow", message: `cursor agent — cursor-agent shows a screen Hadron cannot read (since ${session.cursorUnknownSince}); state is held and nothing is typed into it` };
   }
   if (!CURSOR_AGENT_PATH && session.launchCommand === "cursor") return { level: "yellow", message: "cursor agent — cursor-agent was not found on PATH or in ~/.local/bin when the server started" };
-  return { level: "na", message: session.cursorProc ? "cursor agent — no auto-resume yet" : "cursor agent — cursor-agent not running" };
+  if (!session.cursorProc) {
+    if (safeTimestamp(rt.cleanExitAt, now)) return { level: "na", message: "cursor agent — exited cleanly" };
+    if (rt.desiredRuntime === "cursor") return { level: "yellow", message: "cursor agent — cursor-agent gone, no clean exit recorded" };
+    return { level: "na", message: "cursor agent — cursor-agent not running" };
+  }
+  if (rt.observedRuntime !== "cursor") return { level: "red", message: "cursor agent — running but untracked: Hadron has not recognised cursor-agent in this pane yet (auto-resume off)" };
+  const persistedIso = safeTimestamp(rt.lastPersistedAt, now);
+  const persisted = persistedIso ? Date.parse(persistedIso) : NaN;
+  if (!persisted || now - persisted > CHECKPOINT_PERSIST_THRESHOLD_MS) {
+    return { level: "red", message: "cursor agent — checkpoint not persisted — no durable write within threshold (a reboot would lose it)" };
+  }
+  if (!rt.sessionId) {
+    return isCursorCwdShared(session.id)
+      ? { level: "red", message: "cursor agent — no chat id: another agent works in this folder, so its chat cannot be told apart — relaunch it through Hadron" }
+      : { level: "yellow", message: "cursor agent — no chat id yet: cursor-agent was not launched by Hadron; the chat is taken from the folder once it records a turn" };
+  }
+  if (rt.restoreAttempt && rt.restoreAttempt.state === "failed") return { level: "red", message: "cursor agent — last resume failed — cursor-agent did not come up" };
+  if (session.cwd && UUID_RE.test(String(rt.sessionId)) && !cursorChatMeta(session.cwd, rt.sessionId)) {
+    const pinned = PINNED_CONFIDENCE.has(rt.confidence);
+    if (pinned && !rt.transcriptSeen) return { level: "yellow", message: `cursor agent — chat id known (${safeConfidence(rt.confidence)}), not resumable yet — cursor-agent has not created the chat under ${cursorChatsDir(session.cwd)} (folder trust pending?)` };
+    return { level: "red", message: `cursor agent — checkpoint chat missing under ${cursorChatsDir(session.cwd)} — \`cursor-agent --resume\` would start an empty chat` };
+  }
+  return { level: "green", message: `cursor agent — resumes as ${safeConfidence(rt.confidence) || "ambiguous"}` };
 }
 
 // The classifier — the row-classification table from the reliability plan. Order
@@ -978,7 +1008,7 @@ app.get("/api/doctor", async (req, res) => {
         ...rt,
         confidence: safeConfidence(rt.confidence) ?? undefined,
         lastObservedAt: safeTimestamp(rt.lastObservedAt, now) ?? undefined,
-      }, { generation: DOCTOR_SIM_GENERATION });
+      }, { generation: DOCTOR_SIM_GENERATION, runtimeName: session.backend === "cursor" ? "cursor" : "claude" });
       if (!d.resume) {
         finding.level = "red";
         finding.message = `would not resume — ${d.reason}`;
@@ -1508,6 +1538,8 @@ app.post("/api/sessions/:id/adopt", (req, res) => {
   const { id } = req.params;
   const session = sessions.get(id);
   if (!session || session.archived) return res.status(404).json({ error: "agent not found" });
+  // A cursor agent's chat id is Hadron's own (--resume at launch); adopt verifies claude transcripts.
+  if (session.backend === "cursor") return res.status(409).json({ error: "adopt takes a claude session id — a cursor agent's chat is the one Hadron launched it with" });
   const body = req.body || {};
   const v = verifyAdoption(session, body.sessionId, { force: body.force === true });
   if (!v.ok) return res.status(v.status).json({ error: v.error });
@@ -2875,8 +2907,10 @@ app.post("/api/sessions/:id/handoff", async (req, res) => {
     if (from === "claude") {
       try { exchanges = exchangesFromItems(conversationFor(s)?.conv.items || []); } catch {}
     } else {
+      // The chat the checkpoint names; without one, the newest written in the
+      // cursor agent's own lifetime.
       const since = Date.parse(s.handoff?.dir === "in" && s.handoff.at ? s.handoff.at : s.autostartedAt || "") || 0;
-      const file = newestCursorTranscript(cwdOk.cwd, since ? since - 60_000 : 0);
+      const file = (s.runtime?.sessionId && cursorTranscriptFor(cwdOk.cwd, s.runtime.sessionId, cursorProjectSlug(cwdOk.cwd))) || newestCursorTranscript(cwdOk.cwd, since ? since - 60_000 : 0);
       if (file) exchanges = exchangesFromCursorTranscript(file);
     }
     let changes = null;
@@ -3692,8 +3726,7 @@ function startMonitor(sessionId, { ensured = null } = {}) {
   detector.onAttention = (s) => saveAgentLocked(s).catch((e) => console.error(`[attention] ${sessionId}: ${e.message}`));
   monitors.set(sessionId, detector);
 
-  // cursor agents: no claude session identity, no auto-resume (yet) — no tracker.
-  if (session.backend === "cursor") { console.log(`Monitor started for session: ${sessionId} (cursor)`); return; }
+  if (session.backend === "cursor") { startCursorTracking(sessionId, session, detector, created); return; }
   const tracker = new RuntimeTracker(session, {
     save: saveRuntimeCheckpoint,
     // Shared-cwd agents can't be told apart by transcript scraping (the jsonl
@@ -3714,6 +3747,40 @@ function startMonitor(sessionId, { ensured = null } = {}) {
       .then((r) => { if (r.reason) console.log(`[resume] ${sessionId}: skip — ${r.reason}`); })
       .catch((e) => console.error(`[resume] ${sessionId}: ${e.message}`));
   }
+}
+
+// Another agent at work in this cwd? Any backend: a claude agent can run
+// `cursor-agent -p` from its Bash tool and write a chat into the same folder.
+// A parked or archived agent is not at work (a handoff source is parked while
+// its cursor peer runs). Unknown cwd → true.
+function isCursorCwdShared(sessionId) {
+  const me = sessions.get(sessionId);
+  if (!me || !me.cwd) return true;
+  return [...sessions.values()].some((s) => s.id !== sessionId && !s.archived && !s.parked && s.cwd === me.cwd);
+}
+// The cursor agent's checkpoint (cursor-resume.js) and, on a tmux session this
+// boot had to create, its resume through the agent's own cursor launcher.
+function startCursorTracking(sessionId, session, detector, created) {
+  const tracker = new CursorRuntimeTracker(session, { save: saveRuntimeCheckpoint, cwdShared: () => isCursorCwdShared(sessionId) });
+  runtimeTrackers.set(sessionId, tracker);
+  detector.onCmd = (cmd) => tracker.observe(cmd);
+  console.log(`Monitor started for session: ${sessionId} (cursor)`);
+  if (!created) return;
+  const own = getLaunchers()[session.launchCommand];
+  const launchArgv = own?.kind === "cursor" ? own.argv : getLaunchers().cursor.argv;
+  const cursor = { fileExists: (cwd, chat) => cursorChatExists(cwd, chat), isUp: (cmd) => cursorIsUp(cmd, session), where: (cwd) => cursorChatsDir(cwd) };
+  // Held for the whole resume — and only when one will happen (a new agent's
+  // autostart checks the same lock): a pending handoff delivery
+  // (resumeHandoffDeliveries) sees the fresh pane's shell too and would type a
+  // second launch into it.
+  const decision = decideResume(session.runtime, { runtimeName: "cursor" });
+  if (!decision.resume) { console.log(`[resume] ${sessionId}: skip — ${decision.reason}`); return; }
+  if (launchLocks.has(sessionId)) return;
+  launchLocks.add(sessionId);
+  performResume(session, tmuxSessionName(sessionId), { deliver: (...a) => withPaneLock(sessionId, () => deliverToPane(...a)), save: (s) => saveAgent(s), launchArgv, cursor })
+    .then((r) => { if (r.reason) console.log(`[resume] ${sessionId}: skip — ${r.reason}`); })
+    .catch((e) => console.error(`[resume] ${sessionId}: ${e.message}`))
+    .finally(() => launchLocks.delete(sessionId));
 }
 
 function stopMonitor(sessionId) {

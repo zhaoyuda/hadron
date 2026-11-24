@@ -618,6 +618,24 @@ npm test
 #                            when:idle → 400, /interrupt → 409; outside the suites: the annotation review trigger refuses a
 #                            cursor agent (dispatchError, nothing typed), a respawn on the other backend drops runtime/draft/
 #                            outbox, doctor's "not found on PATH" row only for the builtin `cursor` launcher)
+#   + test-cursor-resume.js (cursor identity + resume — server/cursor-resume.js: chats dir = md5 of the absolute cwd
+#                            (probed value), meta.json → {hasConversation, updatedAtMs} (another cwd / torn / path-shaped
+#                            id → null), newestCursorChat counts chats with a turn at or after since; cursorIsUp: pane command
+#                            cursor-agent|agent, or node with the detector's cursorProc; CursorRuntimeTracker: 3 polls to
+#                            settle → desiredRuntime cursor (urgent save), recordSpawnedSession = the launch's --resume id,
+#                            authoritative, next chat check at the short cadence; first turn → transcriptSeen; exclusive cwd
+#                            (no other unparked agent of ANY backend there — a claude's Bash can run cursor-agent -p) → a newer
+#                            chat with a turn is followed (correlated) only if the pane read working since the last check (an
+#                            idle agent never moves: a hand-run cursor-agent in a terminal writes there too), an older one never
+#                            pulls it back, a correlated chat gone is dropped, a pinned one kept; shared cwd never switches;
+#                            3 down polls in a row after settle → clean-exit tombstone (one tool-shell tick is not), before
+#                            settling none; decideResume(runtimeName) — a cursor checkpoint never resumes as claude; the boot
+#                            resume holds launchLocks only when decideResume says resume (a new agent's autostart takes the
+#                            same lock); `hadron adopt` on a cursor agent → 409. Live in test-handoff 4b/6b: the peer launched with --resume <uuid> = the record's
+#                            authoritative id, doctor green, the way back reads THAT chat's transcript (a newer one in the folder
+#                            is not carried), a revive opens a fresh chat, a reboot (new HADRON_BOOT_ID, pane gone) relaunches
+#                            --resume <same chat> → restoreAttempt ready, Ctrl+C → clean-exit tombstone + doctor "exited
+#                            cleanly"; the chat id is in no log line)
 #   + test-handoff.js       (handoff between backends, C3 — server/handoff.js + POST /api/sessions/:id/handoff {to,
 #                            launchCommand?} (token): the handoff text is written mechanically (title naming the source
 #                            backend + agent, why it stopped, cwd, task, checkpoint, git changes with +/−, the last 6

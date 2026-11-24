@@ -404,10 +404,11 @@ export class RuntimeTracker {
 // ── resume decision (pure) ───────────────────────────────────────────────
 // policy: "authoritative" (only spawn-injected ids) | "correlated" (default:
 // also content-validated scraped ids) | "off"
-export function decideResume(runtime, { now = Date.now(), ttlMs = RESUME_TTL_MS, policy = "correlated", generation = BOOT_GENERATION } = {}) {
+// runtimeName: "claude" | "cursor" — the program the checkpoint must say was running.
+export function decideResume(runtime, { now = Date.now(), ttlMs = RESUME_TTL_MS, policy = "correlated", generation = BOOT_GENERATION, runtimeName = "claude" } = {}) {
   if (policy === "off") return { resume: false, reason: "autoResume off" };
   if (!runtime) return { resume: false, reason: "no checkpoint" };
-  if (runtime.desiredRuntime !== "claude") return { resume: false, reason: "was not in claude" };
+  if (runtime.desiredRuntime !== runtimeName) return { resume: false, reason: `was not in ${runtimeName}` };
   if (runtime.cleanExitAt) return { resume: false, reason: "clean exit tombstone" };
   if (!runtime.sessionId) return { resume: false, reason: "no session id" };
   if (!UUID_RE.test(runtime.sessionId)) return { resume: false, reason: "malformed session id" };
@@ -437,9 +438,15 @@ export function readyPollsFrom(raw) {
 }
 const READY_POLLS = readyPollsFrom(process.env.HADRON_RESUME_READY_POLLS);
 
-export async function performResume(session, tmuxName, { deliver, save, generation = BOOT_GENERATION, log = console.log, launchArgv = ["claude"], readyPolls = READY_POLLS, fileExists = sessionFileExists }) {
+// cursor: { fileExists(cwd, chatId), isUp(cmd), where(cwd) } — the cursor backend's
+// chat check, process check and the folder its chats live in (cursor-resume.js).
+export async function performResume(session, tmuxName, { deliver, save, generation = BOOT_GENERATION, log = console.log, launchArgv = ["claude"], readyPolls = READY_POLLS, fileExists = sessionFileExists, cursor = null }) {
   const rt = session.runtime;
-  const decision = decideResume(rt, { generation });
+  const runtimeName = cursor ? "cursor" : "claude";
+  if (cursor) fileExists = cursor.fileExists;
+  const where = cursor ? cursor.where : claudeProjectDir;
+  const isUp = cursor ? cursor.isUp : isClaudeCmd;
+  const decision = decideResume(rt, { generation, runtimeName });
   if (!decision.resume) return decision;
   // Same check `hadron doctor` makes (doctor must never disagree with the code
   // that decides): an id whose transcript is gone from the agent's cwd — at
@@ -447,7 +454,7 @@ export async function performResume(session, tmuxName, { deliver, save, generati
   // resumable — would burn the 60 s readiness wait and an attempt on a
   // `--resume` that cannot succeed.
   if (session.cwd && !fileExists(session.cwd, decision.sessionId)) {
-    log(`[resume] ${session.id}: not resuming — the checkpoint's transcript is missing under ${claudeProjectDir(session.cwd)} (confidence ${rt.confidence || "ambiguous"})`);
+    log(`[resume] ${session.id}: not resuming — the checkpoint's ${cursor ? "chat" : "transcript"} is missing under ${where(session.cwd)} (confidence ${rt.confidence || "ambiguous"})`);
     return { resume: false, reason: "transcript missing" };
   }
 
@@ -469,18 +476,19 @@ export async function performResume(session, tmuxName, { deliver, save, generati
   for (let i = 0; i < readyPolls; i++) {
     await sleep(2000);
     const cmd = tmuxSafe(["display-message", "-t", tmuxName, "-p", "#{pane_current_command}"]);
-    if (isClaudeCmd(cmd)) { up = true; break; }
+    if (isUp(cmd)) { up = true; break; }
   }
   rt.restoreAttempt.state = up ? "ready" : "failed";
   save(session);
   if (!up) {
-    log(`[resume] ${session.id}: claude TUI did not come up`);
+    log(`[resume] ${session.id}: ${cursor ? "cursor-agent" : "claude TUI"} did not come up`);
     return { resume: true, failed: true };
   }
 
   // Opt-in per-agent follow-up (e.g. "/rc"). Default: none — an agent that
   // doesn't have the skill is never force-fed a slash command.
-  const cmd = typeof session.resumeCommand === "string" ? session.resumeCommand.replace(/[\x00-\x1f\x7f]/g, "").trim() : "";
+  // (never into cursor-agent: its screen is read before anything is typed, C1)
+  const cmd = !cursor && typeof session.resumeCommand === "string" ? session.resumeCommand.replace(/[\x00-\x1f\x7f]/g, "").trim() : "";
   if (cmd) {
     await sleep(6000); // let the resumed conversation finish loading
     deliver(tmuxName, cmd, true);
