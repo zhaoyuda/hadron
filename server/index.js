@@ -2064,6 +2064,7 @@ app.post("/api/sessions/:id/dialog/answer", async (req, res) => {
   if (action === "option") {
     opt = d.options.find((o) => o.n === n);
     if (!opt) return res.status(409).json({ error: `no option ${n}`, ...current() });
+    if (opt.disabled) return res.status(409).json({ error: `option ${n} is disabled in claude — its digit is ignored`, ...current() });
     if (d.numbered && n > 9) return res.status(409).json({ error: `option ${n} takes two digits — choose it in the terminal`, ...current() });
   }
   const tmuxName = tmuxSessionName(id);

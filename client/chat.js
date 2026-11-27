@@ -1081,6 +1081,9 @@ function chatDraftReplace(sessionId, placeholder, replacement) {
 const chatRequestId = () => `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 // Has claude recorded this handed message as a user turn? Same text (a clipped
 // bubble matches its prefix), recorded no earlier than the send.
+// A message that IS a slash command: "/name" (letters, digits, - _ : .) then
+// whitespace or the end — never a path like "/tmp/x is broken".
+const CHAT_SLASH_RE = /^\/[A-Za-z][\w:.-]*(?:\s|$)/;
 function chatCommandText(it) {
   if (it.name === "!") return `!${it.args || ""}`;
   return `/${String(it.name || "").replace(/^\//, "")}${it.args ? ` ${it.args}` : ""}`;
@@ -1090,7 +1093,14 @@ function chatObserved(m, row) {
   for (const it of m.items.values()) {
     if (Number.isFinite(t0) && it.at && Date.parse(it.at) < t0) continue;
     // A slash command is recorded as a command item, never a prompt.
-    if (it.kind === "command" && row.text.startsWith("/")) { if (chatCommandText(it) === row.text.trim()) return true; continue; }
+    if (it.kind === "command" && row.text.startsWith("/")) {
+      if (chatCommandText(it) === row.text.trim()) return true;
+      // claude records an alias by its full name (/rc → /remote-control): the
+      // first command recorded after the paste with the same arguments is it.
+      const args = row.text.trim().replace(/^\S+\s*/, "");
+      if (it.name !== "!" && (it.args || "") === args && row.handedAt && Date.parse(it.at || "") >= Date.parse(row.handedAt) - 1000) return true;
+      continue;
+    }
     // A `! command` (▷ Run) is recorded as bash input: name "!", the command trimmed.
     if (it.kind === "command" && row.text.startsWith("!")) { if (it.name === "!" && it.args === row.text.slice(1).trim()) return true; continue; }
     if (it.kind !== "user" || typeof it.text !== "string") continue;
@@ -1183,6 +1193,7 @@ function chatDialogCard(el, sessionId) {
       const twoDigits = d.numbered && o.n > 9;
       b.title = twoDigits ? "A two-digit option is chosen in the terminal" : d.numbered ? `Types ${o.n} into the dialog` : "Moves the ❯ there (from where the terminal has it when you click) and presses Enter";
       if (twoDigits) b.disabled = true;
+      if (o.disabled) { b.disabled = true; b.title = "Claude shows this option disabled — picking it does nothing"; }
       b.addEventListener("click", () => {
         if (o.text) askText("What should claude do? (optional — Send with nothing to just pick this)", (t) => answer({ action: "option", n: o.n, ...(t ? { text: t } : {}) }, `${o.n}`));
         else answer({ action: "option", n: o.n }, `${o.n}`);
@@ -1438,7 +1449,7 @@ function chatComposer(el, m, sessionId, { list }) {
   const label = (row) => {
     switch (row.state) {
       case "pending": case "sending": return "Sending…";
-      case "queued": return row.stale ? "Written for an earlier conversation — held" : row.idleOnly ? (row.text.startsWith("!") ? "Runs once claude is at its prompt" : row.text.startsWith("/") ? "Switches once claude is at its prompt" : "Sends once claude is at its prompt") : "Send after this turn";
+      case "queued": return row.stale ? "Written for an earlier conversation — held" : row.idleOnly ? (row.text.startsWith("!") ? "Runs once claude is at its prompt" : /^\/(model|effort)\b/.test(row.text) ? "Switches once claude is at its prompt" : row.text.startsWith("/") ? "Runs once claude is at its prompt" : "Sends once claude is at its prompt") : "Send after this turn";
       case "handed":
         if (m.readable === false || !m.conversationId) return "Handed to the terminal"; // no transcript to see it recorded in
         // Pasted while claude was working: claude takes it with its next step and
@@ -1600,7 +1611,11 @@ function chatComposer(el, m, sessionId, { list }) {
     local = rev ? { text: "", revision: rev, conversationId: null, synced: false, at: Date.now() } : null;
     chatSaveLocalDraft(sessionId, local); drawStatus();
     if (rev) sync();
-    const row = { id: chatRequestId(), text, state: "pending", at: new Date().toISOString(), server: false };
+    // A slash command (/rc, /compact …) pasted mid-turn would be queued by
+    // claude as prompt TEXT: it waits for the prompt, like the bar's /model.
+    const s = (typeof sessions !== "undefined" ? sessions : []).find((x) => x.id === sessionId);
+    const command = CHAT_SLASH_RE.test(text) && !(s && s.backend === "cursor");
+    const row = { id: chatRequestId(), text, state: "pending", at: new Date().toISOString(), server: false, ...(command ? { idleOnly: true } : {}) };
     m.outbox.set(row.id, row);
     post(row);
     ta.focus();

@@ -39,6 +39,12 @@ const fixture = (name) => readFileSync(join(FIXDIR, `${name}.txt`), "utf-8").spl
 
 console.log("1. parser — the installed claude's dialogs (fixtures captured from 2.1.304)");
 {
+  {
+    const m = parseDialog(fixture("blocked-dialog-model-disabled"));
+    const seven = m && m.options.find((o) => o.n === 7);
+    ok(m && m.options.length === 7 && m.options[1].selected, `/model picker: 7 options, ❯ on 2 (${m && m.options.length})`);
+    ok(seven && seven.disabled === true && m.options.filter((o) => o.disabled).length === 1, "…the \"(disabled)\" option is marked disabled, the others are not");
+  }
   const d = parseDialog(fixture("blocked-dialog-bash-v2"));
   ok(d && d.kind === "permission" && d.title === "Bash command", `Bash permission: kind ${d?.kind}, title "${d?.title}"`);
   ok(d.sections.some((s) => s.code && s.text === "rm -f zz.txt"), "the command is a code section");

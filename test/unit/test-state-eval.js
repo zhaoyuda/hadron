@@ -142,6 +142,8 @@ const EXPECTED = {
   "blocked-permission-allow-deny":     { state: "blocked", blockReason: "Needs input" },
   "blocked-selection-4options":        { state: "blocked", blockReason: "Needs input" },
   "blocked-dialog-bash-v2": { state: "blocked", blockReason: "Needs input" },
+  // claude 2.1.269's /model picker with an option it marks "(disabled)" (prod 2026-11-27, video-gen)
+  "blocked-dialog-model-disabled": { state: "blocked", blockReason: "Needs input" },
   // claude's "Ask rule … overrides auto mode" permission with the user's own ❯ line scrolled off:
   // the tool's "⎿ Waiting…" above the dialog is waiting for this answer, not work (prod 2026-11-13)
   "blocked-dialog-ask-rule": { state: "blocked", blockReason: "Needs input" },

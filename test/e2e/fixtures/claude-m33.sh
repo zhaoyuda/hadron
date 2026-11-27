@@ -27,6 +27,13 @@ with open(tr, "a") as f:
         a = text.split(" ", 1)[1]
         f.write(rec(f"<command-name>/effort</command-name>\n<command-message>effort</command-message>\n<command-args>{a}</command-args>"))
         f.write(rec(f"<local-command-stdout>Set effort level to {a}</local-command-stdout>"))
+    elif text == "/rc":
+        # claude 2.1.329: a local command is a SYSTEM record under its full name
+        def sysrec(content, sub="local_command"):
+            return json.dumps({"type": "system", "subtype": sub, "uuid": str(uuid.uuid4()), "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"), "level": "info", "isMeta": False, "content": content}) + "\n"
+        f.write(sysrec("<command-name>/remote-control</command-name>\n            <command-message>remote-control</command-message>\n            <command-args></command-args>"))
+        f.write(sysrec("<local-command-stdout></local-command-stdout>"))
+        f.write(sysrec("/remote-control is active", "bridge_status"))
     else:
         f.write(rec(text))
 PY

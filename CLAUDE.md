@@ -478,7 +478,8 @@ npm test
 #                            over-long record read whole up to MAX_LINE else skipped WHOLE and counted); items in file
 #                            order with `ord` (position) and `rev` (change counter): user / command (<command-name>
 #                            envelope → name+args; a `! cmd` run at claude's prompt — <bash-input> — is name "!") / output (<local-command-stdout>,
-#                            or <bash-stdout> + <bash-stderr>) / meta / assistant (blocks
+#                            or <bash-stdout> + <bash-stderr>; claude 2.1.3xx writes a local command and its output as system
+#                            `local_command` records with the same envelopes — /rc recorded as /remote-control) / meta / assistant (blocks
 #                            thinking|text|tool_use grouped by message.id across records, tool_result paired onto its
 #                            block — rev bumped, ord kept) / summary (isCompactSummary) / compact (compact_boundary)
 #                            / turn (turn_duration) / system / queue (queue-operation); sidechain ignored, uuids
@@ -558,7 +559,8 @@ npm test
 #                            amend line after Tab, AskUserQuestion, plan approval, folder trust) → {kind permission|plan|
 #                            question|select, title, question, sections [{code, text}] split on ╌ fences (code dedented),
 #                            options [{n, label, selected, detail? (the option's continuation lines), sepAbove?, text?
-#                            (opens a text field)}], hints, numbered, cancel (Esc hint or an "(esc)" option), amend (Tab
+#                            (opens a text field), disabled? (claude's "(disabled)" row — its digit is ignored: the card's
+#                            button is inert and the answer route 409s, prod 2026-11-27 an old claude's /model picker)}], hints, numbered, cancel (Esc hint or an "(esc)" option), amend (Tab
 #                            to amend), truncated?, key (8-hex hash of body + options + hints — the same screen is the
 #                            same key)}; the Tip line and the preamble above the first ──── are dropped, a body over 40
 #                            lines keeps its LAST lines (the question) and says truncated, non-dialog panes → null; on
@@ -921,7 +923,10 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                            inert), "switching…" until claude records the command (chatObserved matches command items), the menu says
 #                            /model also saves claude's default for new sessions; ■ only while working → POST /api/sessions/:id/interrupt
 #                            (one Escape under the pane lock; 409 unless the pane reads working or when a shell is in the foreground);
-#                            a recorded command is drawn with one slash)
+#                            a recorded command is drawn with one slash; a composer message that IS a slash command ("/rc", not "/tmp/x …")
+#                            is an idleOnly entry too — mid-turn claude would queue it as prompt text — and its row goes once
+#                            claude records the first command after the hand-off with the same args, under any name (an
+#                            alias is recorded by its full name: /rc → /remote-control, a system local_command record))
 #   + test/e2e/m34-permission-cards.js (permission cards under the chat view — chat.js chatDialogCard reading
 #                            `dialog` off the 3-s sessions poll, against test/e2e/fixtures/claude-m34.sh exec'd into the
 #                            pane: a .chat-dialog card between the outbox and the composer with the kind badge + title,

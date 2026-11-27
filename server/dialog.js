@@ -33,6 +33,9 @@ const HINT_RE = /Esc to cancel|Enter to (select|confirm)|Tab to amend|ctrl\+g|sh
 const TRANSCRIPT_MARK_RE = /^(\s*⎿|[●⏺✻]\s|❯\s(?!\d{1,2}\.\s))/;
 const TIP_RE = /^\s*Tip: /;
 // An option that opens a text field (or hands the typed text to claude).
+// claude greys out an option it cannot take ("Opus 5.5 (disabled)    Update to
+// 2.1.280+ …"): its digit is ignored, the dialog stays up.
+const DISABLED_RE = /\(disabled\)/i;
 const TEXT_OPTION_RE = /tell Claude what|Type something|Chat about this/i;
 
 function hash(str) {
@@ -84,7 +87,7 @@ function findOptions(lines) {
       const indent = l.length - l.trimStart().length;
       if (l.trim() && indent > numCol) { rows[rows.length - 1].detail.push(l.trim()); end = j; } else break; // deeper than the number: still the option
     }
-    const options = rows.map((r) => ({ n: r.n, label: r.label, selected: r.selected, ...(r.detail.length ? { detail: r.detail.join(" ") } : {}), ...(r.sepAbove ? { sepAbove: true } : {}), ...(TEXT_OPTION_RE.test(r.label) ? { text: true } : {}) }));
+    const options = rows.map((r) => ({ n: r.n, label: r.label, selected: r.selected, ...(r.detail.length ? { detail: r.detail.join(" ") } : {}), ...(r.sepAbove ? { sepAbove: true } : {}), ...(TEXT_OPTION_RE.test(r.label) ? { text: true } : {}), ...(DISABLED_RE.test(r.label) ? { disabled: true } : {}) }));
     return { start: rows[0].i, end, options, numbered: true };
   }
   // unnumbered: a ❯ line with sibling lines at the same indent as its text

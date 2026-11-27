@@ -312,6 +312,23 @@ function ingestUser(conv, rec) {
   if (qev) qev.taker = it;
 }
 
+// A local_command system record → a command or output item (true), else false.
+function localCommand(conv, id, at, text) {
+  const env = ENVELOPE_RE.exec(text);
+  if (env) {
+    const args = ARGS_RE.exec(text);
+    push(conv, { id, kind: "command", at, name: env[1].trim().slice(0, 200), args: args ? args[1].trim().slice(0, 2000) : "" });
+    return true;
+  }
+  const out = STDOUT_RE.exec(text);
+  if (out) {
+    noteSetting(conv, out[1]);
+    if (out[1].trim()) push(conv, { id, kind: "output", at, ...clipText(out[1], TEXT_MAX) });
+    return true;
+  }
+  return false;
+}
+
 function ingestAssistant(conv, rec) {
   if (seenBefore(conv, rec.uuid)) return;
   const m = rec.message;
@@ -395,6 +412,9 @@ export function ingestRecord(conv, rec) {
       if (sub === "compact_boundary") {
         const md = rec.compactMetadata && typeof rec.compactMetadata === "object" ? rec.compactMetadata : {};
         push(conv, { id, kind: "compact", at, trigger: str(md.trigger).slice(0, 40) || null, preTokens: Number.isFinite(md.preTokens) ? md.preTokens : null, ...clipText(str(rec.content), TEXT_MAX) });
+      } else if (sub === "local_command" && localCommand(conv, id, at, str(rec.content))) {
+        // claude 2.1.3xx writes a local slash command (/rc, /model …) and what it
+        // printed as system records — the same envelopes a user record carried.
       } else if (sub === "turn_duration") {
         push(conv, { id, kind: "turn", at, durationMs: Number.isFinite(rec.durationMs) ? rec.durationMs : null });
       } else {

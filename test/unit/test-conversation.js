@@ -133,6 +133,23 @@ console.log("\n[model + effort — the composer bar]");
   ok(w.model === "claude-x" && w.effort === "medium", `the next assistant record wins again, and the wire carries both (${w.model} / ${w.effort})`);
 }
 
+console.log("\n[claude 2.1.3xx: a local command is a system local_command record]");
+{
+  const conv = createConversation();
+  const sys = (content, i, subtype = "local_command") => ({ type: "system", subtype, uuid: uid(), timestamp: T(i), level: "info", isMeta: false, content });
+  ingestRecord(conv, sys("<command-name>/remote-control</command-name>\n            <command-message>remote-control</command-message>\n            <command-args></command-args>", 1));
+  ingestRecord(conv, sys("<local-command-stdout></local-command-stdout>", 2));
+  ingestRecord(conv, sys("/remote-control is active · Continue here", 3, "bridge_status"));
+  ingestRecord(conv, sys("<command-name>/model</command-name>\n<command-args>opus</command-args>", 4));
+  ingestRecord(conv, sys("<local-command-stdout>Set model to \u001b[1mOpus 5.5\u001b[22m</local-command-stdout>", 5));
+  ingestRecord(conv, sys("something else", 6));
+  const its = conversationWire(conv, {}).items;
+  const kinds = its.map((x) => x.kind).join(",");
+  ok(kinds === "command,system,command,output,system", `command, (empty output drawn as nothing), bridge status, command, output, other (${kinds})`);
+  ok(its[0].name === "/remote-control" && its[0].args === "" && its[2].name === "/model" && its[2].args === "opus", "…the command's name and args come from the envelope");
+  ok(conv.model === "Opus 5.5", `…and its output moves the composer bar's model (${conv.model})`);
+}
+
 console.log("\n[a ! command (bash mode) is a command item + its output]");
 {
   const conv = createConversation();

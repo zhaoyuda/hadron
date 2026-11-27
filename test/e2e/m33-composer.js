@@ -183,6 +183,16 @@ try {
   r.ok(await until(async () => (await row.count()) === 0 && (await chat.locator(".ci-user").count()) === before + 2), "…the bubble appears and the row goes");
   await api("PATCH", "/api/sessions/alpha", { state: "idle" });
 
+  // ── a slash command waits for the prompt (mid-turn claude would queue it as text) ──
+  await api("PATCH", "/api/sessions/alpha", { state: "working" });
+  await ta.type("/rc", { delay: 20 });
+  await ta.press("Enter");
+  r.ok(await until(async () => (await row.count()) === 1 && (await row.locator(".ob-st").textContent()) === "Runs once claude is at its prompt"), `"/rc" while working: the row says "${await row.locator(".ob-st").textContent().catch(() => "")}"`);
+  r.ok((await outbox())[0]?.idleOnly === true && !typed().join("\n").includes("/rc"), "…held on the record (idleOnly), nothing typed mid-turn");
+  await api("PATCH", "/api/sessions/alpha", { state: "idle" });
+  r.ok(await until(async () => typed().join("\n").includes("/rc"), 15000), "idle → /rc is delivered");
+  r.ok(await until(async () => (await row.count()) === 0 && (await chat.locator(".ci-cmd").filter({ hasText: "/remote-control" }).count()) === 1, 15000), "claude records it as /remote-control (a system record) → drawn as a command, the /rc row goes");
+
   // ── queued while blocked (a dialog is up: a paste would land in it) ──
   await api("PATCH", "/api/sessions/alpha", { state: "blocked" });
   await ta.type("等一下再发", { delay: 20 });
