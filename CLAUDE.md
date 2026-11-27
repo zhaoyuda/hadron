@@ -820,7 +820,7 @@ npm run test:e2e   # requires: npx playwright install chromium (one-time)
 #                            <id>.json.corrupt-<stamp>; the healthy sibling has no badge; on disk a valid placeholder with
 #                            recoveredFrom beside the untouched original)
 #   + test/e2e/m32-chat-view.js (chat view — client/chat.js over GET /api/sessions/:id/conversation (server/conversation.js,
-#                            test-conversation.js): "💬 Chat" in the file panel opens a Chat tab beside Primary: the prompt as a
+#                            test-conversation.js): "💬 Chat" in the file panel opens a Chat tab beside Primary (the last-reply strip above the work area is the terminal's summary — not drawn over the chat tab, back on Primary): the prompt as a
 #                            bubble (Chinese verbatim), the reply's markdown rendered, a code block with a sticky header (language +
 #                            Copy), Thinking one collapsed line, tool cards one line (name + path relative to the cwd, ✓/✗ from the
 #                            result; Edit expands to a −/+ diff of old/new with the error text; a Read + Edit run sits behind one summary row

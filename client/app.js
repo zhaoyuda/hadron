@@ -953,6 +953,7 @@ function switchTab(tabId) {
   if (tabId === activeTab) return;
   activeTab = tabId;
   renderWorkHeader();
+  if (renderLastReply()) deferredFit(); // the strip is hidden over the chat view
   renderWorkContent();
   if (tabId === "terminal") {
     deferredFit();
@@ -2089,7 +2090,10 @@ function renderLastReply() {
   const s = sessions.find((x) => x.id === activeSessionId);
   const t = s && s.transcript;
   const reply = t && t.lastReply;
-  if (!reply || !reply.text) {
+  // The strip is the terminal's summary of the last reply; the chat view draws
+  // that reply itself (rendered), so over the chat it is the same text twice.
+  const chatShown = layoutMode === "tabs" && activeTab === "chat";
+  if (!reply || !reply.text || chatShown) {
     el.hidden = true; el.innerHTML = ""; lastReplyKey = "";
     return heightChanged(el);
   }

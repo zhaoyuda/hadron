@@ -115,6 +115,7 @@ try {
   const chat = page.locator("#chat-container");
   r.ok(await until(async () => (await chat.locator(".ci-user").count()) === 1 && (await chat.locator(".ci-assistant").count()) === 3), `Chat tab paints the conversation: 1 prompt, 3 assistant messages (${await chat.locator(".ci").count()} items)`);
   r.ok(await chat.evaluate((el) => el.classList.contains("active")) && (await page.locator(".wh-tab.active").textContent()).includes("Chat"), "…the Chat tab is active in the work header");
+  r.ok(await until(async () => await page.locator("#last-reply").isHidden()), "…and the last-reply strip is not drawn over it (the chat shows that reply itself)");
   r.ok((await chat.locator(".ci-user .ci-bubble").textContent()).includes("帮我看看 src/app.js"), "the prompt is a bubble with the Chinese text verbatim");
   const m1 = chat.locator(".ci-assistant").first();
   r.ok((await m1.locator(".ci-md h2").textContent()) === "看一下文件" && (await m1.locator(".ci-md li").count()) === 2, "the reply's markdown is rendered (h2 + list)");
@@ -294,7 +295,9 @@ try {
   const placeId = await sc2.evaluate((el) => { const top = el.getBoundingClientRect().top; return [...el.querySelectorAll(".ci")].find((c) => c.getBoundingClientRect().bottom > top).dataset.id; });
   const placeY = await page.locator(`#chat-container .ci[data-id="${placeId}"]`).evaluate((el) => el.getBoundingClientRect().top);
   await openPrimary();
+  r.ok(await until(async () => await page.locator("#last-reply .lr-line").isVisible()), "Primary shows the last-reply strip (the terminal's summary of the reply)");
   await backToChat();
+  r.ok(await until(async () => await page.locator("#last-reply").isHidden()), "…back on the chat it is gone again");
   const sc3 = page.locator("#chat-container .chat-scroll");
   const placeY2 = await until(async () => Math.abs((await page.locator(`#chat-container .ci[data-id="${placeId}"]`).evaluate((el) => el.getBoundingClientRect().top)) - placeY) < 4);
   r.ok(placeY2 && (await page.locator("#chat-container .chat-jump").isVisible()), `Primary and back: the item the reader was on is where it was (${Math.round(placeY)}px), the pill is still there`);
